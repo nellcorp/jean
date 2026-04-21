@@ -26,7 +26,7 @@ RUN bun run build
 # ---------------------------------------------------------------------------
 # Use the Debian-based Rust image so the same libwebkit2gtk/GTK dev libs that
 # Tauri links against are available, and so glibc matches the runtime stage.
-FROM rust:1.85-bookworm AS rust-builder
+FROM rust:1.89-bookworm AS rust-builder
 
 # System deps required by tauri-build + the Rust crates we depend on.
 # Mirrors what the upstream release workflow installs on ubuntu-22.04.
