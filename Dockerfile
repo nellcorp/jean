@@ -77,13 +77,15 @@ ARG NODE_VERSION=22
 #   - libwebkit2gtk / libgtk / libappindicator / libglib: required by the jean
 #     binary even in headless mode (WebKit initializes GTK at startup).
 #   - xvfb: virtual framebuffer so WebKit/GTK can init without a real display.
-#   - git, tmux: used by jean + Claude Code at runtime for worktrees/sessions.
+#   - git, openssh-client, tmux: used by jean + Claude Code at runtime for
+#     worktrees/sessions (ssh is needed to clone/pull over git+ssh URLs).
 #   - curl, ca-certificates, gnupg: needed to install Node.js + for git HTTPS.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
     git \
+    openssh-client \
     tmux \
     xvfb \
     libwebkit2gtk-4.1-0 \
