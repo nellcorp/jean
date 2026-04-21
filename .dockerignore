@@ -1,0 +1,40 @@
+# Keep the build context small and reproducible.
+
+# Version control / editor / CI metadata
+.git
+.github
+.claude
+.cursor
+.vscode
+.gitignore
+.cursorignore
+.prettierignore
+
+# Build outputs (rebuilt inside the image)
+node_modules
+dist
+src-tauri/target
+
+# Test / dev artifacts that aren't needed to build
+test-results
+screenshots
+e2e
+tasks
+docs
+**/*.log
+
+# Local caches
+.DS_Store
+.idea
+coverage
+tmp
+
+# Lockfiles for other package managers (we use bun.lock)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Large media not needed for the server-side build
+logo*.png
+logo*.jpg
+logo*.jpeg

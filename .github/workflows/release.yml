@@ -145,7 +145,7 @@ jobs:
           fi
 
           SIGNATURE=$(cat "$SIG_FILE")
-          URL="https://github.com/coollabsio/jean/releases/download/${RELEASE_TAG}/${APPIMAGE_TAR}"
+          URL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${APPIMAGE_TAR}"
 
           # Download current latest.json, patch Linux platform entry, re-upload
           gh release download "$RELEASE_TAG" -p "latest.json" -D /tmp --clobber
@@ -168,7 +168,9 @@ jobs:
     name: Update Homebrew Tap
     needs: publish-tauri
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published'
+    if: |
+      github.event_name == 'release' && github.event.action == 'published'
+      && github.repository == 'coollabsio/jean'
 
     steps:
       - name: Extract version
@@ -179,7 +181,7 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           VERSION="${TAG#v}"
-          DMG_URL="https://github.com/coollabsio/jean/releases/download/$TAG/Jean_${VERSION}_universal.dmg"
+          DMG_URL="https://github.com/${{ github.repository }}/releases/download/$TAG/Jean_${VERSION}_universal.dmg"
 
           echo "Waiting for DMG at: $DMG_URL"
           for i in $(seq 1 30); do
