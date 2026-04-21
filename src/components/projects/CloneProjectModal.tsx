@@ -38,6 +38,7 @@ export function CloneProjectModal() {
   const [error, setError] = useState<string | null>(null)
 
   const repoName = useMemo(() => extractRepoName(url), [url])
+  const native = isNativeApp()
 
   // Reset state when modal closes
   useEffect(() => {
@@ -59,7 +60,7 @@ export function CloneProjectModal() {
   )
 
   const handleBrowse = useCallback(async () => {
-    if (!isNativeApp()) return
+    if (!native) return
 
     try {
       const { save } = await import('@tauri-apps/plugin-dialog')
@@ -75,16 +76,21 @@ export function CloneProjectModal() {
       // User cancelled
       if (error instanceof Error && error.message.includes('cancel')) return
     }
-  }, [repoName])
+  }, [native, repoName])
 
   const handleClone = useCallback(async () => {
     const trimmedUrl = url.trim()
+    const trimmedDestination = destination.trim()
     if (!trimmedUrl) {
       setError('Please enter a git URL.')
       return
     }
-    if (!destination) {
-      setError('Please choose a destination directory.')
+    if (!trimmedDestination) {
+      setError(
+        native
+          ? 'Please choose a destination directory.'
+          : 'Please enter a destination path.'
+      )
       return
     }
 
@@ -99,7 +105,7 @@ export function CloneProjectModal() {
     try {
       await cloneProject.mutateAsync({
         url: trimmedUrl,
-        path: destination,
+        path: trimmedDestination,
         parentId: addProjectParentFolderId ?? undefined,
       })
       toast.dismiss(toastId)
@@ -110,6 +116,7 @@ export function CloneProjectModal() {
   }, [
     url,
     destination,
+    native,
     repoName,
     cloneProject,
     addProjectParentFolderId,
@@ -144,7 +151,7 @@ export function CloneProjectModal() {
               disabled={cloneProject.isPending}
               autoFocus
               onKeyDown={e => {
-                if (e.key === 'Enter' && url.trim() && destination) {
+                if (e.key === 'Enter' && url.trim() && destination.trim()) {
                   e.preventDefault()
                   handleClone()
                 }
@@ -152,23 +159,47 @@ export function CloneProjectModal() {
             />
           </div>
 
-          {/* Destination picker */}
+          {/* Destination picker (native) or text input (web) */}
           <div className="space-y-1.5">
-            <Label className="text-xs">Destination</Label>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                className="flex-1 justify-start"
-                onClick={handleBrowse}
-                disabled={cloneProject.isPending}
-              >
-                <FolderOpen className="mr-2 h-4 w-4 shrink-0 text-muted-foreground" />
-                <span className="truncate text-sm">
-                  {destination || 'Choose destination...'}
-                </span>
-              </Button>
-            </div>
-            {destination && (
+            <Label htmlFor="clone-destination" className="text-xs">
+              Destination
+            </Label>
+            {native ? (
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  className="flex-1 justify-start"
+                  onClick={handleBrowse}
+                  disabled={cloneProject.isPending}
+                >
+                  <FolderOpen className="mr-2 h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate text-sm">
+                    {destination || 'Choose destination...'}
+                  </span>
+                </Button>
+              </div>
+            ) : (
+              <>
+                <Input
+                  id="clone-destination"
+                  placeholder="/projects/my-repo"
+                  value={destination}
+                  onChange={e => setDestination(e.target.value)}
+                  disabled={cloneProject.isPending}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && url.trim() && destination.trim()) {
+                      e.preventDefault()
+                      handleClone()
+                    }
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Enter an absolute path inside the server. The repository will
+                  be cloned into this directory.
+                </p>
+              </>
+            )}
+            {native && destination && (
               <p className="truncate text-xs text-muted-foreground">
                 {destination}
               </p>
@@ -194,7 +225,9 @@ export function CloneProjectModal() {
           </Button>
           <Button
             onClick={handleClone}
-            disabled={cloneProject.isPending || !url.trim() || !destination}
+            disabled={
+              cloneProject.isPending || !url.trim() || !destination.trim()
+            }
           >
             {cloneProject.isPending && (
               <Loader2 className="h-4 w-4 animate-spin" />
