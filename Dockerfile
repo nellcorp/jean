@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — frontend build (Vite/React via Bun)
 # ---------------------------------------------------------------------------
-FROM oven/bun:1.1-debian AS frontend-builder
+FROM oven/bun:1.2-debian AS frontend-builder
 
 WORKDIR /app
 
