@@ -97,6 +97,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     librsvg2-2 \
  && rm -rf /var/lib/apt/lists/*
 
+# Pre-populate the system-wide known_hosts with public git hosts so ssh
+# doesn't prompt (and doesn't try to fall back to ssh-askpass) when the
+# user's ~/.ssh is mounted read-only. Users can still override behaviour
+# via ~/.ssh/config if they need to.
+RUN mkdir -p /etc/ssh \
+ && ssh-keyscan -t rsa,ecdsa,ed25519 github.com gitlab.com bitbucket.org codeberg.org ssh.dev.azure.com \
+        > /etc/ssh/ssh_known_hosts 2>/dev/null \
+ && chmod 0644 /etc/ssh/ssh_known_hosts
+
 # Install Node.js (for Claude Code).
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
