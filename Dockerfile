@@ -125,6 +125,19 @@ RUN install -m 0755 -d /etc/apt/keyrings \
  && apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin docker-compose-plugin \
  && rm -rf /var/lib/apt/lists/*
 
+# Install Tailscale so the container can optionally join a tailnet at
+# startup via TS_AUTHKEY. Entrypoint runs `tailscaled` with
+# `--tun=userspace-networking`, so no /dev/net/tun or CAP_NET_ADMIN is
+# required at runtime.
+RUN install -m 0755 -d /usr/share/keyrings \
+ && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
+        -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+ && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list \
+        -o /etc/apt/sources.list.d/tailscale.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends tailscale \
+ && rm -rf /var/lib/apt/lists/*
+
 
 # Install Claude Code globally.
 RUN npm install -g @anthropic-ai/claude-code \

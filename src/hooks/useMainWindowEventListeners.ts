@@ -502,6 +502,21 @@ export function useMainWindowEventListeners() {
       const shortcut = eventToShortcutString(e)
       if (!shortcut) return
 
+      // In web mode, Cmd+` is reserved by the OS / browser (macOS window
+      // cycling). Require Ctrl+` for toggle_terminal so we don't fight the
+      // platform shortcut.
+      const isWeb =
+        typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)
+      if (
+        isWeb &&
+        e.code === 'Backquote' &&
+        e.metaKey &&
+        !e.ctrlKey &&
+        shortcut === keybindingsRef.current.toggle_terminal
+      ) {
+        return
+      }
+
       // Skip single-key shortcuts (no modifier) when focus is in input/textarea
       const hasModifier = e.metaKey || e.ctrlKey || e.altKey || e.shiftKey
       if (!hasModifier) {

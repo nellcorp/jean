@@ -23,6 +23,12 @@
 #   CODE_BASE_PATH   HTTP path prefix for the editor (default /code).
 #                    Must match what the reverse proxy uses.
 #   CODE_DISABLE     If "1", skip launching the web editor.
+#   TS_AUTHKEY       If set, start tailscaled and authenticate the node
+#                    with this Tailscale auth key so the container joins
+#                    the tailnet on boot. Leave unset to skip tailscale.
+#   TS_HOSTNAME      Node name advertised to the tailnet (default
+#                    jean-$(hostname)).
+#   TS_EXTRA_ARGS    Extra args forwarded to `tailscale up`.
 #
 # Security note: both services are started with auth disabled. Put a
 # reverse proxy with authentication in front before exposing them.
@@ -37,6 +43,11 @@ CODE_HOST="${CODE_HOST:-127.0.0.1}"
 CODE_PORT="${CODE_PORT:-3457}"
 CODE_BASE_PATH="${CODE_BASE_PATH:-/code}"
 CODE_DISABLE="${CODE_DISABLE:-0}"
+TS_AUTHKEY="${TS_AUTHKEY:-}"
+TS_HOSTNAME="${TS_HOSTNAME:-jean-$(hostname)}"
+TS_EXTRA_ARGS="${TS_EXTRA_ARGS:-}"
+TS_STATE_DIR="${TS_STATE_DIR:-/var/lib/tailscale}"
+TS_SOCKET="${TS_SOCKET:-/var/run/tailscale/tailscaled.sock}"
 
 # Clean up stale Xvfb lock files from previous (crashed) runs.
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}" 2>/dev/null || true
@@ -51,6 +62,35 @@ export DISPLAY=":${DISPLAY_NUM}"
 sleep 1
 
 CODE_PID=""
+TS_PID=""
+
+# Start tailscaled + join the tailnet if an auth key was supplied.
+# Userspace networking means no /dev/net/tun or CAP_NET_ADMIN needed.
+if [ -n "${TS_AUTHKEY}" ] && command -v tailscaled >/dev/null 2>&1; then
+    mkdir -p "${TS_STATE_DIR}" "$(dirname "${TS_SOCKET}")"
+    echo "[entrypoint] Starting tailscaled (userspace networking)"
+    tailscaled \
+        --tun=userspace-networking \
+        --socket="${TS_SOCKET}" \
+        --state="${TS_STATE_DIR}/tailscaled.state" \
+        > /var/log/tailscaled.log 2>&1 &
+    TS_PID=$!
+    # Wait for the control socket to appear before calling `up`.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ -S "${TS_SOCKET}" ] && break
+        sleep 0.5
+    done
+    echo "[entrypoint] Running tailscale up (hostname=${TS_HOSTNAME})"
+    # shellcheck disable=SC2086
+    tailscale --socket="${TS_SOCKET}" up \
+        --authkey="${TS_AUTHKEY}" \
+        --hostname="${TS_HOSTNAME}" \
+        --accept-dns=false \
+        ${TS_EXTRA_ARGS} \
+        || echo "[entrypoint] tailscale up failed; continuing without tailnet"
+else
+    echo "[entrypoint] TS_AUTHKEY unset or tailscaled missing; skipping tailscale"
+fi
 
 # Start openvscode-server in the background.
 if [ "${CODE_DISABLE}" != "1" ] && [ -x /opt/openvscode-server/bin/openvscode-server ]; then
@@ -72,6 +112,9 @@ fi
 cleanup() {
     if [ -n "${CODE_PID}" ] && kill -0 "${CODE_PID}" 2>/dev/null; then
         kill "${CODE_PID}" 2>/dev/null || true
+    fi
+    if [ -n "${TS_PID}" ] && kill -0 "${TS_PID}" 2>/dev/null; then
+        kill "${TS_PID}" 2>/dev/null || true
     fi
     if kill -0 "${XVFB_PID}" 2>/dev/null; then
         kill "${XVFB_PID}" 2>/dev/null || true
