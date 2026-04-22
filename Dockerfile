@@ -268,7 +268,7 @@ ENV HOME=/root \
     DISPLAY_NUM=99 \
     JEAN_HOST=0.0.0.0 \
     JEAN_PORT=3456 \
-    CODE_HOST=127.0.0.1 \
+    CODE_HOST=0.0.0.0 \
     CODE_PORT=3457 \
     CODE_BASE_PATH=/code
 WORKDIR /root
