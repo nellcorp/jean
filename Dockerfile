@@ -148,6 +148,7 @@ RUN npx playwright install --with-deps
 # python3 + pip + venv → ms-python.python extension
 # make → ms-vscode.makefile-tools extension
 # unzip → needed to extract terraform-ls zip
+# vim → terminal editor for interactive container use
 RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     shellcheck \
@@ -157,6 +158,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     unzip \
+    vim \
  && rm -rf /var/lib/apt/lists/*
 
 # --- Python tooling (ms-python.python extension) ---
@@ -190,6 +192,16 @@ RUN set -eux; \
 ENV GOPATH=/root/go
 ENV PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
 RUN go install golang.org/x/tools/gopls@latest
+
+# Login shells (e.g. the terminal spawned by openvscode-server) source
+# /etc/profile, which on Debian hardcodes PATH and drops the ENV-set
+# additions above. Drop a /etc/profile.d file so login shells keep Go's
+# bin dirs (and any other future tool dirs) on PATH.
+RUN printf '%s\n' \
+    'export GOPATH="${GOPATH:-/root/go}"' \
+    'export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"' \
+    > /etc/profile.d/jean-paths.sh \
+ && chmod 0644 /etc/profile.d/jean-paths.sh
 
 # --- HashiCorp terraform-ls (hashicorp.terraform extension) ---
 ARG TERRAFORM_LS_VERSION=0.38.6
