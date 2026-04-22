@@ -136,11 +136,12 @@ RUN install -m 0755 -d /usr/share/keyrings \
         -o /etc/apt/sources.list.d/tailscale.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends tailscale \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -s /usr/bin/tailscale /usr/local/bin/ts
 
 
-# Install Claude Code globally.
-RUN npm install -g @anthropic-ai/claude-code \
+# Install Claude Code + Yarn globally.
+RUN npm install -g @anthropic-ai/claude-code yarn \
  && npm cache clean --force
 
 # Install Playwright globally and its browser binaries + system deps.
