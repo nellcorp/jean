@@ -239,6 +239,21 @@ RUN set -eux; \
       -o /usr/local/bin/atlas \
  && chmod +x /usr/local/bin/atlas
 
+# --- Stripe CLI ---
+ARG STRIPE_CLI_VERSION=1.31.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) stripe_arch=linux_x86_64 ;; \
+      arm64) stripe_arch=linux_arm64 ;; \
+      *) echo "stripe-cli: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://github.com/stripe/stripe-cli/releases/download/v${STRIPE_CLI_VERSION}/stripe_${STRIPE_CLI_VERSION}_${stripe_arch}.tar.gz" \
+      -o /tmp/stripe.tgz; \
+    tar -xzf /tmp/stripe.tgz -C /usr/local/bin stripe; \
+    rm -f /tmp/stripe.tgz; \
+    chmod +x /usr/local/bin/stripe
+
 
 
 # ---------------------------------------------------------------------------
