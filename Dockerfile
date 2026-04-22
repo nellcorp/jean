@@ -83,6 +83,7 @@ ARG NODE_VERSION=22
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    wget \
     gnupg \
     git \
     openssh-client \
