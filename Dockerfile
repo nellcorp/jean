@@ -213,6 +213,18 @@ RUN set -eux; \
  && rm -f /tmp/tls.zip \
  && chmod +x /usr/local/bin/terraform-ls
 
+# --- Atlas (ariga.io) — DB schema migration CLI ---
+ARG ATLAS_VERSION=v0.38.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64|arm64) ;; \
+      *) echo "atlas: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://release.ariga.io/atlas/atlas-linux-${arch}-${ATLAS_VERSION}" \
+      -o /usr/local/bin/atlas \
+ && chmod +x /usr/local/bin/atlas
+
 
 
 # ---------------------------------------------------------------------------
