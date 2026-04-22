@@ -297,14 +297,14 @@ export function WorktreeDropdownMenu({
             </DropdownMenuItem>
           )}
 
-          {isNativeApp() && <DropdownMenuSeparator />}
+          <DropdownMenuSeparator />
 
-          {isNativeApp() && (
-            <DropdownMenuItem onClick={handleOpenInEditor}>
-              <Code className="mr-2 h-4 w-4" />
-              Open in {getEditorLabel(preferences?.editor)}
-            </DropdownMenuItem>
-          )}
+          <DropdownMenuItem onClick={handleOpenInEditor}>
+            <Code className="mr-2 h-4 w-4" />
+            {isNativeApp()
+              ? `Open in ${getEditorLabel(preferences?.editor)}`
+              : 'Open Editor'}
+          </DropdownMenuItem>
 
           {isNativeApp() && (
             <DropdownMenuItem onClick={handleOpenInFinder}>

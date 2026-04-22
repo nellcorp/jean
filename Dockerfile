@@ -130,6 +130,54 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 RUN npm install -g @anthropic-ai/claude-code \
  && npm cache clean --force
 
+# ---------------------------------------------------------------------------
+# Web editor: openvscode-server (Gitpod's build of VS Code web)
+# ---------------------------------------------------------------------------
+# We install it into the same container so the web UI can launch a full
+# editor scoped to any worktree via /code?folder=<abs-path>. Listens only
+# on 127.0.0.1:3457 — exposing it is the reverse proxy's job.
+ARG OPENVSCODE_SERVER_VERSION=1.109.5
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) ovs_arch=x64 ;; \
+      arm64) ovs_arch=arm64 ;; \
+      armhf) ovs_arch=armhf ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/openvscode-server; \
+    curl -fsSL "https://github.com/gitpod-io/openvscode-server/releases/download/openvscode-server-v${OPENVSCODE_SERVER_VERSION}/openvscode-server-v${OPENVSCODE_SERVER_VERSION}-linux-${ovs_arch}.tar.gz" \
+      | tar -xz --strip-components=1 -C /opt/openvscode-server; \
+    ln -s /opt/openvscode-server/bin/openvscode-server /usr/local/bin/openvscode-server
+
+# Pre-install language/tooling extensions from Open VSX so first-open of
+# any project has syntax highlighting + LSP ready to go. Anything that
+# fails to install (temporary Open VSX outage, a single extension being
+# unavailable, etc.) is logged but does not fail the build.
+RUN set -eux; \
+    for ext in \
+        ms-python.python \
+        rust-lang.rust-analyzer \
+        golang.go \
+        svelte.svelte-vscode \
+        ms-azuretools.vscode-docker \
+        exiasr.hadolint \
+        hashicorp.terraform \
+        sswg.swift-lang \
+        Prisma.prisma \
+        zxh404.vscode-proto3 \
+        Tim-Koehler.helm-intellisense \
+        bierner.markdown-mermaid \
+        timonwong.shellcheck \
+        ms-vscode.makefile-tools \
+        matthewpi.caddyfile-support \
+        mtxr.sqltools \
+    ; do \
+      /opt/openvscode-server/bin/openvscode-server --install-extension "$ext" \
+        || echo "WARN: failed to preinstall $ext, continuing"; \
+    done
+
+
 # Lay out the application under /opt/jean. The http_server's
 # resolve_dist_path() looks for a `dist/` directory next to the jean
 # executable as one of its fallbacks, which matches this layout exactly.
@@ -148,9 +196,13 @@ RUN chmod +x /entrypoint.sh
 ENV HOME=/root \
     DISPLAY_NUM=99 \
     JEAN_HOST=0.0.0.0 \
-    JEAN_PORT=3456
+    JEAN_PORT=3456 \
+    CODE_HOST=127.0.0.1 \
+    CODE_PORT=3457 \
+    CODE_BASE_PATH=/code
 WORKDIR /root
 
-EXPOSE 3456
+# 3456 = Jean HTTP/WS server, 3457 = openvscode-server (proxy as /code).
+EXPOSE 3456 3457
 
 ENTRYPOINT ["/entrypoint.sh"]

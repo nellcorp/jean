@@ -78,7 +78,27 @@ export function OpenInButton({
     preferences?.terminal
   )
 
-  if (!isNativeApp()) return null
+  // In web mode, render a simplified single-purpose button: "Open Editor"
+  // that launches the browser-based editor (openvscode-server). The native
+  // split-button shows Finder/Terminal/GitHub options that don't apply.
+  if (!isNativeApp()) {
+    if (!branch && !worktreePath) return null
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            className={`hidden h-7 rounded-md border border-border/50 bg-muted/50 px-2.5 text-xs text-muted-foreground hover:text-foreground sm:inline-flex ${className ?? ''}`}
+            onClick={() => openAction('editor')}
+          >
+            <Code className="mr-1.5 h-3.5 w-3.5" />
+            Open Editor
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Open Editor</TooltipContent>
+      </Tooltip>
+    )
+  }
 
   return (
     <div

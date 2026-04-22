@@ -137,6 +137,8 @@ pub struct AppPreferences {
     #[serde(default = "default_file_edit_mode")]
     pub file_edit_mode: String, // How to edit files: inline (CodeMirror) or external (VS Code, etc.)
     #[serde(default)]
+    pub web_editor_url: Option<String>, // Optional base URL for the browser-based editor (e.g. "/code" or "https://host/code"). When None + running in web mode, we fall back to a same-origin "/code" path.
+    #[serde(default)]
     pub ai_language: String, // Preferred language for AI responses (empty = default)
     #[serde(default = "default_allow_web_tools_in_plan_mode")]
     pub allow_web_tools_in_plan_mode: bool, // Allow WebFetch/WebSearch in plan mode without prompts
@@ -1418,6 +1420,7 @@ impl Default for AppPreferences {
             magic_prompt_efforts: MagicPromptReasoningEfforts::default(),
             magic_models_auto_initialized: false,
             file_edit_mode: default_file_edit_mode(),
+            web_editor_url: None,
             ai_language: String::new(),
             allow_web_tools_in_plan_mode: default_allow_web_tools_in_plan_mode(),
             waiting_sound: default_waiting_sound(),

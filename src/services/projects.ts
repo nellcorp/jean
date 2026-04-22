@@ -29,7 +29,7 @@ import { getFileManagerName } from '@/lib/platform'
 
 import type { AppPreferences } from '@/types/preferences'
 import type { AdvisoryContext } from '@/types/github'
-import { hasBackend } from '@/lib/environment'
+import { hasBackend, isNativeApp } from '@/lib/environment'
 import { openExternal, preOpenWindow } from '@/lib/platform'
 import { consumeWorktreeSilentReady } from '@/services/worktree-silent-ready'
 
@@ -2060,24 +2060,78 @@ export function useOpenWorktreeInTerminal() {
 }
 
 /**
- * Hook to open a worktree in Editor
+ * Resolve the URL for the web editor, given an optional user override.
+ *
+ * Priority:
+ *   1. Explicit `override` (user preference), used verbatim if it includes
+ *      a scheme (https://host/code) or as a same-origin prefix otherwise.
+ *   2. Default to "/code" on the same origin as the Jean web UI.
+ *
+ * Returns a URL like `https://host/code/?folder=<worktreePath>`.
+ */
+export function buildWebEditorUrl(
+  worktreePath: string,
+  override: string | null | undefined
+): string {
+  const trimmed = (override ?? '').trim()
+  let base: string
+  if (trimmed) {
+    // If the override has a scheme, use it verbatim; otherwise treat it as
+    // a same-origin path prefix.
+    base = /^https?:\/\//i.test(trimmed)
+      ? trimmed.replace(/\/+$/, '')
+      : `${window.location.origin}${trimmed.startsWith('/') ? '' : '/'}${trimmed.replace(/\/+$/, '')}`
+  } else {
+    base = `${window.location.origin}/code`
+  }
+  return `${base}/?folder=${encodeURIComponent(worktreePath)}`
+}
+
+/**
+ * Hook to open a worktree in the configured editor.
+ *
+ * - Native (Tauri desktop): spawns the user's native editor (VS Code, Cursor,
+ *   Zed, etc.) via the `open_worktree_in_editor` Rust command.
+ * - Web (browser / headless Jean): opens the bundled openvscode-server in a
+ *   new tab, scoped to the worktree via `?folder=<path>`. The URL prefix is
+ *   controlled by the `web_editor_url` preference (defaults to same-origin
+ *   `/code`, which is what the docker-compose + Caddy setup expects).
  */
 export function useOpenWorktreeInEditor() {
+  const queryClient = useQueryClient()
+
   return useMutation({
     mutationFn: async ({
       worktreePath,
       editor,
+      preOpenedWindow,
     }: {
       worktreePath: string
       editor?: string
+      /** Pre-opened blank window (pass from a user-gesture context to bypass
+       *  popup blockers in web mode). */
+      preOpenedWindow?: Window | null
     }): Promise<void> => {
       if (!isTauri()) {
-        throw new Error('Not in Tauri context')
+        throw new Error('No backend available')
       }
 
-      logger.debug('Opening worktree in Editor', { worktreePath, editor })
-      await invoke('open_worktree_in_editor', { worktreePath, editor })
-      logger.info('Opened worktree in Editor')
+      if (isNativeApp()) {
+        logger.debug('Opening worktree in native editor', {
+          worktreePath,
+          editor,
+        })
+        await invoke('open_worktree_in_editor', { worktreePath, editor })
+        logger.info('Opened worktree in native editor')
+        return
+      }
+
+      // Web mode: open the browser-based editor.
+      const prefs = queryClient.getQueryData<AppPreferences>(['preferences'])
+      const url = buildWebEditorUrl(worktreePath, prefs?.web_editor_url)
+      logger.debug('Opening worktree in web editor', { worktreePath, url })
+      await openExternal(url, preOpenedWindow)
+      logger.info('Opened worktree in web editor')
     },
     onError: error => {
       const message =

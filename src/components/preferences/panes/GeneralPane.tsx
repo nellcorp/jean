@@ -2449,6 +2449,27 @@ export const GeneralPane: React.FC = () => {
             </InlineField>
           )}
 
+          {!isNativeApp() && (
+            <InlineField
+              label="Web Editor URL"
+              description="Override where 'Open Editor' sends you. Blank = same-origin /code (default)."
+            >
+              <Input
+                className="w-full sm:min-w-96"
+                placeholder="/code or https://host/code"
+                value={preferences?.web_editor_url ?? ''}
+                onChange={e => {
+                  const next = e.target.value.trim()
+                  if (preferences) {
+                    patchPreferences.mutate({
+                      web_editor_url: next === '' ? null : next,
+                    })
+                  }
+                }}
+              />
+            </InlineField>
+          )}
+
           {isNativeApp() && (
             <InlineField
               label="Terminal"

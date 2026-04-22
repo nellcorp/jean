@@ -111,14 +111,14 @@ export function WorktreeContextMenu({
           </ContextMenuItem>
         )}
 
-        {isNativeApp() && <ContextMenuSeparator />}
+        <ContextMenuSeparator />
 
-        {isNativeApp() && (
-          <ContextMenuItem onClick={handleOpenInEditor}>
-            <Code className="mr-2 h-4 w-4" />
-            Open in {getEditorLabel(preferences?.editor)}
-          </ContextMenuItem>
-        )}
+        <ContextMenuItem onClick={handleOpenInEditor}>
+          <Code className="mr-2 h-4 w-4" />
+          {isNativeApp()
+            ? `Open in ${getEditorLabel(preferences?.editor)}`
+            : 'Open Editor'}
+        </ContextMenuItem>
 
         {isNativeApp() && (
           <ContextMenuItem onClick={handleOpenInFinder}>

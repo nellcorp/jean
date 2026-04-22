@@ -102,7 +102,7 @@ export function OpenInModal() {
     const allOptions: ModalOption[] = [
       {
         id: 'editor',
-        label: getEditorLabel(preferences?.editor),
+        label: isNative ? getEditorLabel(preferences?.editor) : 'Open Editor',
         icon: Code,
         key: 'E',
       },
@@ -136,9 +136,11 @@ export function OpenInModal() {
         : []),
     ]
 
-    return isNative
-      ? allOptions
-      : allOptions.filter(opt => opt.id === 'github' || opt.id === 'open-pr')
+    if (isNative) return allOptions
+    // Web mode: keep editor (opens the web VS Code), drop Finder/Terminal.
+    return allOptions.filter(
+      opt => opt.id === 'editor' || opt.id === 'github' || opt.id === 'open-pr'
+    )
   }, [
     preferences?.editor,
     preferences?.terminal,
@@ -190,7 +192,7 @@ export function OpenInModal() {
   const handleOpenChange = useCallback(
     (open: boolean) => {
       if (open && !hasInitializedRef.current) {
-        setSelectedOption(isNative ? 'editor' : 'github')
+        setSelectedOption('editor')
         hasInitializedRef.current = true
       }
       setOpenInModalOpen(open)
