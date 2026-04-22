@@ -86,6 +86,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     git \
     openssh-client \
+    lsof \
     tmux \
     xvfb \
     libwebkit2gtk-4.1-0 \

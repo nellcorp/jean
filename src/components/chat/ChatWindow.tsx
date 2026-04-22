@@ -135,7 +135,6 @@ import { buildMcpConfigJson } from '@/services/mcp'
 import type { McpServerInfo } from '@/types/chat'
 import { useGitStatus } from '@/services/git-status'
 import { useRemotePicker } from '@/hooks/useRemotePicker'
-import { isNativeApp } from '@/lib/environment'
 import { supportsAdaptiveThinking } from '@/lib/model-utils'
 import { copyToClipboard, copyHtmlToClipboard } from '@/lib/clipboard'
 import { useClaudeCliStatus } from '@/services/claude-cli'
@@ -2897,9 +2896,8 @@ export function ChatWindow({
                   </div>
                 </ResizablePanel>
 
-                {/* Terminal panel - only render when panel is open (native app only, not in modal) */}
+                {/* Terminal panel - only render when panel is open (hidden in modal view) */}
                 {!isModal &&
-                  isNativeApp() &&
                   activeWorktreePath &&
                   terminalPanelOpen && (
                     <>

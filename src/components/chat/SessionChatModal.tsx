@@ -797,15 +797,13 @@ export function SessionChatModal({
             )}
           />
         )}
-        {isNativeApp() &&
-          isModalTerminalOpen &&
-          modalTerminalDockMode === 'left' && (
-            <ModalTerminalDrawer
-              worktreeId={worktreeId}
-              worktreePath={worktreePath}
-              dockMode="left"
-            />
-          )}
+        {isModalTerminalOpen && modalTerminalDockMode === 'left' && (
+          <ModalTerminalDrawer
+            worktreeId={worktreeId}
+            worktreePath={worktreePath}
+            dockMode="left"
+          />
+        )}
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="shrink-0 border-b sm:text-left">
             <div
@@ -1406,25 +1404,21 @@ export function SessionChatModal({
           </div>
         </div>
 
-        {isNativeApp() &&
-          isModalTerminalOpen &&
-          modalTerminalDockMode === 'right' && (
-            <ModalTerminalDrawer
-              worktreeId={worktreeId}
-              worktreePath={worktreePath}
-              dockMode="right"
-            />
-          )}
-        {isNativeApp() &&
-          isModalTerminalOpen &&
-          modalTerminalDockMode === 'bottom' && (
-            <ModalTerminalDrawer
-              worktreeId={worktreeId}
-              worktreePath={worktreePath}
-              dockMode="bottom"
-            />
-          )}
-        {isNativeApp() && modalTerminalDockMode === 'floating' && (
+        {isModalTerminalOpen && modalTerminalDockMode === 'right' && (
+          <ModalTerminalDrawer
+            worktreeId={worktreeId}
+            worktreePath={worktreePath}
+            dockMode="right"
+          />
+        )}
+        {isModalTerminalOpen && modalTerminalDockMode === 'bottom' && (
+          <ModalTerminalDrawer
+            worktreeId={worktreeId}
+            worktreePath={worktreePath}
+            dockMode="bottom"
+          />
+        )}
+        {modalTerminalDockMode === 'floating' && (
           <ModalTerminalDrawer
             worktreeId={worktreeId}
             worktreePath={worktreePath}
