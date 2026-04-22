@@ -130,6 +130,79 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 RUN npm install -g @anthropic-ai/claude-code \
  && npm cache clean --force
 
+# Install Playwright globally and its browser binaries + system deps.
+# `playwright install --with-deps` fetches Chromium, Firefox, and WebKit
+# plus every shared library they need on Debian bookworm.
+RUN npx playwright install --with-deps
+
+# ---------------------------------------------------------------------------
+# Language runtimes & LSP servers
+# ---------------------------------------------------------------------------
+# Provide full LSP support for the pre-installed VS Code extensions.
+# Sorted roughly by image-size impact (smallest first) so the heaviest
+# layers change only when their specific ARGs are bumped.
+
+# --- Apt-installable tools ---
+# shellcheck  → timonwong.shellcheck extension
+# protobuf-compiler + clang-format → zxh404.vscode-proto3 extension
+# python3 + pip + venv → ms-python.python extension
+# make → ms-vscode.makefile-tools extension
+# unzip → needed to extract terraform-ls zip
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make \
+    shellcheck \
+    protobuf-compiler \
+    clang-format \
+    python3 \
+    python3-pip \
+    python3-venv \
+    unzip \
+ && rm -rf /var/lib/apt/lists/*
+
+# --- Python tooling (ms-python.python extension) ---
+# ruff: linter + formatter, pyright: type-checker / LSP, uv: fast package manager
+RUN pip install --break-system-packages ruff pyright uv
+
+# --- Hadolint (exiasr.hadolint extension) ---
+ARG HADOLINT_VERSION=2.14.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) hl_arch=x86_64 ;; \
+      arm64) hl_arch=arm64 ;; \
+      *) echo "hadolint: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-${hl_arch}" \
+      -o /usr/local/bin/hadolint \
+ && chmod +x /usr/local/bin/hadolint
+
+# --- Helm (Tim-Koehler.helm-intellisense extension) ---
+RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+
+
+# --- Go + gopls (golang.go extension) ---
+ARG GO_VERSION=1.26.2
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${arch}.tar.gz" \
+      | tar -xz -C /usr/local
+ENV GOPATH=/root/go
+ENV PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+RUN go install golang.org/x/tools/gopls@latest
+
+# --- HashiCorp terraform-ls (hashicorp.terraform extension) ---
+ARG TERRAFORM_LS_VERSION=0.38.6
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    curl -fsSL "https://releases.hashicorp.com/terraform-ls/${TERRAFORM_LS_VERSION}/terraform-ls_${TERRAFORM_LS_VERSION}_linux_${arch}.zip" \
+      -o /tmp/tls.zip \
+ && unzip /tmp/tls.zip -d /usr/local/bin \
+ && rm -f /tmp/tls.zip \
+ && chmod +x /usr/local/bin/terraform-ls
+
+
+
 # ---------------------------------------------------------------------------
 # Web editor: openvscode-server (Gitpod's build of VS Code web)
 # ---------------------------------------------------------------------------
@@ -157,13 +230,11 @@ RUN set -eux; \
 RUN set -eux; \
     for ext in \
         ms-python.python \
-        rust-lang.rust-analyzer \
         golang.go \
         svelte.svelte-vscode \
         ms-azuretools.vscode-docker \
         exiasr.hadolint \
         hashicorp.terraform \
-        sswg.swift-lang \
         Prisma.prisma \
         zxh404.vscode-proto3 \
         Tim-Koehler.helm-intellisense \
