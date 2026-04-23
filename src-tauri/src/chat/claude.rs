@@ -1003,6 +1003,12 @@ pub fn tail_claude_output(
     let mut user_cancelled = false; // True only for explicit user cancel (not process death)
     let mut usage: Option<UsageData> = None;
     let mut error_lines: Vec<String> = Vec::new();
+    // Synthesized denials: Claude CLI doesn't populate `permission_denials` in
+    // the result message when a tool fails the `--allowedTools` check (it just
+    // returns "This command requires approval" as the tool_result text). We
+    // detect those results, map them back to the originating tool_use, and
+    // merge them into the denial event emitted on the result message.
+    let mut synthesized_denials: Vec<PermissionDenial> = Vec::new();
 
     // Timeout configuration:
     // - Startup timeout: Wait up to 120 seconds for first Claude output (API connection time)
@@ -1264,6 +1270,29 @@ pub fn tail_claude_output(
                                         tc.output = Some(output.clone());
                                     }
 
+                                    // Synthesize a denial when Claude CLI rejected the tool for
+                                    // permissions (happens when the tool isn't in --allowedTools
+                                    // and there's no --permission-prompt-tool). The result text
+                                    // is the literal string below; detect it and map back to the
+                                    // originating tool_use so the UI can prompt for approval.
+                                    if output.contains("This command requires approval") {
+                                        if let Some(tc) =
+                                            tool_calls.iter().find(|t| t.id == tool_id)
+                                        {
+                                            if !synthesized_denials
+                                                .iter()
+                                                .any(|d| d.tool_use_id == tc.id)
+                                            {
+                                                synthesized_denials.push(PermissionDenial {
+                                                    tool_name: tc.name.clone(),
+                                                    tool_use_id: tc.id.clone(),
+                                                    tool_input: tc.input.clone(),
+                                                    rpc_id: None,
+                                                });
+                                            }
+                                        }
+                                    }
+
                                     // Emit tool_result event
                                     let event = ToolResultEvent {
                                         session_id: session_id.to_string(),
@@ -1322,56 +1351,78 @@ pub fn tail_claude_output(
                         );
                     }
 
-                    // Check for permission denials and emit event
+                    // Collect permission denials from the CLI result and merge with the
+                    // denials we synthesized from "This command requires approval"
+                    // tool_result text. Newer CLI builds don't always populate
+                    // `permission_denials`, so the synthesized list is often the
+                    // only signal the UI gets.
+                    let mut denial_events: Vec<PermissionDenial> = Vec::new();
+                    let mut seen: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+
+                    let is_plan_cleanup = |d: &PermissionDenial| -> bool {
+                        if d.tool_name != "Bash" {
+                            return false;
+                        }
+                        let cmd = d
+                            .tool_input
+                            .get("command")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("");
+                        cmd.contains(".claude/plans/") && cmd.starts_with("rm ")
+                    };
+
                     if let Some(denials) = msg.get("permission_denials").and_then(|v| v.as_array())
                     {
-                        if !denials.is_empty() {
-                            let denial_events: Vec<PermissionDenial> = denials
-                                .iter()
-                                .filter_map(|d| {
-                                    let tool_name = d.get("tool_name")?.as_str()?;
-                                    let tool_input = d.get("tool_input")?;
-
-                                    // Skip plan file cleanup denials (benign Claude housekeeping)
-                                    if tool_name == "Bash" {
-                                        if let Some(cmd) =
-                                            tool_input.get("command").and_then(|c| c.as_str())
-                                        {
-                                            if cmd.contains(".claude/plans/")
-                                                && cmd.starts_with("rm ")
-                                            {
-                                                log::trace!(
-                                                    "Ignoring plan cleanup denial: {}",
-                                                    cmd
-                                                );
-                                                return None;
-                                            }
-                                        }
-                                    }
-
-                                    Some(PermissionDenial {
-                                        tool_name: tool_name.to_string(),
-                                        tool_use_id: d.get("tool_use_id")?.as_str()?.to_string(),
-                                        tool_input: tool_input.clone(),
-                                        rpc_id: None,
-                                    })
-                                })
-                                .collect();
-
-                            if !denial_events.is_empty() {
-                                log::trace!(
-                                    "Emitting permission_denied event with {} denials",
-                                    denial_events.len()
-                                );
-                                let event = PermissionDeniedEvent {
-                                    session_id: session_id.to_string(),
-                                    worktree_id: worktree_id.to_string(),
-                                    denials: denial_events,
-                                };
-                                if let Err(e) = app.emit_all("chat:permission_denied", &event) {
-                                    log::error!("Failed to emit permission_denied: {e}");
-                                }
+                        for d in denials {
+                            let Some(tool_name) = d.get("tool_name").and_then(|v| v.as_str()) else {
+                                continue;
+                            };
+                            let Some(tool_use_id) =
+                                d.get("tool_use_id").and_then(|v| v.as_str())
+                            else {
+                                continue;
+                            };
+                            let Some(tool_input) = d.get("tool_input") else {
+                                continue;
+                            };
+                            let denial = PermissionDenial {
+                                tool_name: tool_name.to_string(),
+                                tool_use_id: tool_use_id.to_string(),
+                                tool_input: tool_input.clone(),
+                                rpc_id: None,
+                            };
+                            if is_plan_cleanup(&denial) {
+                                log::trace!("Ignoring plan cleanup denial");
+                                continue;
                             }
+                            if seen.insert(denial.tool_use_id.clone()) {
+                                denial_events.push(denial);
+                            }
+                        }
+                    }
+
+                    for d in synthesized_denials.drain(..) {
+                        if is_plan_cleanup(&d) {
+                            continue;
+                        }
+                        if seen.insert(d.tool_use_id.clone()) {
+                            denial_events.push(d);
+                        }
+                    }
+
+                    if !denial_events.is_empty() {
+                        log::trace!(
+                            "Emitting permission_denied event with {} denials",
+                            denial_events.len()
+                        );
+                        let event = PermissionDeniedEvent {
+                            session_id: session_id.to_string(),
+                            worktree_id: worktree_id.to_string(),
+                            denials: denial_events,
+                        };
+                        if let Err(e) = app.emit_all("chat:permission_denied", &event) {
+                            log::error!("Failed to emit permission_denied: {e}");
                         }
                     }
 
