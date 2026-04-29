@@ -176,6 +176,56 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vim \
  && rm -rf /var/lib/apt/lists/*
 
+# --- Developer toolbox ---
+# Compilers + build helpers, network/diagnostic tools, file/text utilities,
+# DB clients, archive formats, and shell ergonomics. Mirrors what a typical
+# Linux dev workstation has so the container is usable for general-purpose
+# work, not just running the Jean binary.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    clang \
+    cmake \
+    pkg-config \
+    autoconf \
+    automake \
+    libtool \
+    net-tools \
+    iputils-ping \
+    iputils-tracepath \
+    traceroute \
+    dnsutils \
+    iproute2 \
+    netcat-openbsd \
+    telnet \
+    mtr-tiny \
+    tcpdump \
+    htop \
+    strace \
+    ltrace \
+    jq \
+    nano \
+    less \
+    file \
+    tree \
+    zip \
+    bzip2 \
+    xz-utils \
+    ripgrep \
+    fd-find \
+    rsync \
+    postgresql-client \
+    default-mysql-client \
+    sqlite3 \
+    redis-tools \
+    screen \
+    bash-completion \
+    man-db \
+    locales \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /usr/bin/fdfind /usr/local/bin/fd
+
 # --- Python tooling (ms-python.python extension) ---
 # ruff: linter + formatter, pyright: type-checker / LSP, uv: fast package manager
 RUN pip install --break-system-packages ruff pyright uv
