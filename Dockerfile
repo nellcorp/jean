@@ -258,6 +258,14 @@ ENV GOPATH=/root/go
 ENV PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
 RUN go install golang.org/x/tools/gopls@latest
 
+# --- codehealth (nellcorp internal CLI) ---
+# Install system-wide via GOBIN=/usr/local/bin so every user/shell in
+# the container sees `codehealth` on PATH without relying on /root/go/bin.
+# Main package lives under cmd/codehealth.
+ARG CODEHEALTH_VERSION=main
+RUN GOBIN=/usr/local/bin go install \
+        github.com/nellcorp/codehealth/cmd/codehealth@${CODEHEALTH_VERSION}
+
 # Login shells (e.g. the terminal spawned by openvscode-server) source
 # /etc/profile, which on Debian hardcodes PATH and drops the ENV-set
 # additions above. Drop a /etc/profile.d file so login shells keep Go's
