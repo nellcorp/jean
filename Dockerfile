@@ -146,9 +146,11 @@ RUN npm install -g @anthropic-ai/claude-code yarn \
  && npm cache clean --force
 
 # Install Playwright globally and its browser binaries + system deps.
-# `playwright install --with-deps` fetches Chromium, Firefox, and WebKit
-# plus every shared library they need on Debian bookworm.
-RUN npx playwright install --with-deps
+# Chromium-only — Firefox + WebKit add ~700MB and Jean drives the browser
+# pool with Chromium. Pass extra browsers via PLAYWRIGHT_BROWSERS at build
+# time if a workflow needs them.
+ARG PLAYWRIGHT_BROWSERS=chromium
+RUN npx playwright install --with-deps ${PLAYWRIGHT_BROWSERS}
 
 # ---------------------------------------------------------------------------
 # Language runtimes & LSP servers
@@ -256,15 +258,18 @@ RUN set -eux; \
       | tar -xz -C /usr/local
 ENV GOPATH=/root/go
 ENV PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
-RUN go install golang.org/x/tools/gopls@latest
 
-# --- codehealth (nellcorp internal CLI) ---
-# Install system-wide via GOBIN=/usr/local/bin so every user/shell in
-# the container sees `codehealth` on PATH without relying on /root/go/bin.
-# Main package lives under cmd/codehealth.
-ARG CODEHEALTH_VERSION=v0.2.0
-RUN GOBIN=/usr/local/bin go install \
-        github.com/nellcorp/codehealth/cmd/codehealth@${CODEHEALTH_VERSION}
+# --- gopls + codehealth (nellcorp internal CLI) ---
+# Combined into one RUN so the trailing `go clean -modcache` actually
+# shrinks the layer — cleaning in a later layer would just whiteout the
+# files without freeing space. codehealth is dropped into /usr/local/bin
+# so every user/shell sees it on PATH without relying on /root/go/bin.
+ARG CODEHEALTH_VERSION=v0.2.1
+RUN go install golang.org/x/tools/gopls@latest \
+ && GOBIN=/usr/local/bin go install \
+        github.com/nellcorp/codehealth/cmd/codehealth@${CODEHEALTH_VERSION} \
+ && go clean -modcache \
+ && rm -rf /root/.cache/go-build
 
 # Login shells (e.g. the terminal spawned by openvscode-server) source
 # /etc/profile, which on Debian hardcodes PATH and drops the ENV-set
