@@ -264,7 +264,7 @@ ENV PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
 # shrinks the layer — cleaning in a later layer would just whiteout the
 # files without freeing space. codehealth is dropped into /usr/local/bin
 # so every user/shell sees it on PATH without relying on /root/go/bin.
-ARG CODEHEALTH_VERSION=v0.2.1
+ARG CODEHEALTH_VERSION=v0.2.2
 RUN go install golang.org/x/tools/gopls@latest \
  && GOBIN=/usr/local/bin go install \
         github.com/nellcorp/codehealth/cmd/codehealth@${CODEHEALTH_VERSION} \
