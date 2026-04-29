@@ -1272,10 +1272,14 @@ pub fn tail_claude_output(
 
                                     // Synthesize a denial when Claude CLI rejected the tool for
                                     // permissions (happens when the tool isn't in --allowedTools
-                                    // and there's no --permission-prompt-tool). The result text
-                                    // is the literal string below; detect it and map back to the
-                                    // originating tool_use so the UI can prompt for approval.
-                                    if output.contains("This command requires approval") {
+                                    // and there's no --permission-prompt-tool). Match any of the
+                                    // known rejection strings the CLI emits so the UI can prompt
+                                    // for approval. Bash uses "This command requires approval";
+                                    // Edit/Write on sensitive paths (e.g. `.mcp.json`, slash command
+                                    // files) use "Claude requested permissions to ..." variants.
+                                    if output.contains("This command requires approval")
+                                        || output.contains("Claude requested permissions")
+                                    {
                                         if let Some(tc) =
                                             tool_calls.iter().find(|t| t.id == tool_id)
                                         {
