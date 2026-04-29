@@ -262,7 +262,7 @@ RUN go install golang.org/x/tools/gopls@latest
 # Install system-wide via GOBIN=/usr/local/bin so every user/shell in
 # the container sees `codehealth` on PATH without relying on /root/go/bin.
 # Main package lives under cmd/codehealth.
-ARG CODEHEALTH_VERSION=main
+ARG CODEHEALTH_VERSION=v0.2.0
 RUN GOBIN=/usr/local/bin go install \
         github.com/nellcorp/codehealth/cmd/codehealth@${CODEHEALTH_VERSION}
 
