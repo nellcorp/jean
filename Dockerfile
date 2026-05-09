@@ -248,6 +248,32 @@ RUN set -eux; \
 # --- Helm (Tim-Koehler.helm-intellisense extension) ---
 RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
+# --- kubectl (Kubernetes CLI) ---
+ARG KUBECTL_VERSION=v1.31.4
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64|arm64) ;; \
+      *) echo "kubectl: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl" \
+      -o /usr/local/bin/kubectl \
+ && chmod +x /usr/local/bin/kubectl
+
+# --- Stern (multi-pod / multi-container log tailing) ---
+ARG STERN_VERSION=1.32.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64|arm64) ;; \
+      *) echo "stern: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://github.com/stern/stern/releases/download/v${STERN_VERSION}/stern_${STERN_VERSION}_linux_${arch}.tar.gz" \
+      -o /tmp/stern.tgz; \
+    tar -xzf /tmp/stern.tgz -C /usr/local/bin stern; \
+    rm -f /tmp/stern.tgz; \
+    chmod +x /usr/local/bin/stern
+
 
 
 # --- Go + gopls (golang.go extension) ---
