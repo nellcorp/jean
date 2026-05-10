@@ -285,15 +285,18 @@ RUN set -eux; \
 ENV GOPATH=/root/go
 ENV PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
 
-# --- gopls + codehealth (nellcorp internal CLI) ---
+# --- gopls + codehealth (nellcorp internal CLI) + lefthook ---
 # Combined into one RUN so the trailing `go clean -modcache` actually
 # shrinks the layer — cleaning in a later layer would just whiteout the
-# files without freeing space. codehealth is dropped into /usr/local/bin
-# so every user/shell sees it on PATH without relying on /root/go/bin.
+# files without freeing space. codehealth + lefthook are dropped into
+# /usr/local/bin so every user/shell sees them on PATH without relying
+# on /root/go/bin.
 ARG CODEHEALTH_VERSION=v0.2.3
 RUN go install golang.org/x/tools/gopls@latest \
  && GOBIN=/usr/local/bin go install \
         github.com/nellcorp/codehealth/cmd/codehealth@${CODEHEALTH_VERSION} \
+ && GOBIN=/usr/local/bin go install \
+        github.com/evilmartians/lefthook@latest \
  && go clean -modcache \
  && rm -rf /root/.cache/go-build
 
