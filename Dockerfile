@@ -291,7 +291,7 @@ ENV PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
 # files without freeing space. codehealth + lefthook are dropped into
 # /usr/local/bin so every user/shell sees them on PATH without relying
 # on /root/go/bin.
-ARG CODEHEALTH_VERSION=v0.2.3
+ARG CODEHEALTH_VERSION=v0.2.4
 RUN go install golang.org/x/tools/gopls@latest \
  && GOBIN=/usr/local/bin go install \
         github.com/nellcorp/codehealth/cmd/codehealth@${CODEHEALTH_VERSION} \
