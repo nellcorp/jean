@@ -347,6 +347,25 @@ RUN set -eux; \
     rm -f /tmp/stripe.tgz; \
     chmod +x /usr/local/bin/stripe
 
+# --- CodeScene CLI (`cs`) ---
+# Distributed as a zip from downloads.codescene.io. Linux uses `amd64` /
+# `aarch64` (note: not `arm64`) in the artifact name. Pin a concrete
+# version for reproducible builds; pass `--build-arg CODESCENE_CLI_VERSION=...`
+# to override (use `latest` for the rolling release).
+ARG CODESCENE_CLI_VERSION=latest
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) cs_arch=amd64 ;; \
+      arm64) cs_arch=aarch64 ;; \
+      *) echo "codescene-cli: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://downloads.codescene.io/enterprise/cli/cs-linux-${cs_arch}-${CODESCENE_CLI_VERSION}.zip" \
+      -o /tmp/cs.zip; \
+    unzip -j /tmp/cs.zip -d /usr/local/bin; \
+    rm -f /tmp/cs.zip; \
+    chmod +x /usr/local/bin/cs
+
 
 
 # ---------------------------------------------------------------------------
