@@ -366,6 +366,24 @@ RUN set -eux; \
     rm -f /tmp/cs.zip; \
     chmod +x /usr/local/bin/cs
 
+# --- nvm (Node Version Manager) ---
+# Installed alongside the apt-managed Node so users can switch Node versions
+# per-shell with `nvm install`/`nvm use`. nvm is a shell function (not just a
+# binary on PATH), so login shells must source nvm.sh — we drop a profile.d
+# snippet for that. Interactive non-login shells (bash -i) also pick it up
+# because Debian's /etc/bash.bashrc sources /etc/profile.d/*.sh when invoked
+# via openvscode-server's integrated terminal.
+ARG NVM_VERSION=v0.40.1
+ENV NVM_DIR=/root/.nvm
+RUN mkdir -p "$NVM_DIR" \
+ && curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | bash \
+ && printf '%s\n' \
+        'export NVM_DIR="/root/.nvm"' \
+        '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' \
+        '[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"' \
+        > /etc/profile.d/nvm.sh \
+ && chmod 0644 /etc/profile.d/nvm.sh
+
 
 
 # ---------------------------------------------------------------------------
