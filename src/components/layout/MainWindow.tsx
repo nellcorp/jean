@@ -6,10 +6,12 @@ import {
   useState,
   lazy,
   Suspense,
+  type CSSProperties,
 } from 'react'
 import { cn } from '@/lib/utils'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { useIsTouchDevice } from '@/hooks/use-touch-device'
 import { useSwipeDown } from '@/hooks/useSwipeDown'
 import { DevModeBanner } from './DevModeBanner'
 import { SidebarWidthProvider } from './SidebarWidthContext'
@@ -130,9 +132,19 @@ const MagicModal = lazy(() =>
     default: mod.MagicModal,
   }))
 )
+const ResolveConflictsDialog = lazy(() =>
+  import('@/components/magic/ResolveConflictsDialog').then(mod => ({
+    default: mod.ResolveConflictsDialog,
+  }))
+)
 const GitHubDashboardModal = lazy(() =>
   import('@/components/github-dashboard').then(mod => ({
     default: mod.GitHubDashboardModal,
+  }))
+)
+const NewSessionModeModal = lazy(() =>
+  import('@/components/chat/NewSessionModeModal').then(mod => ({
+    default: mod.NewSessionModeModal,
   }))
 )
 const CloseWorktreeDialog = lazy(() =>
@@ -142,10 +154,15 @@ const CloseWorktreeDialog = lazy(() =>
 )
 import { FloatingDock } from '@/components/ui/floating-dock'
 import { Toaster } from '@/components/ui/sonner'
+import { BrowserSidePane } from '@/components/browser/BrowserSidePane'
+import { BrowserPanel } from '@/components/browser/BrowserPanel'
+import { useBrowserEvents } from '@/hooks/useBrowserPane'
+import { useToasterOffset } from '@/hooks/useToasterOffset'
 import { useWindowMaximized } from '@/hooks/use-window-maximized'
 import { useUIStore } from '@/store/ui-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useMainWindowEventListeners } from '@/hooks/useMainWindowEventListeners'
+import { useGlobalInputSanitizer } from '@/hooks/useGlobalInputSanitizer'
 import { useCloseSessionOrWorktreeKeybinding } from '@/services/chat'
 import { useUIStatePersistence } from '@/hooks/useUIStatePersistence'
 import { useSessionStatePersistence } from '@/hooks/useSessionStatePersistence'
@@ -186,6 +203,7 @@ function useRetainedMount(active: boolean) {
 
 export function MainWindow() {
   const isMaximized = useWindowMaximized()
+  const toasterOffset = useToasterOffset()
   const leftSidebarVisible = useUIStore(state => state.leftSidebarVisible)
   const leftSidebarSize = useUIStore(state => state.leftSidebarSize)
   const setLeftSidebarSize = useUIStore(state => state.setLeftSidebarSize)
@@ -196,6 +214,12 @@ export function MainWindow() {
   const openInModalOpen = useUIStore(state => state.openInModalOpen)
   const remotePickerOpen = useUIStore(state => state.remotePickerOpen)
   const magicModalOpen = useUIStore(state => state.magicModalOpen)
+  const resolveConflictsDialogOpen = useUIStore(
+    state => state.resolveConflictsDialogOpen
+  )
+  const setResolveConflictsDialogOpen = useUIStore(
+    state => state.setResolveConflictsDialogOpen
+  )
   const newWorktreeModalOpen = useUIStore(state => state.newWorktreeModalOpen)
   const releaseNotesModalOpen = useUIStore(state => state.releaseNotesModalOpen)
   const updatePrModalOpen = useUIStore(state => state.updatePrModalOpen)
@@ -207,6 +231,7 @@ export function MainWindow() {
   const cliLoginModalOpen = useUIStore(state => state.cliLoginModalOpen)
   const updateModalVersion = useUIStore(state => state.updateModalVersion)
   const githubDashboardOpen = useUIStore(state => state.githubDashboardOpen)
+  const newSessionModeTarget = useUIStore(state => state.newSessionModeTarget)
   const selectedWorktreeId = useProjectsStore(state => state.selectedWorktreeId)
   const addProjectDialogOpen = useProjectsStore(
     state => state.addProjectDialogOpen
@@ -221,11 +246,12 @@ export function MainWindow() {
   )
 
   const isMobile = useIsMobile()
+  const isTouch = useIsTouchDevice()
   const swipeDown = useSwipeDown({
     onSwipeDown: useCallback(() => {
       useUIStore.getState().setCommandPaletteOpen(true)
     }, []),
-    enabled: isMobile,
+    enabled: isTouch,
   })
 
   // Fetch worktree data for polling initialization
@@ -276,6 +302,10 @@ export function MainWindow() {
 
   // Set up global event listeners (keyboard shortcuts, etc.)
   useMainWindowEventListeners()
+  useGlobalInputSanitizer()
+
+  // Subscribe to Rust → React browser events (loading/loaded/title/nav/closed)
+  useBrowserEvents()
 
   // Handle CMD+W keybinding to close session or worktree (with optional confirmation)
   const [closeConfirmBranch, setCloseConfirmBranch] = useState<
@@ -392,6 +422,9 @@ export function MainWindow() {
   )
   const shouldRenderWorkflowRunsModal = useRetainedMount(workflowRunsModalOpen)
   const shouldRenderMagicModal = useRetainedMount(magicModalOpen)
+  const shouldRenderResolveConflictsDialog = useRetainedMount(
+    resolveConflictsDialogOpen
+  )
   const shouldRenderReleaseNotesDialog = useRetainedMount(releaseNotesModalOpen)
   const shouldRenderNewWorktreeModal = useRetainedMount(newWorktreeModalOpen)
   const shouldRenderAddProjectDialog = useRetainedMount(addProjectDialogOpen)
@@ -400,6 +433,9 @@ export function MainWindow() {
   const shouldRenderArchivedModal = useRetainedMount(archivedModalOpen)
   const shouldRenderCloseWorktreeDialog = useRetainedMount(closeConfirmOpen)
   const shouldRenderGitHubDashboardModal = useRetainedMount(githubDashboardOpen)
+  const shouldRenderNewSessionModeModal = useRetainedMount(
+    newSessionModeTarget !== null
+  )
 
   // On Windows, use smaller border radius and remove it when maximized
   // On other platforms, use rounded-xl only in native app mode
@@ -409,14 +445,14 @@ export function MainWindow() {
 
   return (
     <div
-      ref={isMobile ? swipeDown.containerRef : undefined}
+      ref={isTouch ? swipeDown.containerRef : undefined}
       className={cn(
         'flex h-dvh w-full flex-col overflow-hidden bg-background',
         roundedClass
       )}
     >
-      {/* Mobile swipe-down pull indicator */}
-      {isMobile && swipeDown.isSwiping && (
+      {/* Touch swipe-down pull indicator */}
+      {isTouch && swipeDown.isSwiping && (
         <div
           className="pointer-events-none absolute left-1/2 z-[60] flex -translate-x-1/2 items-center justify-center"
           style={{ top: swipeDown.translateY - 8 }}
@@ -466,11 +502,18 @@ export function MainWindow() {
           </div>
         )}
 
-        {/* Main Content - flex-1 to fill remaining space */}
-        <div className="relative min-w-0 flex-1 overflow-hidden">
-          <MainWindowContent />
-          <FloatingDock />
+        {/* Main Content + bottom browser panel stacked vertically */}
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="relative min-w-0 flex-1 overflow-hidden">
+            <MainWindowContent />
+            <FloatingDock />
+          </div>
+          {/* Browser bottom panel - native-only, pinned to bottom */}
+          <BrowserPanel />
         </div>
+
+        {/* Browser side pane - native-only, mounts on right edge */}
+        <BrowserSidePane />
       </div>
 
       {/* Global UI Components (hidden until triggered) */}
@@ -535,6 +578,21 @@ export function MainWindow() {
           <MagicModal />
         </Suspense>
       )}
+      {shouldRenderResolveConflictsDialog && (
+        <Suspense fallback={null}>
+          <ResolveConflictsDialog
+            open={resolveConflictsDialogOpen}
+            onOpenChange={setResolveConflictsDialogOpen}
+            onConfirm={override => {
+              window.dispatchEvent(
+                new CustomEvent('magic-command', {
+                  detail: { command: 'resolve-conflicts', override },
+                })
+              )
+            }}
+          />
+        </Suspense>
+      )}
       {shouldRenderRemotePickerModal && (
         <Suspense fallback={null}>
           <RemotePickerModal />
@@ -558,6 +616,11 @@ export function MainWindow() {
       {shouldRenderNewWorktreeModal && (
         <Suspense fallback={null}>
           <NewWorktreeModal />
+        </Suspense>
+      )}
+      {shouldRenderNewSessionModeModal && (
+        <Suspense fallback={null}>
+          <NewSessionModeModal />
         </Suspense>
       )}
       {shouldRenderAddProjectDialog && (
@@ -604,12 +667,15 @@ export function MainWindow() {
       <TeardownOutputDialog />
       <Toaster
         position="bottom-right"
-        offset="52px"
+        offset={toasterOffset}
+        mobileOffset={toasterOffset}
         expand={true}
+        swipeDirections={['left', 'right', 'top', 'bottom']}
+        style={{ '--width': '400px' } as CSSProperties}
         toastOptions={{
           classNames: {
             toast:
-              'group toast group-[.toaster]:bg-sidebar group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg',
+              'group toast group-[.toaster]:bg-[var(--toast-background)] group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg',
             description: 'group-[.toast]:text-muted-foreground',
             actionButton:
               'group-[.toast]:bg-primary group-[.toast]:text-primary-foreground',

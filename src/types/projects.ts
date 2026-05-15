@@ -40,6 +40,8 @@ export interface Project {
   is_folder?: boolean
   /** Path to custom avatar image (relative to app data dir, e.g., "avatars/abc123.png") */
   avatar_path?: string
+  /** Auto-detected project icon path (absolute path in project dir) */
+  default_avatar_path?: string | null
   /** MCP server names enabled by default for this project (null/undefined = inherit from global) */
   enabled_mcp_servers?: string[] | null
   /** All MCP server names ever seen for this project (prevents re-enabling user-disabled servers) */
@@ -58,6 +60,20 @@ export interface Project {
   linear_team_id?: string | null
   /** IDs of linked projects for cross-project context sharing */
   linked_project_ids?: string[]
+}
+
+export interface DirEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  is_git_repo: boolean
+  is_hidden: boolean
+}
+
+export interface BrowseDirectoryResult {
+  current_path: string
+  parent_path?: string
+  entries: DirEntry[]
 }
 
 /**
@@ -81,6 +97,8 @@ export interface Worktree {
   path: string
   /** Git branch name (same as workspace name) */
   branch: string
+  /** Base branch this worktree was created from (undefined for legacy worktrees or base sessions) */
+  base_branch?: string
   /** Unix timestamp when worktree was created */
   created_at: number
   /** Output from setup script (if any) */
@@ -135,7 +153,13 @@ export interface Worktree {
   cached_worktree_ahead_count?: number
   /** Cached unpushed count (commits not yet pushed to origin/current_branch) */
   cached_unpushed_count?: number
-  /** User-assigned label with color (e.g. "In Progress") */
+  /** Remote most recently pushed to for the PR (e.g. "origin" or a fork owner) */
+  pr_push_remote?: string
+  /** Branch on pr_push_remote most recently pushed to */
+  pr_push_branch?: string
+  /** User-assigned labels with colors (e.g. "In Progress") */
+  labels?: LabelData[]
+  /** Deprecated legacy single worktree label; use labels instead. */
   label?: LabelData
   /** Display order within project (lower = higher in list, base sessions ignore this) */
   order: number

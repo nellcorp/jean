@@ -66,6 +66,19 @@ export function normalizeExecutionModeForBackend(
 }
 
 /**
+ * A live event attached to a long-running tool call (Monitor notifications, etc.).
+ * Events accumulate as the tool runs; the final tool_result still populates `output`.
+ */
+export interface ToolLiveEvent {
+  /** Event classification emitted by the backend. */
+  kind: 'monitor_event' | 'monitor_status' | 'monitor_done'
+  /** Raw JSON payload — shape depends on `kind`. */
+  payload: unknown
+  /** Unix ms timestamp when the event was received. */
+  ts_ms: number
+}
+
+/**
  * A tool call made by Claude during a response
  */
 export interface ToolCall {
@@ -79,6 +92,10 @@ export interface ToolCall {
   output?: string
   /** Parent tool use ID for sub-agent tool calls (for parallel task attribution) */
   parent_tool_use_id?: string
+  /** Live events streamed during long-running tools (e.g. Monitor). */
+  events?: ToolLiveEvent[]
+  /** Current lifecycle status for long-running tools. */
+  status?: 'armed' | 'running' | 'done' | 'timeout' | 'error'
 }
 
 export interface PlanStep {
@@ -178,6 +195,8 @@ export interface Session {
   claude_session_id?: string
   /** Codex CLI thread ID for resuming conversations */
   codex_thread_id?: string
+  /** Codex /goal long-horizon objective (codex backend only) */
+  codex_goal?: string
   /** OpenCode session ID for resuming conversations */
   opencode_session_id?: string
   /** Cursor chat ID for resuming conversations */
@@ -237,12 +256,18 @@ export interface Session {
   pending_plan_message_id?: string
   /** Per-session MCP server override (undefined = inherit from project/global) */
   enabled_mcp_servers?: string[]
-  /** Persisted session digest (recap summary) */
-  digest?: SessionDigest
   /** Per-table checklist state: tableKey -> checked row indices */
   table_checked_rows?: Record<string, number[]>
   /** Unix timestamp when session was last opened/viewed by the user */
   last_opened_at?: number
+  /** Primary surface for this session. Terminal sessions render as full-screen CLI sessions. */
+  primary_surface?: 'chat' | 'terminal'
+  /** Command used by full-screen terminal sessions. Undefined/null means default shell. */
+  terminal_command?: string | null
+  /** Extra command args for full-screen terminal sessions. */
+  terminal_command_args?: string[]
+  /** Display label for the terminal tab/session. */
+  terminal_label?: string
   /** Status of the last run (for immediate status on app restart) */
   last_run_status?: RunStatus
   /** Execution mode of the last run (plan/build/yolo) */
@@ -257,6 +282,51 @@ export interface Session {
   total_runs?: number
   /** Index (in metadata.runs) of the first run included in `messages`. 0 = oldest loaded. */
   loaded_run_start_index?: number
+  /** Pending ScheduleWakeup request (one per session, last-wins) */
+  scheduled_wakeup?: ScheduledWakeup
+}
+
+/**
+ * ScheduleWakeup request originating from the Claude CLI tool.
+ * Serialized with snake_case (persisted data — Pattern A).
+ */
+export interface ScheduledWakeup {
+  fire_at_unix: number
+  scheduled_at_unix: number
+  delay_seconds: number
+  prompt: string
+  reason: string
+  tool_call_id: string
+}
+
+/** Returned by `list_pending_wakeups` — hydrates the UI store on mount. */
+export interface PendingWakeupEntry {
+  session_id: string
+  worktree_id: string
+  wakeup: ScheduledWakeup
+}
+
+/** Emitted by Rust when a ScheduleWakeup timer fires. */
+export interface WakeupFiredEvent {
+  session_id: string
+  worktree_id: string
+  worktree_path: string
+  prompt: string
+  tool_call_id: string
+}
+
+/** Emitted by Rust when a ScheduleWakeup is newly scheduled (UI countdown). */
+export interface WakeupScheduledEvent {
+  session_id: string
+  worktree_id: string
+  wakeup: ScheduledWakeup
+}
+
+/** Emitted by Rust when a ScheduleWakeup is cancelled. */
+export interface WakeupCancelledEvent {
+  session_id: string
+  worktree_id: string
+  tool_call_id: string | null
 }
 
 /**
@@ -448,6 +518,20 @@ export interface ToolResultEvent {
   output: string
 }
 
+/**
+ * Event payload for live tool events (e.g. Monitor notifications).
+ * Unlike tool_result (atomic), tool_event arrives incrementally while a
+ * long-running tool is armed.
+ */
+export interface ToolEventEvent {
+  session_id: string
+  worktree_id: string
+  tool_use_id: string
+  kind: 'monitor_event' | 'monitor_status' | 'monitor_done'
+  payload: unknown
+  ts_ms: number
+}
+
 // ============================================================================
 // Permission Denial Types
 // ============================================================================
@@ -477,6 +561,16 @@ export interface PermissionDeniedEvent {
 }
 
 export interface CodexRequestedFileSystemPermissions {
+  entries?:
+    | {
+        access: 'read' | 'write' | 'none'
+        path:
+          | { type: 'path'; path: string }
+          | { type: 'globPattern'; pattern: string }
+          | { type: 'special'; value: unknown }
+      }[]
+    | null
+  globScanMaxDepth?: number | null
   read?: string[] | null
   write?: string[] | null
 }
@@ -492,6 +586,7 @@ export interface CodexPermissionRequest {
     fileSystem?: CodexRequestedFileSystemPermissions | null
     network?: CodexRequestedNetworkPermissions | null
   }
+  cwd?: string | null
   reason?: string | null
 }
 
@@ -530,6 +625,8 @@ export interface CodexCommandApprovalRequest {
   cwd?: string | null
   reason?: string | null
   network_approval_context?: CodexNetworkApprovalContext | null
+  additional_permissions?: unknown
+  available_decisions?: unknown[] | null
   proposed_execpolicy_amendment?: string[] | null
   proposed_network_policy_amendments?: CodexNetworkPolicyAmendment[] | null
 }
@@ -588,6 +685,7 @@ export interface CodexMcpElicitationRequestEvent {
 export interface CodexDynamicToolCallRequest {
   rpc_id: number
   call_id: string
+  namespace?: string | null
   tool: string
   arguments: unknown
 }
@@ -926,6 +1024,12 @@ export interface PendingFile {
   id: string
   /** Relative path from worktree root */
   relativePath: string
+  /** Absolute root path that relativePath is scoped to (linked project path or active worktree path) */
+  sourceRootPath?: string
+  /** Project ID when the file came from a linked/current project scope */
+  sourceProjectId?: string
+  /** Project display name when the file came from a linked/current project scope */
+  sourceProjectName?: string
   /** File extension */
   extension: string
   /** Whether this is a directory mention */
@@ -1254,25 +1358,6 @@ export interface SessionDebugInfo {
   run_log_files: RunLogFileInfo[]
   /** Total token usage across all runs in this session */
   total_usage: UsageData
-}
-
-// ============================================================================
-// Session Digest Types (for context recall after switching)
-// ============================================================================
-
-/**
- * A brief digest of a session for context recall
- * Generated when user opens a session that had activity while out of focus
- */
-export interface SessionDigest {
-  /** One sentence summarizing the overall chat goal and progress */
-  chat_summary: string
-  /** One sentence describing what was just completed */
-  last_action: string
-  /** When the digest was created (unix epoch seconds) */
-  created_at?: number
-  /** Number of messages when this digest was generated */
-  message_count?: number
 }
 
 /** User-assigned label with color for session cards */
