@@ -384,6 +384,13 @@ RUN mkdir -p "$NVM_DIR" \
         > /etc/profile.d/nvm.sh \
  && chmod 0644 /etc/profile.d/nvm.sh
 
+# --- Bun (JS runtime / package manager) ---
+# Lift the binary directly from the same image the frontend build stage uses
+# so runtime + builder share a Bun version. No curl, no install script,
+# no separate version pin to keep in sync.
+COPY --from=oven/bun:1.2-debian /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
+
 
 
 # ---------------------------------------------------------------------------
