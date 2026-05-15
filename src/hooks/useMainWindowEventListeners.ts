@@ -1,12 +1,13 @@
 import { useEffect, useRef } from 'react'
 import { listen, invoke } from '@/lib/transport'
-import { isNativeApp } from '@/lib/environment'
+import { isNativeApp, hasBackend } from '@/lib/environment'
 import { notify } from '@/lib/notifications'
 import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { useUIStore } from '@/store/ui-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useChatStore } from '@/store/chat-store'
-import { useTerminalStore } from '@/store/terminal-store'
+import { isPanelTerminal, useTerminalStore } from '@/store/terminal-store'
+import { useBrowserStore } from '@/store/browser-store'
 import { projectsQueryKeys } from '@/services/projects'
 import { chatQueryKeys } from '@/services/chat'
 import type { QueuedMessage } from '@/types/chat'
@@ -38,12 +39,34 @@ export function shouldLetPlanDialogHandleAction(
   return planDialogOpen && PLAN_DIALOG_APPROVAL_ACTIONS.has(action)
 }
 
-export function getTerminalShortcutWorktreeId(): string | null {
+function getFocusedTerminalElement(): HTMLElement | null {
   const activeElement = document.activeElement
-  const terminalFocused =
-    activeElement instanceof HTMLElement && !!activeElement.closest('.xterm')
+  if (!(activeElement instanceof HTMLElement)) return null
 
-  if (!terminalFocused) return null
+  return activeElement.closest('.xterm, [data-terminal-emulator]')
+}
+
+export function isPlainSessionTerminalFocused(): boolean {
+  return !!getFocusedTerminalElement()?.closest(
+    '[data-terminal-surface="session"]'
+  )
+}
+
+export function blurFocusedTerminalForShortcut(): boolean {
+  const terminalElement = getFocusedTerminalElement()
+  if (!terminalElement) return false
+
+  const activeElement = document.activeElement
+  if (activeElement instanceof HTMLElement) {
+    activeElement.blur()
+  }
+
+  document.body.focus({ preventScroll: true })
+  return true
+}
+
+export function getTerminalShortcutWorktreeId(): string | null {
+  if (!getFocusedTerminalElement()) return null
 
   const uiState = useUIStore.getState()
   const chatState = useChatStore.getState()
@@ -85,7 +108,9 @@ export function closeActiveTerminalTabForShortcut(): boolean {
   disposeTerminal(activeTerminalId)
   terminalStore.removeTerminal(worktreeId, activeTerminalId)
 
-  const remaining = useTerminalStore.getState().terminals[worktreeId] ?? []
+  const remaining = (
+    useTerminalStore.getState().terminals[worktreeId] ?? []
+  ).filter(isPanelTerminal)
   if (remaining.length === 0) {
     terminalStore.setTerminalPanelOpen(worktreeId, false)
     terminalStore.setTerminalVisible(false)
@@ -102,7 +127,9 @@ export function switchActiveTerminalTabByIndexForShortcut(
   if (!worktreeId) return false
 
   const terminalStore = useTerminalStore.getState()
-  const terminals = terminalStore.terminals[worktreeId] ?? []
+  const terminals = (terminalStore.terminals[worktreeId] ?? []).filter(
+    isPanelTerminal
+  )
   const targetTerminal = terminals[index]
 
   if (targetTerminal) {
@@ -164,7 +191,7 @@ function executeKeybindingAction(
       break
     case 'execute_run': {
       logger.debug('Keybinding: execute_run')
-      if (!isNativeApp()) break
+      if (!hasBackend()) break
 
       // Skip if git diff modal is open
       const uiStore = useUIStore.getState()
@@ -389,16 +416,28 @@ function executeKeybindingAction(
     case 'toggle_terminal': {
       logger.debug('Keybinding: toggle_terminal')
       const uiState = useUIStore.getState()
+      const chatState = useChatStore.getState()
       if (uiState.sessionChatModalOpen) {
-        // Modal view → sheet drawer
         const wid =
-          uiState.sessionChatModalWorktreeId ??
-          useChatStore.getState().activeWorktreeId
+          uiState.sessionChatModalWorktreeId ?? chatState.activeWorktreeId
         if (wid) useTerminalStore.getState().toggleModalTerminal(wid)
       } else {
-        // Standalone view → resizable panel
-        const wid = useChatStore.getState().activeWorktreeId
+        const wid = chatState.activeWorktreeId
         if (wid) useTerminalStore.getState().toggleTerminal(wid)
+      }
+      break
+    }
+    case 'toggle_browser': {
+      logger.debug('Keybinding: toggle_browser')
+      const uiState = useUIStore.getState()
+      const chatState = useChatStore.getState()
+      if (uiState.sessionChatModalOpen) {
+        const wid =
+          uiState.sessionChatModalWorktreeId ?? chatState.activeWorktreeId
+        if (wid) useBrowserStore.getState().toggleModal(wid)
+      } else {
+        const wid = chatState.activeWorktreeId
+        if (wid) useBrowserStore.getState().toggleSidePane(wid)
       }
       break
     }
@@ -530,6 +569,16 @@ export function useMainWindowEventListeners() {
         }
       }
 
+      if (shortcut === 'mod+shift+escape' && blurFocusedTerminalForShortcut()) {
+        e.preventDefault()
+        e.stopPropagation()
+        return
+      }
+
+      // A focused full-screen/plain terminal session should own all keybindings.
+      // Side/modal terminals still use the terminal-specific remapping below.
+      if (isPlainSessionTerminalFocused()) return
+
       // Cancel prompt should work even when modals are open
       if (shortcut === keybindingsRef.current.cancel_prompt) {
         logger.debug('Cancel prompt shortcut matched', { shortcut })
@@ -542,9 +591,11 @@ export function useMainWindowEventListeners() {
       // Skip when any modal/dialog is open - let it handle its own shortcuts.
       // Covers all shadcn/Radix Dialog + AlertDialog instances automatically
       // (including future modals) via their data-state attribute.
+      // Also skip when a Radix DropdownMenu / Select is open so its built-in
+      // arrow-key navigation isn't hijacked (e.g. by scroll_chat_*).
       if (
         document.querySelector(
-          '[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]'
+          '[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"], [role="menu"][data-state="open"], [role="listbox"][data-state="open"]'
         )
       )
         return
@@ -587,6 +638,7 @@ export function useMainWindowEventListeners() {
           }
           if (
             shortcut === kb.toggle_terminal ||
+            shortcut === kb.toggle_browser ||
             shortcut === kb.cancel_prompt
           ) {
             // Let these fall through to the normal keybinding handler below
@@ -741,6 +793,20 @@ export function useMainWindowEventListeners() {
           )
         }),
 
+        listen('menu-toggle-terminal', () => {
+          logger.debug('Toggle terminal menu event received from native menu')
+          executeKeybindingAction(
+            'toggle_terminal',
+            commandContext,
+            queryClient
+          )
+        }),
+
+        listen('menu-toggle-browser', () => {
+          logger.debug('Toggle browser menu event received from native menu')
+          executeKeybindingAction('toggle_browser', commandContext, queryClient)
+        }),
+
         // Branch naming events (automatic branch renaming based on first message)
         listen<{ worktree_id: string; old_branch: string; new_branch: string }>(
           'branch-renamed',
@@ -839,9 +905,32 @@ export function useMainWindowEventListeners() {
             for (const key of pendingKeys) {
               switch (key) {
                 case 'sessions':
-                  queryClient.invalidateQueries({
-                    queryKey: chatQueryKeys.all,
-                  })
+                  // Skip individual session queries for sessions currently
+                  // being cancelled — the cancel handler holds an optimistic
+                  // assistant message in cache that disk hasn't reconciled yet
+                  // (especially in web access mode where save_cancelled_message
+                  // RTT can exceed this 250ms debounce). The cancel handler
+                  // explicitly refetches the single session once disk is in sync.
+                  {
+                    const cancelling =
+                      useChatStore.getState().cancellingSessionIds
+                    queryClient.invalidateQueries({
+                      queryKey: chatQueryKeys.all,
+                      predicate: query => {
+                        const k = query.queryKey
+                        if (
+                          Array.isArray(k) &&
+                          k[0] === 'chat' &&
+                          k[1] === 'session' &&
+                          typeof k[2] === 'string' &&
+                          cancelling[k[2]]
+                        ) {
+                          return false
+                        }
+                        return true
+                      },
+                    })
+                  }
                   break
                 case 'projects':
                   queryClient.invalidateQueries({

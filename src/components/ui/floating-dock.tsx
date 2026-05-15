@@ -176,6 +176,7 @@ function snapshotLg() {
 const serverLg = () => true
 
 export function FloatingDock() {
+  const chatToolbarMounted = useUIStore(state => state.chatToolbarMounted)
   const isMobile = useIsMobile()
   const isLg = useSyncExternalStore(subscribeLg, snapshotLg, serverLg)
   const { data: preferences } = usePreferences()
@@ -205,6 +206,11 @@ export function FloatingDock() {
   )
   const activeSessionId = useChatStore(state =>
     currentWorktreeId ? state.activeSessionIds[currentWorktreeId] : undefined
+  )
+  const isTerminalSession = useUIStore(state =>
+    activeSessionId
+      ? state.sessionPrimarySurface[activeSessionId] === 'terminal'
+      : false
   )
   const selectedBackend = useChatStore(state =>
     activeSessionId ? state.selectedBackends[activeSessionId] : undefined
@@ -274,7 +280,7 @@ export function FloatingDock() {
         ...chatQueryKeys.sessions(currentWorktreeId),
         'with-counts',
       ])
-    const session = cached?.sessions.find(s => s.id === activeSessionId)
+    const session = cached?.sessions?.find(s => s.id === activeSessionId)
     return session ? getResumeCommand(session) : null
   }, [queryClient])
 
@@ -403,6 +409,13 @@ export function FloatingDock() {
     modalTerminalDockMode === 'bottom'
       ? `calc(${modalTerminalHeight + 8}px + var(--safe-area-bottom))`
       : 'calc(8px + var(--safe-area-bottom))'
+
+  // When the chat toolbar is mounted, the DockBurgerButton there exposes the
+  // same menu — hide this corner dock to avoid duplicate UI and overlap with
+  // the chat textarea.
+  // Terminal sessions are full-screen inside the chat bounds and have no
+  // bottom input/toolbar, so the corner dock would cover terminal output.
+  if (chatToolbarMounted || isTerminalSession) return null
 
   return (
     <div

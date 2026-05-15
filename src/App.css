@@ -94,6 +94,7 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+  --toast-background: var(--popover);
   --safe-area-top: env(safe-area-inset-top, 0px);
   --safe-area-right: env(safe-area-inset-right, 0px);
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
@@ -135,6 +136,8 @@
   --sidebar-accent-foreground: #fafafa;
   --sidebar-border: #323232; /* coolgray-500 */
   --sidebar-ring: #fcd452;
+  --toast-background: #2a2a2a; /* distinct from app bg (#101010) and chat input (#181818) */
+  --toast-border: #3a3a3a;
 }
 
 /* Wave animation for vibing indicator */
@@ -460,6 +463,14 @@
   pointer-events: auto !important;
 }
 
+/* Make text column grow so action/cancel buttons align to the right edge
+   regardless of title length. Sonner ships [data-content] with flex-column
+   only; without flex:1 the buttons sit flush to text and shift per-toast. */
+[data-sonner-toaster] [data-sonner-toast] [data-content] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* Ensures the title bar window controls (minimize, maximize, close) remain clickable
    above Radix modal overlays (e.g. onboarding dialog). The title bar uses
    data-tauri-drag-region and z-[60] to sit above the z-50 dialog overlay. */
@@ -541,6 +552,24 @@ kbd {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+/* Settings search highlight flash */
+@keyframes settings-highlight-flash {
+  0%,
+  100% {
+    background-color: transparent;
+    box-shadow: none;
+  }
+  15% {
+    background-color: color-mix(in srgb, var(--primary) 12%, transparent);
+    box-shadow:
+      0 0 0 8px color-mix(in srgb, var(--primary) 12%, transparent),
+      0 0 0 10px color-mix(in srgb, var(--primary) 25%, transparent);
+  }
+}
+.settings-search-highlight {
+  animation: settings-highlight-flash 1.8s ease-out;
+  border-radius: calc(var(--radius) - 2px);
+}
 
 /* Number input spinner — invert arrows in dark mode so they're visible */
 .dark input[type='number']::-webkit-inner-spin-button,
@@ -562,24 +591,36 @@ kbd {
   background-color: rgba(251, 146, 60, 0.6);
 }
 
-/* Custom scrollbar styling to match Radix ScrollArea */
-.custom-scrollbar::-webkit-scrollbar {
+/* Global custom scrollbar — applies to every scrollable element so Windows
+   WebView2 doesn't render its native gray scrollbar. */
+*::-webkit-scrollbar {
   width: 10px;
+  height: 10px;
 }
-.custom-scrollbar::-webkit-scrollbar-track {
+*::-webkit-scrollbar-track {
   background: transparent;
 }
-.custom-scrollbar::-webkit-scrollbar-thumb {
+*::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 9999px;
   border: 1px solid transparent;
   background-clip: padding-box;
 }
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+  background-clip: padding-box;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
 
 .xterm,
 .xterm .xterm-viewport,
 .xterm .xterm-screen,
-.xterm .xterm-screen canvas {
+.xterm .xterm-screen canvas,
+[data-terminal-emulator],
+[data-terminal-emulator] canvas {
   background-color: var(--background) !important;
 }
 
