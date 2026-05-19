@@ -378,6 +378,24 @@ RUN set -eux; \
     rm -rf /tmp/glci.tar.gz "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}"; \
     chmod +x /usr/local/bin/golangci-lint
 
+# --- AWS CLI v2 ---
+# Official installer zip from awscli.amazonaws.com. Creates symlinks at
+# /usr/local/bin/aws and /usr/local/bin/aws_completer pointing into
+# /usr/local/aws-cli/v2/current/bin/.
+ARG AWS_CLI_VERSION=2.34.49
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) aws_arch=x86_64 ;; \
+      arm64) aws_arch=aarch64 ;; \
+      *) echo "aws-cli: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}-${AWS_CLI_VERSION}.zip" \
+      -o /tmp/awscliv2.zip; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/aws
+
 # --- CodeScene CLI (`cs`) ---
 # Distributed as a zip from downloads.codescene.io. Linux uses `amd64` /
 # `aarch64` (note: not `arm64`) in the artifact name. Pin a concrete
