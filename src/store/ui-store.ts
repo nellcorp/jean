@@ -3,8 +3,15 @@ import { devtools } from 'zustand/middleware'
 
 export type PreferencePane =
   | 'general'
+  | 'claude'
+  | 'codex'
+  | 'opencode'
+  | 'cursor'
+  | 'github'
+  | 'coderabbit'
   | 'appearance'
   | 'keybindings'
+  | 'terminal'
   | 'magic-prompts'
   | 'mcp-servers'
   | 'providers'
@@ -16,7 +23,23 @@ export type PreferencePane =
 
 export type OnboardingStartStep = 'claude' | 'gh' | null
 
-export type CliUpdateModalType = 'claude' | 'gh' | 'codex' | 'opencode' | null
+export type WorktreePrimarySurface = 'chat' | 'terminal'
+
+export type NewSessionModeOrigin = 'chat' | 'modal' | 'canvas'
+
+export interface NewSessionModeTarget {
+  worktreeId: string
+  worktreePath: string
+  origin: NewSessionModeOrigin
+}
+
+export type CliUpdateModalType =
+  | 'claude'
+  | 'gh'
+  | 'codex'
+  | 'opencode'
+  | 'coderabbit'
+  | null
 
 export type CliLoginModalType =
   | 'claude'
@@ -24,6 +47,7 @@ export type CliLoginModalType =
   | 'codex'
   | 'opencode'
   | 'cursor'
+  | 'coderabbit'
   | null
 
 interface UIState {
@@ -44,6 +68,7 @@ interface UIState {
   loadContextModalOpen: boolean
   linkedProjectsModalOpen: boolean
   magicModalOpen: boolean
+  resolveConflictsDialogOpen: boolean
   newWorktreeModalOpen: boolean
   newWorktreeModalDefaultTab: 'quick' | 'issues' | 'prs' | 'security' | null
   releaseNotesModalOpen: boolean
@@ -77,14 +102,25 @@ interface UIState {
   pendingAutoOpenSessionIds: Record<string, string>
   /** Whether a session chat modal is open (for magic command keybinding checks) */
   sessionChatModalOpen: boolean
+  /** Whether the chat toolbar is mounted — used to hide the global FloatingDock
+   *  because its burger-menu counterpart now lives in the chat toolbar. */
+  chatToolbarMounted: boolean
   /** Which worktree the session chat modal is for (for magic command worktree resolution) */
   sessionChatModalWorktreeId: string | null
+  /** Per-session primary surface shown inside the chat bounds */
+  sessionPrimarySurface: Record<string, WorktreePrimarySurface>
+  /** Terminal instance ID owned by a terminal session */
+  sessionTerminalIds: Record<string, string>
+  /** New session mode picker target; null means closed */
+  newSessionModeTarget: NewSessionModeTarget | null
   /** Whether a git diff modal is open (blocks execute_run keybinding) */
   gitDiffModalOpen: boolean
   /** File paths selected for commit in GitDiffModal (uncommitted tab only) */
   gitDiffSelectedFiles: Set<string>
   /** Whether a plan dialog is open (blocks canvas approve keybindings) */
   planDialogOpen: boolean
+  /** Whether the context viewer dialog is open (blocks SessionChatModal ESC close) */
+  contextViewerOpen: boolean
   /** Whether the feature tour dialog is open */
   featureTourOpen: boolean
   /** Whether UI state has been restored from persisted storage */
@@ -116,6 +152,7 @@ interface UIState {
   setLoadContextModalOpen: (open: boolean) => void
   setLinkedProjectsModalOpen: (open: boolean) => void
   setMagicModalOpen: (open: boolean) => void
+  setResolveConflictsDialogOpen: (open: boolean) => void
   setNewWorktreeModalOpen: (open: boolean) => void
   setNewWorktreeModalDefaultTab: (
     tab: 'quick' | 'issues' | 'prs' | 'security' | null
@@ -128,10 +165,12 @@ interface UIState {
     projectPath?: string | null,
     branch?: string | null
   ) => void
-  openCliUpdateModal: (type: 'claude' | 'gh' | 'codex' | 'opencode') => void
+  openCliUpdateModal: (
+    type: 'claude' | 'gh' | 'codex' | 'opencode' | 'coderabbit'
+  ) => void
   closeCliUpdateModal: () => void
   openCliLoginModal: (
-    type: 'claude' | 'gh' | 'codex' | 'opencode' | 'cursor',
+    type: 'claude' | 'gh' | 'codex' | 'opencode' | 'cursor' | 'coderabbit',
     command: string,
     commandArgs?: string[],
     action?: 'login' | 'update' | 'install'
@@ -158,10 +197,20 @@ interface UIState {
     sessionId?: string
   }
   setSessionChatModalOpen: (open: boolean, worktreeId?: string | null) => void
+  setSessionPrimarySurface: (
+    sessionId: string,
+    surface: WorktreePrimarySurface
+  ) => void
+  setSessionTerminalId: (sessionId: string, terminalId: string) => void
+  clearSessionTerminalSurface: (sessionId: string) => string | undefined
+  openNewSessionModeModal: (target: NewSessionModeTarget) => void
+  closeNewSessionModeModal: () => void
+  setChatToolbarMounted: (mounted: boolean) => void
   setGitDiffModalOpen: (open: boolean) => void
   toggleGitDiffSelectedFile: (filePath: string) => void
   clearGitDiffSelectedFiles: () => void
   setPlanDialogOpen: (open: boolean) => void
+  setContextViewerOpen: (open: boolean) => void
   setFeatureTourOpen: (open: boolean) => void
   setUIStateInitialized: (initialized: boolean) => void
   setPendingUpdateVersion: (version: string | null) => void
@@ -200,6 +249,7 @@ export const useUIStore = create<UIState>()(
       loadContextModalOpen: false,
       linkedProjectsModalOpen: false,
       magicModalOpen: false,
+      resolveConflictsDialogOpen: false,
       newWorktreeModalOpen: false,
       newWorktreeModalDefaultTab: null,
       releaseNotesModalOpen: false,
@@ -225,9 +275,14 @@ export const useUIStore = create<UIState>()(
       pendingAutoOpenSessionIds: {},
       sessionChatModalOpen: false,
       sessionChatModalWorktreeId: null,
+      sessionPrimarySurface: {},
+      sessionTerminalIds: {},
+      newSessionModeTarget: null,
+      chatToolbarMounted: false,
       gitDiffModalOpen: false,
       gitDiffSelectedFiles: new Set<string>(),
       planDialogOpen: false,
+      contextViewerOpen: false,
       featureTourOpen: false,
       uiStateInitialized: false,
       pendingUpdateVersion: null,
@@ -354,6 +409,13 @@ export const useUIStore = create<UIState>()(
 
       setMagicModalOpen: open =>
         set({ magicModalOpen: open }, undefined, 'setMagicModalOpen'),
+
+      setResolveConflictsDialogOpen: open =>
+        set(
+          { resolveConflictsDialogOpen: open },
+          undefined,
+          'setResolveConflictsDialogOpen'
+        ),
 
       setNewWorktreeModalOpen: open =>
         set(
@@ -609,15 +671,31 @@ export const useUIStore = create<UIState>()(
 
       markWorktreeForAutoOpenSession: (worktreeId, sessionId) =>
         set(
-          state => ({
-            autoOpenSessionWorktreeIds: new Set([
-              ...state.autoOpenSessionWorktreeIds,
-              worktreeId,
-            ]),
-            pendingAutoOpenSessionIds: sessionId
-              ? { ...state.pendingAutoOpenSessionIds, [worktreeId]: sessionId }
-              : state.pendingAutoOpenSessionIds,
-          }),
+          state => {
+            const alreadyQueued =
+              state.autoOpenSessionWorktreeIds.has(worktreeId)
+            const existingSessionId =
+              state.pendingAutoOpenSessionIds[worktreeId]
+            if (
+              alreadyQueued &&
+              (sessionId ? existingSessionId === sessionId : !existingSessionId)
+            ) {
+              return state
+            }
+
+            return {
+              autoOpenSessionWorktreeIds: new Set([
+                ...state.autoOpenSessionWorktreeIds,
+                worktreeId,
+              ]),
+              pendingAutoOpenSessionIds: sessionId
+                ? {
+                    ...state.pendingAutoOpenSessionIds,
+                    [worktreeId]: sessionId,
+                  }
+                : state.pendingAutoOpenSessionIds,
+            }
+          },
           undefined,
           'markWorktreeForAutoOpenSession'
         ),
@@ -655,6 +733,95 @@ export const useUIStore = create<UIState>()(
           'setSessionChatModalOpen'
         ),
 
+      setSessionPrimarySurface: (
+        sessionId: string,
+        surface: WorktreePrimarySurface
+      ) =>
+        set(
+          state => {
+            if (state.sessionPrimarySurface[sessionId] === surface) {
+              return state
+            }
+            return {
+              sessionPrimarySurface: {
+                ...state.sessionPrimarySurface,
+                [sessionId]: surface,
+              },
+            }
+          },
+          undefined,
+          'setSessionPrimarySurface'
+        ),
+
+      setSessionTerminalId: (sessionId: string, terminalId: string) =>
+        set(
+          state => {
+            if (state.sessionTerminalIds[sessionId] === terminalId) {
+              return state
+            }
+            return {
+              sessionTerminalIds: {
+                ...state.sessionTerminalIds,
+                [sessionId]: terminalId,
+              },
+            }
+          },
+          undefined,
+          'setSessionTerminalId'
+        ),
+
+      clearSessionTerminalSurface: (sessionId: string) => {
+        const current = get()
+        const terminalId = current.sessionTerminalIds[sessionId]
+        const hasSurface = sessionId in current.sessionPrimarySurface
+        if (!hasSurface && terminalId === undefined) {
+          return undefined
+        }
+
+        set(
+          state => {
+            const { [sessionId]: _removedSurface, ...sessionPrimarySurface } =
+              state.sessionPrimarySurface
+            const { [sessionId]: _removedTerminal, ...sessionTerminalIds } =
+              state.sessionTerminalIds
+            return { sessionPrimarySurface, sessionTerminalIds }
+          },
+          undefined,
+          'clearSessionTerminalSurface'
+        )
+
+        return terminalId
+      },
+
+      openNewSessionModeModal: (target: NewSessionModeTarget) =>
+        set(
+          state =>
+            state.newSessionModeTarget?.worktreeId === target.worktreeId &&
+            state.newSessionModeTarget?.worktreePath === target.worktreePath &&
+            state.newSessionModeTarget?.origin === target.origin
+              ? state
+              : { newSessionModeTarget: target },
+          undefined,
+          'openNewSessionModeModal'
+        ),
+
+      closeNewSessionModeModal: () =>
+        set(
+          state =>
+            state.newSessionModeTarget === null
+              ? state
+              : { newSessionModeTarget: null },
+          undefined,
+          'closeNewSessionModeModal'
+        ),
+
+      setChatToolbarMounted: (mounted: boolean) =>
+        set(state =>
+          state.chatToolbarMounted === mounted
+            ? state
+            : { chatToolbarMounted: mounted }
+        ),
+
       setGitDiffModalOpen: (open: boolean) =>
         set({ gitDiffModalOpen: open }, undefined, 'setGitDiffModalOpen'),
 
@@ -682,6 +849,9 @@ export const useUIStore = create<UIState>()(
 
       setPlanDialogOpen: (open: boolean) =>
         set({ planDialogOpen: open }, undefined, 'setPlanDialogOpen'),
+
+      setContextViewerOpen: (open: boolean) =>
+        set({ contextViewerOpen: open }, undefined, 'setContextViewerOpen'),
 
       setFeatureTourOpen: (open: boolean) =>
         set({ featureTourOpen: open }, undefined, 'setFeatureTourOpen'),

@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 import { invoke, listen } from '@/lib/transport'
+import { hydrateRunningSnapshot } from '@/lib/hydrate-running-snapshot'
 import { GitBranch, GitMerge, Layers, Loader2 } from 'lucide-react'
 import {
   useSession,
@@ -40,7 +41,6 @@ import {
   chatQueryKeys,
 } from '@/services/chat'
 import { useWorktree, useProjects, useRunScripts } from '@/services/projects'
-import { markWorktreeSilentReady } from '@/services/worktree-silent-ready'
 import { useProjectsStore } from '@/store/projects-store'
 import type {
   Worktree,
@@ -102,32 +102,39 @@ import { ImagePreview } from './ImagePreview'
 import { TextFilePreview } from './TextFilePreview'
 import { SkillBadge } from './SkillBadge'
 import { FileContentModal } from './FileContentModal'
+import { FileEditsDiffModal, type FileEdit } from './FileEditsDiffModal'
 import { FilePreview } from './FilePreview'
+import { ContextPreview } from './ContextPreview'
 import { ChatInput } from './ChatInput'
 import { SessionDebugPanel } from './SessionDebugPanel'
 import { ChatToolbar } from './ChatToolbar'
 import { ReviewResultsPanel } from './ReviewResultsPanel'
+import { ReviewMethodModal } from './ReviewMethodModal'
 import { QueuedMessagesList } from './QueuedMessageItem'
 import { FloatingButtons } from './FloatingButtons'
 import { PlanDialog } from './PlanDialog'
-import { RecapDialog } from './RecapDialog'
 import { StreamingMessage } from './StreamingMessage'
+import { CompactStreamingTicker } from './CompactStreamingTicker'
+import { CompactMessageList } from './CompactMessageList'
+import {
+  getCurrentPromptWindow,
+  remapIndexForWindow,
+} from './compact-history-window'
+import { CodexGoalBanner } from './CodexGoalBanner'
 import { StreamingStatusBar } from './StreamingStatusBar'
 import { ChatErrorFallback } from './ChatErrorFallback'
 import { logger } from '@/lib/logger'
 import { saveCrashState } from '@/lib/recovery'
 import { ErrorBanner } from './ErrorBanner'
-import { SessionDigestReminder } from './SessionDigestReminder'
 import {
   VirtualizedMessageList,
   type VirtualizedMessageListHandle,
 } from './VirtualizedMessageList'
 import { RecentContexts } from './RecentContexts'
 import {
-  extractImagePaths,
-  extractTextFilePaths,
-  extractFileMentionPaths,
-  extractSkillPaths,
+  appendPromptMetadataToPlainText,
+  buildPromptAttachmentMetadata,
+  encodePromptAttachmentMetadata,
   stripAllMarkers,
 } from './message-content-utils'
 import { useUIStore } from '@/store/ui-store'
@@ -140,14 +147,10 @@ import { copyToClipboard, copyHtmlToClipboard } from '@/lib/clipboard'
 import { useClaudeCliStatus } from '@/services/claude-cli'
 import { usePrStatus, usePrStatusEvents } from '@/services/pr-status'
 import type { PrDisplayStatus, CheckStatus } from '@/types/pr-status'
-import type {
-  QueuedMessage,
-  Session,
-  SessionDigest,
-  WorktreeSessions,
-} from '@/types/chat'
+import type { QueuedMessage, Session, WorktreeSessions } from '@/types/chat'
 import type { DiffRequest } from '@/types/git-diff'
 import { FileDiffModal } from './FileDiffModal'
+import { getEffectiveSessionWaiting } from './session-card-utils'
 
 // Lazy-loaded heavy modals (code splitting)
 const GitDiffModal = lazy(() =>
@@ -170,6 +173,7 @@ import {
   type ImperativePanelHandle,
 } from '@/components/ui/resizable'
 import { TerminalPanel } from './TerminalPanel'
+import { FullScreenTerminalSurface } from './FullScreenTerminalSurface'
 import { useTerminalStore } from '@/store/terminal-store'
 
 // Extracted hooks (useStreamingEvents is now in App.tsx for global persistence)
@@ -302,6 +306,14 @@ export function ChatWindow({
       ? (state.terminalPanelOpen[activeWorktreeId] ?? false)
       : false
   )
+  const primarySurface = useUIStore(state =>
+    activeSessionId
+      ? (state.sessionPrimarySurface[activeSessionId] ?? 'chat')
+      : 'chat'
+  )
+  const sessionTerminalId = useUIStore(state =>
+    activeSessionId ? state.sessionTerminalIds[activeSessionId] : undefined
+  )
   const { setTerminalVisible } = useTerminalStore.getState()
 
   // Sync terminal panel with terminalVisible state
@@ -378,6 +390,7 @@ export function ChatWindow({
     const store = useChatStore.getState()
     const currentActive = store.activeSessionIds[activeWorktreeId]
     const sessions = sessionsData.sessions
+    if (!sessions) return
     const firstSession = sessions[0]
 
     // If no active session in store, or it doesn't exist in loaded sessions
@@ -391,7 +404,7 @@ export function ChatWindow({
   }, [sessionsData, activeWorktreeId, isSessionsFetching, uiStateInitialized])
 
   // Use backend's active session if store doesn't have one yet
-  if (!activeSessionId && sessionsData?.sessions.length) {
+  if (!activeSessionId && sessionsData?.sessions?.length) {
     activeSessionId =
       sessionsData.active_session_id ?? sessionsData.sessions[0]?.id
   }
@@ -409,6 +422,31 @@ export function ChatWindow({
     activeWorktreeId,
     activeWorktreePath
   )
+
+  // Rebuild streamingContentBlocks from snapshot when opening a session whose
+  // last message is still running. Covers web-access click-to-open, sidebar
+  // navigation, and any other entry that bypasses App.tsx auto-resume.
+  useEffect(() => {
+    if (!deferredSessionId || !session) return
+    // Skip hydration while THIS client is actively sending — live chat:chunk
+    // rebuilds streaming state incrementally. Injecting a refetched running
+    // snapshot mid-send duplicates the prior assistant bubble (see answer
+    // submission flow in handleQuestionAnswer).
+    if (useChatStore.getState().sendingSessionIds[deferredSessionId]) return
+    const lastMsg = session.messages.at(-1)
+    if (lastMsg?.role === 'assistant' && lastMsg.id.startsWith('running-')) {
+      hydrateRunningSnapshot(deferredSessionId, lastMsg)
+    }
+  }, [deferredSessionId, session])
+
+  // Hydrate the chat-store mirror of Session.codex_goal whenever the session
+  // (re)loads. Live updates flow through the chat:codex_goal listener.
+  useEffect(() => {
+    if (!deferredSessionId) return
+    useChatStore
+      .getState()
+      .setCodexGoal(deferredSessionId, session?.codex_goal ?? null)
+  }, [deferredSessionId, session?.codex_goal])
 
   const loadOlderMessages = useLoadOlderMessages()
   const loadedRunStartIndex = session?.loaded_run_start_index ?? 0
@@ -586,7 +624,7 @@ export function ChatWindow({
 
   // Per-session model selection, falls back to preferences default (backend-aware)
   const defaultModel: string = isCodexBackend
-    ? (preferences?.selected_codex_model ?? 'gpt-5.4')
+    ? (preferences?.selected_codex_model ?? 'gpt-5.5')
     : isOpencodeBackend
       ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.3-codex')
       : isCursorBackend
@@ -620,8 +658,12 @@ export function ChatWindow({
   const sessionEffortLevel = useChatStore(state =>
     deferredSessionId ? state.effortLevels[deferredSessionId] : undefined
   )
-  const selectedEffortLevel: EffortLevel =
+  const rawSelectedEffortLevel: EffortLevel =
     sessionEffortLevel ?? defaultEffortLevel
+  const selectedEffortLevel: EffortLevel =
+    isCodexBackend && rawSelectedEffortLevel === 'max'
+      ? 'high'
+      : rawSelectedEffortLevel
 
   // MCP servers: resolve enabled servers cascade (session → project → global)
   // Fetches from ALL installed backends so toolbar shows grouped sections
@@ -694,11 +736,31 @@ export function ChatWindow({
   // Streaming execution mode - uses executing mode when sending, otherwise selected mode
   const streamingExecutionMode = executingMode ?? executionMode
   // Whether this session is waiting for user input (AskUserQuestion/ExitPlanMode)
-  const isWaitingForInput = useChatStore(state =>
+  const rawIsWaitingForInput = useChatStore(state =>
     activeSessionId
       ? (state.waitingForInputSessionIds[activeSessionId] ?? false)
       : false
   )
+  const rawIsReviewingActiveSession = useChatStore(state =>
+    activeSessionId
+      ? (state.reviewingSessions[activeSessionId] ?? false)
+      : false
+  )
+  const activeSessionForStatus = useMemo(() => {
+    if (!activeSessionId) return null
+    if (session?.id === activeSessionId) return session
+    return sessionsData?.sessions.find(s => s.id === activeSessionId) ?? null
+  }, [activeSessionId, session, sessionsData?.sessions])
+  const isWaitingForInput = activeSessionForStatus
+    ? getEffectiveSessionWaiting(activeSessionForStatus, {
+        waitingForInputSessionIds: rawIsWaitingForInput
+          ? { [activeSessionId as string]: true }
+          : {},
+        reviewingSessions: rawIsReviewingActiveSession
+          ? { [activeSessionId as string]: true }
+          : {},
+      })
+    : rawIsWaitingForInput
   // Per-session error state (uses deferredSessionId for content consistency)
   const currentError = useChatStore(state =>
     deferredSessionId ? (state.errors[deferredSessionId] ?? null) : null
@@ -944,6 +1006,18 @@ export function ChatWindow({
   // State for file content modal (opened by clicking filenames in tool calls)
   const [viewingFilePath, setViewingFilePath] = useState<string | null>(null)
 
+  // State for edited-file diff modal (opened by clicking edited file pills)
+  const [viewingFileEdits, setViewingFileEdits] = useState<{
+    filePath: string
+    edits: FileEdit[]
+  } | null>(null)
+  const handleEditedFileClick = useCallback(
+    (filePath: string, edits: FileEdit[]) => {
+      setViewingFileEdits({ filePath, edits })
+    },
+    []
+  )
+
   // State for git diff modal (opened by clicking diff stats)
   const [diffRequest, setDiffRequest] = useState<DiffRequest | null>(null)
 
@@ -994,12 +1068,6 @@ export function ChatWindow({
   const [planDialogContent, setPlanDialogContent] = useState<string | null>(
     null
   )
-
-  // State for recap dialog
-  const [isRecapDialogOpen, setIsRecapDialogOpen] = useState(false)
-  const [recapDialogDigest, setRecapDialogDigest] =
-    useState<SessionDigest | null>(null)
-  const [isGeneratingRecap, setIsGeneratingRecap] = useState(false)
 
   // Plan dialog approval handlers (DRYs 4x-duplicated onApprove/onApproveYolo callbacks)
   const { handlePlanDialogApprove, handlePlanDialogApproveYolo } =
@@ -1088,7 +1156,7 @@ export function ChatWindow({
       const yoloModel =
         yoloModelRef.current ??
         (yoloBackend === 'codex'
-          ? (preferences?.selected_codex_model ?? 'gpt-5.4')
+          ? (preferences?.selected_codex_model ?? 'gpt-5.5')
           : yoloBackend === 'opencode'
             ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.3-codex')
             : yoloBackend === 'cursor'
@@ -1257,7 +1325,7 @@ export function ChatWindow({
       const buildModel =
         buildModelRef.current ??
         (buildBackend === 'codex'
-          ? (preferences?.selected_codex_model ?? 'gpt-5.4')
+          ? (preferences?.selected_codex_model ?? 'gpt-5.5')
           : buildBackend === 'opencode'
             ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.3-codex')
             : buildBackend === 'cursor'
@@ -1422,8 +1490,6 @@ export function ChatWindow({
         toast.error(`Failed to create worktree: ${err}`)
         return
       }
-      markWorktreeSilentReady(pendingWorktree.id)
-
       // Wait for worktree to be ready
       let readyWorktree: Worktree
       try {
@@ -1507,7 +1573,7 @@ export function ChatWindow({
       const modeModel =
         modeModelRef.current ??
         (modeBackend === 'codex'
-          ? (preferences?.selected_codex_model ?? 'gpt-5.4')
+          ? (preferences?.selected_codex_model ?? 'gpt-5.5')
           : modeBackend === 'opencode'
             ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.3-codex')
             : modeBackend === 'cursor'
@@ -1738,7 +1804,10 @@ export function ChatWindow({
     handlePush,
     handleOpenPr,
     handleReview,
+    handleCodeRabbitReview,
+    handleCodeRabbitPrReview,
     handleMerge,
+    handleMergePr,
     handleResolveConflicts,
     handleResolvePrConflicts,
     executeMerge,
@@ -1886,6 +1955,8 @@ export function ChatWindow({
     worktreeProjectId: worktree?.project_id,
   })
 
+  const [reviewMethodModalOpen, setReviewMethodModalOpen] = useState(false)
+
   // Linked projects modal state
   const linkedProjectsModalOpen = useUIStore(
     state => state.linkedProjectsModalOpen
@@ -1909,6 +1980,7 @@ export function ChatWindow({
     handleOpenPr,
     handleReview,
     handleMerge,
+    handleMergePr,
     handleResolveConflicts,
     handleInvestigateWorkflowRun,
     handleInvestigate,
@@ -2009,46 +2081,37 @@ export function ChatWindow({
     // Extract clean text (without attachment markers)
     const cleanText = stripAllMarkers(message.content)
 
-    // Extract attachment paths from the raw message content
-    const imagePaths = extractImagePaths(message.content)
-    const textFilePaths = extractTextFilePaths(message.content)
-    const fileMentionPaths = extractFileMentionPaths(message.content)
-    const skillPaths = extractSkillPaths(message.content)
-
-    // Build metadata for skill names
-    const skills = skillPaths.map(path => {
+    const metadata = buildPromptAttachmentMetadata(message.content, path => {
       const parts = normalizePath(path).split('/')
       const skillsIdx = parts.findIndex(p => p === 'skills')
-      const name =
-        skillsIdx >= 0 && parts[skillsIdx + 1]
-          ? (parts[skillsIdx + 1] ?? getFilename(path))
-          : getFilename(path)
-      return { name, path }
+      return skillsIdx >= 0 && parts[skillsIdx + 1]
+        ? (parts[skillsIdx + 1] ?? getFilename(path))
+        : getFilename(path)
     })
+    const encodedMetadata = encodePromptAttachmentMetadata(metadata)
+    const fallbackText = appendPromptMetadataToPlainText(cleanText, metadata)
 
-    // Build JSON metadata for attachments
-    const metadata = JSON.stringify({
-      images: imagePaths,
-      textFiles: textFilePaths,
-      files: fileMentionPaths,
-      skills,
-    })
-
-    // Write to clipboard: plain text + HTML with embedded metadata
-    // The HTML contains a hidden span with JSON so ChatInput can detect it on paste
-    const htmlContent = `<span data-jean-prompt="${encodeURIComponent(metadata)}">${cleanText.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>`
+    // Write to clipboard: plain text + HTML with embedded metadata.
+    // The fallback plain text includes a trailing comment sentinel so HTTP web
+    // access (where rich clipboard APIs may be unavailable) preserves
+    // attachments when pasted back into Jean.
+    const escapedCleanText = cleanText
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+    const htmlContent = `<span data-jean-prompt="${encodedMetadata}">${escapedCleanText}</span>`
 
     try {
-      await copyHtmlToClipboard(htmlContent, cleanText)
+      await copyHtmlToClipboard(htmlContent, cleanText, fallbackText)
       toast.success('Prompt copied')
     } catch {
-      // Fallback to plain text
-      await copyToClipboard(cleanText)
-      toast.success('Text copied (without attachments)')
+      // Fallback to plain text with metadata so attachments still round-trip.
+      await copyToClipboard(fallbackText)
+      toast.success('Prompt copied')
     }
   }, [])
 
-  // Window event listeners (focus, plan, recap, git-diff, cancel, create-session, plan approval, etc.)
+  // Window event listeners (focus, plan, git-diff, cancel, create-session, plan approval, etc.)
   useChatWindowEvents({
     inputRef,
     activeSessionId,
@@ -2060,11 +2123,6 @@ export function ChatWindow({
     setPlanDialogContent,
     setIsPlanDialogOpen,
     session,
-    isRecapDialogOpen,
-    recapDialogDigest,
-    setRecapDialogDigest,
-    setIsRecapDialogOpen,
-    setIsGeneratingRecap,
     gitStatus,
     setDiffRequest,
     isAtBottom,
@@ -2072,7 +2130,6 @@ export function ChatWindow({
     currentStreamingContentBlocks,
     isSending,
     currentQueuedMessages,
-    createSession,
     preferences,
     patchPreferences,
     handleSaveContext,
@@ -2216,6 +2273,31 @@ export function ChatWindow({
     ]
   )
 
+  const compactHistoryWindow = useMemo(
+    () => getCurrentPromptWindow(messages),
+    [messages]
+  )
+  const compactScopeKey = `${deferredSessionId ?? 'no-session'}:${
+    messages[compactHistoryWindow.startIndex]?.id ?? 'empty'
+  }`
+  const [expandedCompactScopeKey, setExpandedCompactScopeKey] = useState<
+    string | null
+  >(null)
+  const isCompactHistoryExpanded = expandedCompactScopeKey === compactScopeKey
+  const compactMessages = useMemo(
+    () =>
+      isCompactHistoryExpanded
+        ? messages
+        : messages.slice(compactHistoryWindow.startIndex),
+    [isCompactHistoryExpanded, messages, compactHistoryWindow.startIndex]
+  )
+  const compactLastPlanMessageIndex = isCompactHistoryExpanded
+    ? lastPlanMessageIndex
+    : remapIndexForWindow(lastPlanMessageIndex, compactHistoryWindow.startIndex)
+  const handleShowHiddenCompactPrompts = useCallback(() => {
+    setExpandedCompactScopeKey(compactScopeKey)
+  }, [compactScopeKey])
+
   // Virtualizer for message list - always use virtualization for consistent performance
   // Even small conversations benefit from virtualization when messages have heavy content
   // Note: MainWindowContent handles the case when no worktree is selected
@@ -2227,8 +2309,12 @@ export function ChatWindow({
     )
   }
 
+  const isTerminalPrimarySurface =
+    primarySurface === 'terminal' && !!activeSessionId && !!sessionTerminalId
+
   return (
     <ErrorBoundary
+      resetKeys={[activeWorktreeId]}
       onError={(error, errorInfo) => {
         logger.error('ChatWindow crashed', {
           error: error.message,
@@ -2254,7 +2340,22 @@ export function ChatWindow({
       )}
     >
       <div className="flex h-full w-full min-w-0 flex-col overflow-hidden">
-        {showReviewFullWidth && activeSessionId ? (
+        <ReviewMethodModal
+          open={reviewMethodModalOpen}
+          onOpenChange={setReviewMethodModalOpen}
+          onAiReview={handleReview}
+          onCodeRabbitCliReview={handleCodeRabbitReview}
+          onCodeRabbitPrReview={handleCodeRabbitPrReview}
+          codeRabbitPrAvailable={Boolean(worktree?.pr_number)}
+        />
+        {isTerminalPrimarySurface ? (
+          <FullScreenTerminalSurface
+            worktreeId={activeWorktreeId}
+            worktreePath={activeWorktreePath}
+            sessionId={activeSessionId}
+            terminalId={sessionTerminalId}
+          />
+        ) : showReviewFullWidth && activeSessionId ? (
           <div className="flex-1 min-h-0">
             <ReviewResultsPanel
               sessionId={activeSessionId}
@@ -2287,10 +2388,6 @@ export function ChatWindow({
                       <ChatSearchBar scrollContainerRef={scrollViewportRef} />
                       {/* Bottom fade gradient so messages don't hard-cut at the input area */}
                       <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-10 h-8 bg-gradient-to-b from-transparent to-background" />
-                      {/* Session digest reminder (shows when opening a session that had activity while out of focus) */}
-                      {activeSessionId && (
-                        <SessionDigestReminder sessionId={activeSessionId} />
-                      )}
                       <ScrollArea
                         className="h-full w-full"
                         viewportRef={scrollViewportRef}
@@ -2298,7 +2395,7 @@ export function ChatWindow({
                         onScroll={handleScroll}
                       >
                         <div className="mx-auto max-w-7xl px-4 pt-4 pb-6 md:px-6 min-w-0 w-full">
-                          <div className="select-text space-y-4 font-mono text-sm min-w-0 break-words overflow-x-auto">
+                          <div className="select-text space-y-4 font-mono text-sm min-w-0 break-words overflow-x-hidden">
                             {/* Debug info (enabled via Settings → Experimental → Debug mode) */}
                             {preferences?.debug_mode_enabled &&
                               activeWorktreeId &&
@@ -2339,6 +2436,12 @@ export function ChatWindow({
                                 }
                               />
                             )}
+                            <CodexGoalBanner
+                              sessionId={activeSessionId ?? null}
+                              worktreeId={activeWorktreeId ?? null}
+                              worktreePath={activeWorktreePath ?? null}
+                              isCodexBackend={isCodexBackend}
+                            />
                             {isLoading ||
                             isSessionsLoading ||
                             isSessionSwitching ? (
@@ -2356,71 +2459,149 @@ export function ChatWindow({
                                       projectId={worktree?.project_id}
                                     />
                                   )}
-                                <VirtualizedMessageList
-                                  ref={virtualizedListRef}
-                                  messages={messages}
-                                  scrollContainerRef={scrollViewportRef}
-                                  totalMessages={messages.length}
-                                  lastPlanMessageIndex={lastPlanMessageIndex}
-                                  sessionId={deferredSessionId ?? ''}
-                                  worktreePath={activeWorktreePath ?? ''}
-                                  approveShortcut={approveShortcut}
-                                  approveShortcutYolo={approveShortcutYolo}
-                                  approveShortcutClearContext={
-                                    approveShortcutClearContext
-                                  }
-                                  approveShortcutClearContextBuild={
-                                    approveShortcutClearContextBuild
-                                  }
-                                  approveButtonRef={approveButtonRef}
-                                  isSending={isSending}
-                                  onPlanApproval={
-                                    isCursorBackend
-                                      ? handleClearContextApprovalBuild
-                                      : handlePlanApproval
-                                  }
-                                  onPlanApprovalYolo={
-                                    isCursorBackend
-                                      ? handleClearContextApproval
-                                      : handlePlanApprovalYolo
-                                  }
-                                  onClearContextApproval={
-                                    handleClearContextApproval
-                                  }
-                                  onClearContextApprovalBuild={
-                                    handleClearContextApprovalBuild
-                                  }
-                                  onWorktreeBuildApproval={
-                                    worktree?.project_id
-                                      ? handleWorktreeBuildApproval
-                                      : undefined
-                                  }
-                                  onWorktreeYoloApproval={
-                                    worktree?.project_id
-                                      ? handleWorktreeYoloApproval
-                                      : undefined
-                                  }
-                                  onQuestionAnswer={handleQuestionAnswer}
-                                  onQuestionSkip={handleSkipQuestion}
-                                  onFileClick={setViewingFilePath}
-                                  onEditedFileClick={setViewingFilePath}
-                                  onFixFinding={handleFixFinding}
-                                  onFixAllFindings={handleFixAllFindings}
-                                  isQuestionAnswered={isQuestionAnswered}
-                                  getSubmittedAnswers={getSubmittedAnswers}
-                                  areQuestionsSkipped={areQuestionsSkipped}
-                                  isFindingFixed={isFindingFixed}
-                                  onCopyToInput={handleCopyToInput}
-                                  shouldScrollToBottom={isAtBottom}
-                                  onScrollToBottomHandled={
-                                    handleScrollToBottomHandled
-                                  }
-                                  completedDurationMs={completedDurationMs}
-                                  hasOlderOnDisk={hasOlderOnDisk}
-                                  isLoadingOlder={loadOlderMessages.isPending}
-                                  onLoadOlderRuns={handleLoadOlderRuns}
-                                  loadedRunStartIndex={loadedRunStartIndex}
-                                />
+                                {preferences?.compact_chat_view_enabled ? (
+                                  <CompactMessageList
+                                    ref={virtualizedListRef}
+                                    messages={compactMessages}
+                                    scrollContainerRef={scrollViewportRef}
+                                    totalMessages={compactMessages.length}
+                                    lastPlanMessageIndex={
+                                      compactLastPlanMessageIndex
+                                    }
+                                    sessionId={deferredSessionId ?? ''}
+                                    worktreePath={activeWorktreePath ?? ''}
+                                    approveShortcut={approveShortcut}
+                                    approveShortcutYolo={approveShortcutYolo}
+                                    approveShortcutClearContext={
+                                      approveShortcutClearContext
+                                    }
+                                    approveShortcutClearContextBuild={
+                                      approveShortcutClearContextBuild
+                                    }
+                                    approveButtonRef={approveButtonRef}
+                                    isSending={isSending}
+                                    onPlanApproval={
+                                      isCursorBackend
+                                        ? handleClearContextApprovalBuild
+                                        : handlePlanApproval
+                                    }
+                                    onPlanApprovalYolo={
+                                      isCursorBackend
+                                        ? handleClearContextApproval
+                                        : handlePlanApprovalYolo
+                                    }
+                                    onClearContextApproval={
+                                      handleClearContextApproval
+                                    }
+                                    onClearContextApprovalBuild={
+                                      handleClearContextApprovalBuild
+                                    }
+                                    onWorktreeBuildApproval={
+                                      worktree?.project_id
+                                        ? handleWorktreeBuildApproval
+                                        : undefined
+                                    }
+                                    onWorktreeYoloApproval={
+                                      worktree?.project_id
+                                        ? handleWorktreeYoloApproval
+                                        : undefined
+                                    }
+                                    onQuestionAnswer={handleQuestionAnswer}
+                                    onQuestionSkip={handleSkipQuestion}
+                                    onFileClick={setViewingFilePath}
+                                    onEditedFileClick={handleEditedFileClick}
+                                    onFixFinding={handleFixFinding}
+                                    onFixAllFindings={handleFixAllFindings}
+                                    isQuestionAnswered={isQuestionAnswered}
+                                    getSubmittedAnswers={getSubmittedAnswers}
+                                    areQuestionsSkipped={areQuestionsSkipped}
+                                    isFindingFixed={isFindingFixed}
+                                    onCopyToInput={handleCopyToInput}
+                                    shouldScrollToBottom={isAtBottom}
+                                    onScrollToBottomHandled={
+                                      handleScrollToBottomHandled
+                                    }
+                                    completedDurationMs={completedDurationMs}
+                                    hasOlderOnDisk={hasOlderOnDisk}
+                                    isLoadingOlder={loadOlderMessages.isPending}
+                                    onLoadOlderRuns={handleLoadOlderRuns}
+                                    loadedRunStartIndex={loadedRunStartIndex}
+                                    hiddenPromptCount={
+                                      isCompactHistoryExpanded
+                                        ? 0
+                                        : compactHistoryWindow.hiddenPromptCount
+                                    }
+                                    onShowHiddenPrompts={
+                                      handleShowHiddenCompactPrompts
+                                    }
+                                  />
+                                ) : (
+                                  <VirtualizedMessageList
+                                    ref={virtualizedListRef}
+                                    messages={messages}
+                                    scrollContainerRef={scrollViewportRef}
+                                    totalMessages={messages.length}
+                                    lastPlanMessageIndex={lastPlanMessageIndex}
+                                    sessionId={deferredSessionId ?? ''}
+                                    worktreePath={activeWorktreePath ?? ''}
+                                    approveShortcut={approveShortcut}
+                                    approveShortcutYolo={approveShortcutYolo}
+                                    approveShortcutClearContext={
+                                      approveShortcutClearContext
+                                    }
+                                    approveShortcutClearContextBuild={
+                                      approveShortcutClearContextBuild
+                                    }
+                                    approveButtonRef={approveButtonRef}
+                                    isSending={isSending}
+                                    onPlanApproval={
+                                      isCursorBackend
+                                        ? handleClearContextApprovalBuild
+                                        : handlePlanApproval
+                                    }
+                                    onPlanApprovalYolo={
+                                      isCursorBackend
+                                        ? handleClearContextApproval
+                                        : handlePlanApprovalYolo
+                                    }
+                                    onClearContextApproval={
+                                      handleClearContextApproval
+                                    }
+                                    onClearContextApprovalBuild={
+                                      handleClearContextApprovalBuild
+                                    }
+                                    onWorktreeBuildApproval={
+                                      worktree?.project_id
+                                        ? handleWorktreeBuildApproval
+                                        : undefined
+                                    }
+                                    onWorktreeYoloApproval={
+                                      worktree?.project_id
+                                        ? handleWorktreeYoloApproval
+                                        : undefined
+                                    }
+                                    onQuestionAnswer={handleQuestionAnswer}
+                                    onQuestionSkip={handleSkipQuestion}
+                                    onFileClick={setViewingFilePath}
+                                    onEditedFileClick={handleEditedFileClick}
+                                    onFixFinding={handleFixFinding}
+                                    onFixAllFindings={handleFixAllFindings}
+                                    isQuestionAnswered={isQuestionAnswered}
+                                    getSubmittedAnswers={getSubmittedAnswers}
+                                    areQuestionsSkipped={areQuestionsSkipped}
+                                    isFindingFixed={isFindingFixed}
+                                    onCopyToInput={handleCopyToInput}
+                                    shouldScrollToBottom={isAtBottom}
+                                    onScrollToBottomHandled={
+                                      handleScrollToBottomHandled
+                                    }
+                                    completedDurationMs={completedDurationMs}
+                                    hasOlderOnDisk={hasOlderOnDisk}
+                                    isLoadingOlder={loadOlderMessages.isPending}
+                                    onLoadOlderRuns={handleLoadOlderRuns}
+                                    loadedRunStartIndex={loadedRunStartIndex}
+                                  />
+                                )}
                               </>
                             )}
                             {/* Streaming response + elapsed timer in one wrapper to avoid space-y-4 gap */}
@@ -2428,23 +2609,40 @@ export function ChatWindow({
                               <div>
                                 {(currentStreamingContentBlocks.length > 0 ||
                                   currentToolCalls.length > 0 ||
-                                  streamingContent.trim().length > 0) && (
-                                  <StreamingMessage
-                                    sessionId={activeSessionId}
-                                    contentBlocks={
-                                      currentStreamingContentBlocks
-                                    }
-                                    toolCalls={currentToolCalls}
-                                    streamingContent={streamingContent}
-                                    onQuestionAnswer={handleQuestionAnswer}
-                                    onQuestionSkip={handleSkipQuestion}
-                                    onFileClick={setViewingFilePath}
-                                    onEditedFileClick={setViewingFilePath}
-                                    isQuestionAnswered={isQuestionAnswered}
-                                    getSubmittedAnswers={getSubmittedAnswers}
-                                    areQuestionsSkipped={areQuestionsSkipped}
-                                  />
-                                )}
+                                  streamingContent.trim().length > 0) &&
+                                  (preferences?.compact_chat_view_enabled ? (
+                                    <CompactStreamingTicker
+                                      sessionId={activeSessionId}
+                                      contentBlocks={
+                                        currentStreamingContentBlocks
+                                      }
+                                      toolCalls={currentToolCalls}
+                                      streamingContent={streamingContent}
+                                      onQuestionAnswer={handleQuestionAnswer}
+                                      onQuestionSkip={handleSkipQuestion}
+                                      onFileClick={setViewingFilePath}
+                                      onEditedFileClick={handleEditedFileClick}
+                                      isQuestionAnswered={isQuestionAnswered}
+                                      getSubmittedAnswers={getSubmittedAnswers}
+                                      areQuestionsSkipped={areQuestionsSkipped}
+                                    />
+                                  ) : (
+                                    <StreamingMessage
+                                      sessionId={activeSessionId}
+                                      contentBlocks={
+                                        currentStreamingContentBlocks
+                                      }
+                                      toolCalls={currentToolCalls}
+                                      streamingContent={streamingContent}
+                                      onQuestionAnswer={handleQuestionAnswer}
+                                      onQuestionSkip={handleSkipQuestion}
+                                      onFileClick={setViewingFilePath}
+                                      onEditedFileClick={handleEditedFileClick}
+                                      isQuestionAnswered={isQuestionAnswered}
+                                      getSubmittedAnswers={getSubmittedAnswers}
+                                      areQuestionsSkipped={areQuestionsSkipped}
+                                    />
+                                  ))}
                                 <StreamingStatusBar
                                   isSending={isSending}
                                   sendStartedAt={sendStartedAt}
@@ -2649,6 +2847,35 @@ export function ChatWindow({
                                 : undefined
                             }
                           >
+                            {/* Loaded context preview (# mentions) */}
+                            <ContextPreview
+                              sessionId={activeSessionId}
+                              worktreeId={null}
+                              worktreePath={activeWorktreePath}
+                              projectId={worktree?.project_id ?? null}
+                              disabled={isSending}
+                              excludeIssueNumber={
+                                worktree?.issue_number ?? null
+                              }
+                              excludePrNumber={
+                                worktree?.issue_number ||
+                                worktree?.security_alert_number ||
+                                worktree?.advisory_ghsa_id ||
+                                worktree?.linear_issue_identifier
+                                  ? null
+                                  : (worktree?.pr_number ?? null)
+                              }
+                              excludeSecurityAlertNumber={
+                                worktree?.security_alert_number ?? null
+                              }
+                              excludeAdvisoryGhsaId={
+                                worktree?.advisory_ghsa_id ?? null
+                              }
+                              excludeLinearIssueIdentifier={
+                                worktree?.linear_issue_identifier ?? null
+                              }
+                            />
+
                             {/* Pending file preview (@ mentions) */}
                             <FilePreview
                               files={currentPendingFiles}
@@ -2665,7 +2892,6 @@ export function ChatWindow({
                             <TextFilePreview
                               textFiles={currentPendingTextFiles}
                               onRemove={handleRemovePendingTextFile}
-                              disabled={isSending}
                               sessionId={activeSessionId}
                             />
 
@@ -2690,7 +2916,13 @@ export function ChatWindow({
                                 (todoSourceMessageId !== null &&
                                   todoSourceMessageId !==
                                     dismissedTodoMessageId)) && (
-                                <div className="px-4 md:px-6 pt-2 xl:hidden">
+                                <div
+                                  className={
+                                    terminalPanelOpen
+                                      ? 'px-4 md:px-6 pt-2'
+                                      : 'px-4 md:px-6 pt-2 xl:hidden'
+                                  }
+                                >
                                   <TodoWidget
                                     todos={normalizeTodosForDisplay(
                                       activeTodos,
@@ -2712,7 +2944,13 @@ export function ChatWindow({
                                 (agentSourceMessageId !== null &&
                                   agentSourceMessageId !==
                                     dismissedAgentMessageId)) && (
-                                <div className="px-4 md:px-6 pt-2 xl:hidden">
+                                <div
+                                  className={
+                                    terminalPanelOpen
+                                      ? 'px-4 md:px-6 pt-2'
+                                      : 'px-4 md:px-6 pt-2 xl:hidden'
+                                  }
+                                >
                                   <AgentWidget
                                     agents={activeAgents}
                                     isStreaming={agentIsFromStreaming}
@@ -2730,6 +2968,7 @@ export function ChatWindow({
                               <ChatInput
                                 activeSessionId={activeSessionId}
                                 activeWorktreePath={activeWorktreePath}
+                                activeProjectId={worktree?.project_id ?? null}
                                 isSending={isSending}
                                 executionMode={executionMode}
                                 canSwitchBackendWithTab={
@@ -2752,6 +2991,7 @@ export function ChatWindow({
                                 formRef={formRef}
                                 inputRef={inputRef}
                                 installedBackends={installedBackends}
+                                selectedBackend={selectedBackend}
                               />
                             </div>
 
@@ -2810,8 +3050,9 @@ export function ChatWindow({
                                 onCommit={handleCommit}
                                 onCommitAndPush={handleCommitAndPushWithPicker}
                                 onOpenPr={handleOpenPr}
-                                onReview={() => handleReview()}
+                                onReview={() => setReviewMethodModalOpen(true)}
                                 onMerge={handleMerge}
+                                onMergePr={handleMergePr}
                                 onResolvePrConflicts={handleResolvePrConflicts}
                                 onBackendModelChange={
                                   handleToolbarBackendModelChange
@@ -2852,72 +3093,72 @@ export function ChatWindow({
                           </form>
 
                           {/* Side panel widgets (Tasks + Agents) for wide screens */}
-                          {(activeTodos.length > 0 ||
-                            activeAgents.length > 0) && (
-                            <div className="hidden xl:flex flex-col gap-2 absolute left-full bottom-0 ml-3 w-64 z-20">
-                              {activeTodos.length > 0 &&
-                                (dismissedTodoMessageId === null ||
-                                  (todoSourceMessageId !== null &&
-                                    todoSourceMessageId !==
-                                      dismissedTodoMessageId)) && (
-                                  <TodoWidget
-                                    todos={normalizeTodosForDisplay(
-                                      activeTodos,
-                                      isFromStreaming
-                                    )}
-                                    isStreaming={isSending}
-                                    onClose={() =>
-                                      setDismissedTodoMessageId(
-                                        todoSourceMessageId ?? '__streaming__'
-                                      )
-                                    }
-                                  />
-                                )}
-                              {activeAgents.length > 0 &&
-                                (dismissedAgentMessageId === null ||
-                                  (agentSourceMessageId !== null &&
-                                    agentSourceMessageId !==
-                                      dismissedAgentMessageId)) && (
-                                  <AgentWidget
-                                    agents={activeAgents}
-                                    isStreaming={agentIsFromStreaming}
-                                    onClose={() =>
-                                      setDismissedAgentMessageId(
-                                        agentSourceMessageId ?? '__streaming__'
-                                      )
-                                    }
-                                  />
-                                )}
-                            </div>
-                          )}
+                          {!terminalPanelOpen &&
+                            (activeTodos.length > 0 ||
+                              activeAgents.length > 0) && (
+                              <div className="hidden xl:flex flex-col gap-2 absolute left-full bottom-0 ml-3 w-64 z-20">
+                                {activeTodos.length > 0 &&
+                                  (dismissedTodoMessageId === null ||
+                                    (todoSourceMessageId !== null &&
+                                      todoSourceMessageId !==
+                                        dismissedTodoMessageId)) && (
+                                    <TodoWidget
+                                      todos={normalizeTodosForDisplay(
+                                        activeTodos,
+                                        isFromStreaming
+                                      )}
+                                      isStreaming={isSending}
+                                      onClose={() =>
+                                        setDismissedTodoMessageId(
+                                          todoSourceMessageId ?? '__streaming__'
+                                        )
+                                      }
+                                    />
+                                  )}
+                                {activeAgents.length > 0 &&
+                                  (dismissedAgentMessageId === null ||
+                                    (agentSourceMessageId !== null &&
+                                      agentSourceMessageId !==
+                                        dismissedAgentMessageId)) && (
+                                    <AgentWidget
+                                      agents={activeAgents}
+                                      isStreaming={agentIsFromStreaming}
+                                      onClose={() =>
+                                        setDismissedAgentMessageId(
+                                          agentSourceMessageId ??
+                                            '__streaming__'
+                                        )
+                                      }
+                                    />
+                                  )}
+                              </div>
+                            )}
                         </div>
                       </div>
                     </div>
                   </div>
                 </ResizablePanel>
 
-                {/* Terminal panel - only render when panel is open (hidden in modal view) */}
-                {!isModal &&
-                  activeWorktreePath &&
-                  terminalPanelOpen && (
-                    <>
-                      <ResizableHandle withHandle />
-                      <ResizablePanel
-                        ref={terminalPanelRef}
-                        defaultSize={terminalVisible ? 30 : 4}
-                        minSize={terminalVisible ? 15 : 4}
-                        collapsible
-                        collapsedSize={4}
-                        onCollapse={handleTerminalCollapse}
+                {/* Terminal panel - only render when panel is open (not in modal) */}
+                {!isModal && activeWorktreePath && terminalPanelOpen && (
+                  <>
+                    <ResizableHandle withHandle />
+                    <ResizablePanel
+                      ref={terminalPanelRef}
+                      defaultSize={terminalVisible ? 30 : 4}
+                      minSize={terminalVisible ? 15 : 4}
+                      collapsible
+                      collapsedSize={4}
+                      onCollapse={handleTerminalCollapse}
+                      onExpand={handleTerminalExpand}
+                    >
+                      <TerminalPanel
+                        isCollapsed={!terminalVisible}
                         onExpand={handleTerminalExpand}
-                      >
-                        <TerminalPanel
-                          isCollapsed={!terminalVisible}
-                          onExpand={handleTerminalExpand}
-                        />
-                      </ResizablePanel>
-                    </>
-                  )}
+                      />
+                    </ResizablePanel>
+                  </>
+                )}
               </ResizablePanelGroup>
             </ResizablePanel>
 
@@ -2950,6 +3191,13 @@ export function ChatWindow({
         <FileContentModal
           filePath={viewingFilePath}
           onClose={() => setViewingFilePath(null)}
+        />
+
+        {/* Edited-file diff modal for viewing diffs of edited files */}
+        <FileEditsDiffModal
+          filePath={viewingFileEdits?.filePath ?? null}
+          edits={viewingFileEdits?.edits ?? []}
+          onClose={() => setViewingFileEdits(null)}
         />
 
         {/* Git diff modal for viewing diffs */}
@@ -3086,20 +3334,6 @@ export function ChatWindow({
               }
             />
           ) : null)}
-
-        {/* Recap dialog */}
-        <RecapDialog
-          digest={recapDialogDigest}
-          isOpen={isRecapDialogOpen}
-          onClose={() => {
-            setIsRecapDialogOpen(false)
-            setRecapDialogDigest(null)
-          }}
-          isGenerating={isGeneratingRecap}
-          onRegenerate={() =>
-            window.dispatchEvent(new CustomEvent('open-recap'))
-          }
-        />
 
         {/* Merge options dialog */}
         <AlertDialog open={showMergeDialog} onOpenChange={setShowMergeDialog}>

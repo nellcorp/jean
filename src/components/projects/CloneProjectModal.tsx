@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import { toast } from 'sonner'
 import { isNativeApp } from '@/lib/environment'
 import { Loader2, Globe, FolderOpen, AlertCircle } from 'lucide-react'
 import {
@@ -15,6 +14,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useProjectsStore } from '@/store/projects-store'
 import { useCloneProject } from '@/services/projects'
+import { DirectoryBrowser } from '@/components/projects/DirectoryBrowser'
+import { toast } from 'sonner'
 
 /** Extract a repository name from a git URL (strips .git suffix) */
 function extractRepoName(url: string): string {
@@ -36,9 +37,9 @@ export function CloneProjectModal() {
   const [url, setUrl] = useState('')
   const [destination, setDestination] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [browserOpen, setBrowserOpen] = useState(false)
 
   const repoName = useMemo(() => extractRepoName(url), [url])
-  const native = isNativeApp()
 
   // Reset state when modal closes
   useEffect(() => {
@@ -46,6 +47,7 @@ export function CloneProjectModal() {
       setUrl('')
       setDestination('')
       setError(null)
+      setBrowserOpen(false)
     }
   }, [cloneModalOpen])
 
@@ -60,7 +62,10 @@ export function CloneProjectModal() {
   )
 
   const handleBrowse = useCallback(async () => {
-    if (!native) return
+    if (!isNativeApp()) {
+      setBrowserOpen(true)
+      return
+    }
 
     try {
       const { save } = await import('@tauri-apps/plugin-dialog')
@@ -76,21 +81,16 @@ export function CloneProjectModal() {
       // User cancelled
       if (error instanceof Error && error.message.includes('cancel')) return
     }
-  }, [native, repoName])
+  }, [repoName])
 
   const handleClone = useCallback(async () => {
     const trimmedUrl = url.trim()
-    const trimmedDestination = destination.trim()
     if (!trimmedUrl) {
       setError('Please enter a git URL.')
       return
     }
-    if (!trimmedDestination) {
-      setError(
-        native
-          ? 'Please choose a destination directory.'
-          : 'Please enter a destination path.'
-      )
+    if (!destination) {
+      setError('Please choose a destination directory.')
       return
     }
 
@@ -105,7 +105,7 @@ export function CloneProjectModal() {
     try {
       await cloneProject.mutateAsync({
         url: trimmedUrl,
-        path: trimmedDestination,
+        path: destination,
         parentId: addProjectParentFolderId ?? undefined,
       })
       toast.dismiss(toastId)
@@ -116,7 +116,6 @@ export function CloneProjectModal() {
   }, [
     url,
     destination,
-    native,
     repoName,
     cloneProject,
     addProjectParentFolderId,
@@ -126,45 +125,43 @@ export function CloneProjectModal() {
 
   return (
     <Dialog open={cloneModalOpen} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Globe className="h-5 w-5" />
-            Clone Repository
-          </DialogTitle>
-          <DialogDescription>
-            Clone a remote git repository by URL.
-          </DialogDescription>
-        </DialogHeader>
+      <>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Globe className="h-5 w-5" />
+              Clone Repository
+            </DialogTitle>
+            <DialogDescription>
+              Clone a remote git repository by URL.
+            </DialogDescription>
+          </DialogHeader>
 
-        <div className="space-y-4 py-4">
-          {/* Git URL input */}
-          <div className="space-y-1.5">
-            <Label htmlFor="clone-url" className="text-xs">
-              Repository URL
-            </Label>
-            <Input
-              id="clone-url"
-              placeholder="https://github.com/user/repo.git"
-              value={url}
-              onChange={e => setUrl(e.target.value)}
-              disabled={cloneProject.isPending}
-              autoFocus
-              onKeyDown={e => {
-                if (e.key === 'Enter' && url.trim() && destination.trim()) {
-                  e.preventDefault()
-                  handleClone()
-                }
-              }}
-            />
-          </div>
+          <div className="space-y-4 py-4">
+            {/* Git URL input */}
+            <div className="space-y-1.5">
+              <Label htmlFor="clone-url" className="text-xs">
+                Repository URL
+              </Label>
+              <Input
+                id="clone-url"
+                placeholder="https://github.com/user/repo.git"
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                disabled={cloneProject.isPending}
+                autoFocus
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && url.trim() && destination) {
+                    e.preventDefault()
+                    handleClone()
+                  }
+                }}
+              />
+            </div>
 
-          {/* Destination picker (native) or text input (web) */}
-          <div className="space-y-1.5">
-            <Label htmlFor="clone-destination" className="text-xs">
-              Destination
-            </Label>
-            {native ? (
+            {/* Destination picker */}
+            <div className="space-y-1.5">
+              <Label className="text-xs">Destination</Label>
               <div className="flex gap-2">
                 <Button
                   variant="outline"
@@ -178,64 +175,52 @@ export function CloneProjectModal() {
                   </span>
                 </Button>
               </div>
-            ) : (
-              <>
-                <Input
-                  id="clone-destination"
-                  placeholder="/projects/my-repo"
-                  value={destination}
-                  onChange={e => setDestination(e.target.value)}
-                  disabled={cloneProject.isPending}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && url.trim() && destination.trim()) {
-                      e.preventDefault()
-                      handleClone()
-                    }
-                  }}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Enter an absolute path inside the server. The repository will
-                  be cloned into this directory.
+              {destination && (
+                <p className="truncate text-xs text-muted-foreground">
+                  {destination}
                 </p>
-              </>
-            )}
-            {native && destination && (
-              <p className="truncate text-xs text-muted-foreground">
-                {destination}
-              </p>
+              )}
+            </div>
+
+            {/* Error display */}
+            {error && (
+              <div className="flex items-start gap-2 rounded-lg bg-destructive/10 p-3 text-destructive">
+                <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
+                <div className="text-sm">{error}</div>
+              </div>
             )}
           </div>
 
-          {/* Error display */}
-          {error && (
-            <div className="flex items-start gap-2 rounded-lg bg-destructive/10 p-3 text-destructive">
-              <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
-              <div className="text-sm">{error}</div>
-            </div>
-          )}
-        </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => handleOpenChange(false)}
+              disabled={cloneProject.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleClone}
+              disabled={cloneProject.isPending || !url.trim() || !destination}
+            >
+              {cloneProject.isPending && (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              )}
+              Clone
+            </Button>
+          </DialogFooter>
+        </DialogContent>
 
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => handleOpenChange(false)}
-            disabled={cloneProject.isPending}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={handleClone}
-            disabled={
-              cloneProject.isPending || !url.trim() || !destination.trim()
-            }
-          >
-            {cloneProject.isPending && (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            )}
-            Clone
-          </Button>
-        </DialogFooter>
-      </DialogContent>
+        <DirectoryBrowser
+          open={browserOpen}
+          onOpenChange={setBrowserOpen}
+          onSelect={setDestination}
+          mode="save"
+          title="Choose clone destination"
+          description="Choose a parent folder and enter the cloned repository name."
+          defaultName={repoName || 'repo'}
+        />
+      </>
     </Dialog>
   )
 }

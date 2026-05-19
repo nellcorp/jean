@@ -3,6 +3,7 @@ import { devtools } from 'zustand/middleware'
 import {
   isAskUserQuestion,
   type ToolCall,
+  type ToolLiveEvent,
   type QuestionAnswer,
   type SetupScriptResult,
   type ThinkingLevel,
@@ -21,21 +22,27 @@ import {
   type CodexMcpElicitationRequest,
   type CodexDynamicToolCallRequest,
   type ExecutionMode,
-  type SessionDigest,
   type LabelData,
+  type ScheduledWakeup,
   EXECUTION_MODE_CYCLE,
   isPlanToolCall,
 } from '@/types/chat'
+
+export type ScheduledWakeupStatus = 'pending' | 'fired' | 'cancelled'
+
+export interface ScheduledWakeupState extends ScheduledWakeup {
+  status: ScheduledWakeupStatus
+}
 import type { ReviewResponse } from '@/types/projects'
 import { invoke } from '@/lib/transport'
 import type { ClaudeModel, CodexModel } from '@/types/preferences'
 export type { ClaudeModel, CodexModel }
 
 /** Default model to use when none is selected (fallback only - preferences take priority) */
-export const DEFAULT_MODEL: ClaudeModel = 'claude-opus-4-7'
+export const DEFAULT_MODEL: ClaudeModel = 'claude-opus-4-7[1m]'
 
 /** Default Codex model */
-export const DEFAULT_CODEX_MODEL: CodexModel = 'gpt-5.4'
+export const DEFAULT_CODEX_MODEL: CodexModel = 'gpt-5.5'
 
 /** Default thinking level */
 export const DEFAULT_THINKING_LEVEL: ThinkingLevel = 'off'
@@ -142,6 +149,10 @@ interface ChatUIState {
   // Enabled MCP servers per session (server names that are active)
   enabledMcpServers: Record<string, string[]>
 
+  // Pending/fired/cancelled ScheduleWakeup entries keyed by tool_call_id
+  // so ToolCallInline can render a live countdown + status indicator.
+  scheduledWakeups: Record<string, ScheduledWakeupState>
+
   // Answered questions per session (to make them read-only after answering)
   answeredQuestions: Record<string, Set<string>>
 
@@ -234,6 +245,11 @@ interface ChatUIState {
   // Sessions marked as "reviewing" (persisted)
   reviewingSessions: Record<string, boolean>
 
+  // Sessions currently being cancelled — suppresses session-level refetches
+  // until the cancel handler's save_cancelled_message resolves and disk is
+  // reconciled with the optimistic message in the TanStack Query cache.
+  cancellingSessionIds: Record<string, boolean>
+
   // Plan file paths per session (persisted)
   planFilePaths: Record<string, string | null>
 
@@ -246,17 +262,14 @@ interface ChatUIState {
   // Sessions where user skipped questions (auto-skip all subsequent questions)
   skippedQuestionSessions: Record<string, boolean>
 
-  // Sessions that completed while out of focus, need digest on open (persisted)
-  pendingDigestSessionIds: Record<string, boolean>
-
-  // Generated session digests (cached until dismissed)
-  sessionDigests: Record<string, SessionDigest>
-
   // Worktree loading operations (commit, pr, review, merge, pull)
   worktreeLoadingOperations: Record<string, string | null>
 
   // User-assigned labels per session (e.g. "Needs testing")
   sessionLabels: Record<string, LabelData>
+
+  // Codex `/goal` long-horizon objectives keyed by sessionId (codex backend only)
+  codexGoals: Record<string, string>
 
   // Pending magic command to execute when ChatWindow mounts (from canvas navigation)
   pendingMagicCommand: { command: string; prompt?: string } | null
@@ -292,9 +305,22 @@ interface ChatUIState {
     rowIndex: number
   ) => void
 
+  // Actions - ScheduleWakeup indicator state (keyed by tool_call_id)
+  setScheduledWakeup: (toolCallId: string, wakeup: ScheduledWakeupState) => void
+  markScheduledWakeupStatus: (
+    toolCallId: string,
+    status: ScheduledWakeupStatus
+  ) => void
+  removeScheduledWakeup: (toolCallId: string) => void
+
   // Actions - Reviewing status management (persisted)
   setSessionReviewing: (sessionId: string, reviewing: boolean) => void
   isSessionReviewing: (sessionId: string) => boolean
+
+  // Actions - Cancelling status management (transient)
+  addCancellingSession: (sessionId: string) => void
+  removeCancellingSession: (sessionId: string) => void
+  isSessionCancelling: (sessionId: string) => boolean
 
   // Actions - Session label management (persisted)
   setSessionLabel: (sessionId: string, label: LabelData | null) => void
@@ -302,6 +328,10 @@ interface ChatUIState {
   // Actions - Plan file path management (persisted)
   setPlanFilePath: (sessionId: string, path: string | null) => void
   getPlanFilePath: (sessionId: string) => string | null
+
+  // Actions - Codex /goal objective management (persisted via session metadata)
+  setCodexGoal: (sessionId: string, goal: string | null) => void
+  getCodexGoal: (sessionId: string) => string | null
 
   // Actions - Pending plan message ID management (persisted)
   setPendingPlanMessageId: (sessionId: string, messageId: string | null) => void
@@ -348,6 +378,18 @@ interface ChatUIState {
     sessionId: string,
     toolUseId: string,
     output: string
+  ) => void
+  /** Append a live event (Monitor notification, status change) to a tool call. */
+  appendToolEvent: (
+    sessionId: string,
+    toolUseId: string,
+    event: ToolLiveEvent
+  ) => void
+  /** Set a tool call's lifecycle status (armed/running/done/timeout/error). */
+  setToolCallStatus: (
+    sessionId: string,
+    toolUseId: string,
+    status: NonNullable<ToolCall['status']>
   ) => void
   clearToolCalls: (sessionId: string) => void
 
@@ -600,13 +642,6 @@ interface ChatUIState {
   setSavingContext: (sessionId: string, saving: boolean) => void
   isSavingContext: (sessionId: string) => boolean
 
-  // Actions - Session digest (context recall after switching)
-  markSessionNeedsDigest: (sessionId: string) => void
-  clearPendingDigest: (sessionId: string) => void
-  setSessionDigest: (sessionId: string, digest: SessionDigest) => void
-  hasPendingDigest: (sessionId: string) => boolean
-  getSessionDigest: (sessionId: string) => SessionDigest | undefined
-
   // Actions - Worktree loading operations (commit, pr, review, merge, pull)
   setWorktreeLoading: (worktreeId: string, operation: string) => void
   clearWorktreeLoading: (worktreeId: string) => void
@@ -652,6 +687,7 @@ export const useChatStore = create<ChatUIState>()(
       selectedModels: {},
       selectedProviders: {},
       enabledMcpServers: {},
+      scheduledWakeups: {},
       answeredQuestions: {},
       submittedAnswers: {},
       errors: {},
@@ -678,14 +714,14 @@ export const useChatStore = create<ChatUIState>()(
       lastCompaction: {},
       compactingSessions: {},
       reviewingSessions: {},
+      cancellingSessionIds: {},
       planFilePaths: {},
       pendingPlanMessageIds: {},
       savingContext: {},
       skippedQuestionSessions: {},
-      pendingDigestSessionIds: {},
-      sessionDigests: {},
       worktreeLoadingOperations: {},
       sessionLabels: {},
+      codexGoals: {},
       pendingMagicCommand: null,
 
       // Session management
@@ -707,35 +743,13 @@ export const useChatStore = create<ChatUIState>()(
         )
 
         if (options?.markOpened !== false) {
-          // Update last_opened_at on the backend; for non-Claude waiting sessions
-          // this also transitions to review (returns true when transitioned).
-          invoke<boolean>('set_session_last_opened', { sessionId })
-            .then(transitioned => {
-              window.dispatchEvent(new CustomEvent('session-opened'))
-              if (transitioned) {
-                // Sync Zustand state to match the backend transition
-                const s = get()
-                set(
-                  {
-                    reviewingSessions: {
-                      ...s.reviewingSessions,
-                      [sessionId]: true,
-                    },
-                    waitingForInputSessionIds: Object.fromEntries(
-                      Object.entries(s.waitingForInputSessionIds).filter(
-                        ([k]) => k !== sessionId
-                      )
-                    ),
-                    pendingPlanMessageIds: Object.fromEntries(
-                      Object.entries(s.pendingPlanMessageIds).filter(
-                        ([k]) => k !== sessionId
-                      )
-                    ),
-                  },
-                  undefined,
-                  'autoTransitionToReview'
-                )
-              }
+          invoke('set_session_last_opened', { sessionId })
+            .then(() => {
+              window.dispatchEvent(
+                new CustomEvent('session-opened', {
+                  detail: { sessionIds: [sessionId] },
+                })
+              )
             })
             .catch(() => undefined)
         }
@@ -880,6 +894,44 @@ export const useChatStore = create<ChatUIState>()(
           'toggleTableRowChecked'
         ),
 
+      // ScheduleWakeup indicator state
+      setScheduledWakeup: (toolCallId, wakeup) =>
+        set(
+          state => ({
+            scheduledWakeups: {
+              ...state.scheduledWakeups,
+              [toolCallId]: wakeup,
+            },
+          }),
+          undefined,
+          'setScheduledWakeup'
+        ),
+      markScheduledWakeupStatus: (toolCallId, status) =>
+        set(
+          state => {
+            const existing = state.scheduledWakeups[toolCallId]
+            if (!existing || existing.status === status) return state
+            return {
+              scheduledWakeups: {
+                ...state.scheduledWakeups,
+                [toolCallId]: { ...existing, status },
+              },
+            }
+          },
+          undefined,
+          'markScheduledWakeupStatus'
+        ),
+      removeScheduledWakeup: toolCallId =>
+        set(
+          state => {
+            if (!(toolCallId in state.scheduledWakeups)) return state
+            const { [toolCallId]: _, ...rest } = state.scheduledWakeups
+            return { scheduledWakeups: rest }
+          },
+          undefined,
+          'removeScheduledWakeup'
+        ),
+
       // Reviewing status management (persisted)
       setSessionReviewing: (sessionId, reviewing) =>
         set(
@@ -911,6 +963,36 @@ export const useChatStore = create<ChatUIState>()(
 
       isSessionReviewing: sessionId =>
         get().reviewingSessions[sessionId] ?? false,
+
+      // Cancelling status management (transient)
+      addCancellingSession: sessionId =>
+        set(
+          state => {
+            if (state.cancellingSessionIds[sessionId]) return state
+            return {
+              cancellingSessionIds: {
+                ...state.cancellingSessionIds,
+                [sessionId]: true,
+              },
+            }
+          },
+          undefined,
+          'addCancellingSession'
+        ),
+
+      removeCancellingSession: sessionId =>
+        set(
+          state => {
+            if (!(sessionId in state.cancellingSessionIds)) return state
+            const { [sessionId]: _, ...rest } = state.cancellingSessionIds
+            return { cancellingSessionIds: rest }
+          },
+          undefined,
+          'removeCancellingSession'
+        ),
+
+      isSessionCancelling: sessionId =>
+        get().cancellingSessionIds[sessionId] ?? false,
 
       // Session label management (persisted)
       setSessionLabel: (sessionId, label) =>
@@ -953,6 +1035,28 @@ export const useChatStore = create<ChatUIState>()(
         ),
 
       getPlanFilePath: sessionId => get().planFilePaths[sessionId] ?? null,
+
+      // Codex /goal objective management (server is source of truth; we mirror
+      // the latest value in the store so the banner can re-render without a
+      // round-trip after every notification).
+      setCodexGoal: (sessionId, goal) =>
+        set(
+          state => {
+            if (goal) {
+              if (state.codexGoals[sessionId] === goal) return state
+              return {
+                codexGoals: { ...state.codexGoals, [sessionId]: goal },
+              }
+            }
+            if (!(sessionId in state.codexGoals)) return state
+            const { [sessionId]: _, ...rest } = state.codexGoals
+            return { codexGoals: rest }
+          },
+          undefined,
+          'setCodexGoal'
+        ),
+
+      getCodexGoal: sessionId => get().codexGoals[sessionId] ?? null,
 
       // Pending plan message ID management
       setPendingPlanMessageId: (sessionId, messageId) =>
@@ -1284,6 +1388,58 @@ export const useChatStore = create<ChatUIState>()(
           },
           undefined,
           'updateToolCallOutput'
+        ),
+
+      appendToolEvent: (sessionId, toolUseId, event) =>
+        set(
+          state => {
+            const toolCalls = state.activeToolCalls[sessionId] ?? []
+            const existing = toolCalls.find(tc => tc.id === toolUseId)
+            if (!existing) return state
+            const prevEvents = existing.events ?? []
+            // Derive status transitions from status events.
+            let nextStatus = existing.status
+            if (event.kind === 'monitor_status') {
+              const p = event.payload as { status?: ToolCall['status'] } | null
+              if (p?.status) nextStatus = p.status
+            } else if (event.kind === 'monitor_done') {
+              nextStatus = 'done'
+            } else if (event.kind === 'monitor_event') {
+              if (!nextStatus || nextStatus === 'armed') nextStatus = 'running'
+            }
+            const nextEvents = [...prevEvents, event]
+            return {
+              activeToolCalls: {
+                ...state.activeToolCalls,
+                [sessionId]: toolCalls.map(tc =>
+                  tc.id === toolUseId
+                    ? { ...tc, events: nextEvents, status: nextStatus }
+                    : tc
+                ),
+              },
+            }
+          },
+          undefined,
+          'appendToolEvent'
+        ),
+
+      setToolCallStatus: (sessionId, toolUseId, status) =>
+        set(
+          state => {
+            const toolCalls = state.activeToolCalls[sessionId] ?? []
+            const existing = toolCalls.find(tc => tc.id === toolUseId)
+            if (!existing || existing.status === status) return state
+            return {
+              activeToolCalls: {
+                ...state.activeToolCalls,
+                [sessionId]: toolCalls.map(tc =>
+                  tc.id === toolUseId ? { ...tc, status } : tc
+                ),
+              },
+            }
+          },
+          undefined,
+          'setToolCallStatus'
         ),
 
       clearToolCalls: sessionId =>
@@ -1922,8 +2078,18 @@ export const useChatStore = create<ChatUIState>()(
         set(
           state => {
             const existing = state.pendingFiles[sessionId] ?? []
-            // Deduplicate by relativePath - don't add if already present
-            if (existing.some(f => f.relativePath === file.relativePath)) {
+            // Deduplicate by source scope + relativePath - linked projects can share paths
+            const fileSource = file.sourceRootPath ?? file.sourceProjectId ?? ''
+            if (
+              existing.some(f => {
+                const existingSource =
+                  f.sourceRootPath ?? f.sourceProjectId ?? ''
+                return (
+                  existingSource === fileSource &&
+                  f.relativePath === file.relativePath
+                )
+              })
+            ) {
               return state
             }
             return {
@@ -2687,6 +2853,10 @@ export const useChatStore = create<ChatUIState>()(
               pendingPermissionDenials,
               deniedMessageContext,
               sendStartedAt: sendStartedAtRest,
+              completedDurations:
+                sendStarted > 0
+                  ? { ...state.completedDurations, [sessionId]: elapsed }
+                  : state.completedDurations,
               reviewingSessions: {
                 ...state.reviewingSessions,
                 [sessionId]: true,
@@ -2729,6 +2899,9 @@ export const useChatStore = create<ChatUIState>()(
             const { [sessionId]: _effort, ...restEffort } = state.effortLevels
             const { [sessionId]: _mcp, ...restMcp } = state.enabledMcpServers
             const { [sessionId]: _label, ...restLabels } = state.sessionLabels
+            const { [sessionId]: _goal, ...restCodexGoals } = state.codexGoals
+            const { [sessionId]: _duration, ...restDurations } =
+              state.completedDurations
 
             return {
               approvedTools: restApproved,
@@ -2747,6 +2920,8 @@ export const useChatStore = create<ChatUIState>()(
               effortLevels: restEffort,
               enabledMcpServers: restMcp,
               sessionLabels: restLabels,
+              codexGoals: restCodexGoals,
+              completedDurations: restDurations,
             }
           },
           undefined,
@@ -2814,51 +2989,6 @@ export const useChatStore = create<ChatUIState>()(
         ),
 
       isSavingContext: sessionId => get().savingContext[sessionId] ?? false,
-
-      // Session digest actions (context recall after switching)
-      markSessionNeedsDigest: sessionId =>
-        set(
-          state => ({
-            pendingDigestSessionIds: {
-              ...state.pendingDigestSessionIds,
-              [sessionId]: true,
-            },
-          }),
-          undefined,
-          'markSessionNeedsDigest'
-        ),
-
-      clearPendingDigest: sessionId =>
-        set(
-          state => {
-            const { [sessionId]: _, ...restPending } =
-              state.pendingDigestSessionIds
-            const { [sessionId]: __, ...restDigests } = state.sessionDigests
-            return {
-              pendingDigestSessionIds: restPending,
-              sessionDigests: restDigests,
-            }
-          },
-          undefined,
-          'clearPendingDigest'
-        ),
-
-      setSessionDigest: (sessionId, digest) =>
-        set(
-          state => ({
-            sessionDigests: {
-              ...state.sessionDigests,
-              [sessionId]: digest,
-            },
-          }),
-          undefined,
-          'setSessionDigest'
-        ),
-
-      hasPendingDigest: sessionId =>
-        get().pendingDigestSessionIds[sessionId] ?? false,
-
-      getSessionDigest: sessionId => get().sessionDigests[sessionId],
 
       // Worktree loading operations (commit, pr, review, merge, pull)
       setWorktreeLoading: (worktreeId, operation) =>
