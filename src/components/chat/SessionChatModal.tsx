@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent,
   type RefObject,
 } from 'react'
 import {
@@ -431,6 +432,46 @@ export function SessionChatModal({
     setCloseConfirmOpen(false)
   }, [])
 
+  const removeSessionTab = useCallback(
+    (session: Session) => {
+      const activeSessions = sessions.filter(s => !s.archived_at)
+      if (activeSessions.length <= 1) {
+        const action = () => {
+          handleDeleteSession(session.id)
+          onClose()
+        }
+        const sessionIsEmpty = !session.message_count
+        if (preferences?.confirm_session_close !== false && !sessionIsEmpty) {
+          pendingCloseAction.current = action
+          setCloseConfirmOpen(true)
+        } else {
+          action()
+        }
+      } else {
+        selectVisualNeighbor(session.id)
+        handleArchiveSession(session.id)
+      }
+    },
+    [
+      sessions,
+      handleDeleteSession,
+      onClose,
+      preferences?.confirm_session_close,
+      selectVisualNeighbor,
+      handleArchiveSession,
+    ]
+  )
+
+  const handleTabAuxClick = useCallback(
+    (e: MouseEvent<HTMLButtonElement>, session: Session) => {
+      if (e.button !== 1) return
+      e.preventDefault()
+      e.stopPropagation()
+      removeSessionTab(session)
+    },
+    [removeSessionTab]
+  )
+
   useEffect(() => {
     if (!isOpen) return
     const handler = (e: Event) => {
@@ -502,6 +543,7 @@ export function SessionChatModal({
       worktreeId,
       worktreePath,
       origin: 'modal',
+      intent: 'picker',
     })
   }, [worktreeId, worktreePath])
 
@@ -509,14 +551,22 @@ export function SessionChatModal({
     if (!isOpen) return
     const handler = (e: Event) => {
       e.stopImmediatePropagation()
-      handleCreateSession()
+      const intent =
+        (e as CustomEvent<{ intent?: 'default' | 'picker' }>).detail?.intent ??
+        'picker'
+      useUIStore.getState().openNewSessionModeModal({
+        worktreeId,
+        worktreePath,
+        origin: 'modal',
+        intent,
+      })
     }
     window.addEventListener('create-new-session', handler, { capture: true })
     return () =>
       window.removeEventListener('create-new-session', handler, {
         capture: true,
       })
-  }, [handleCreateSession, isOpen])
+  }, [isOpen, worktreeId, worktreePath])
 
   // Sorted tab order: attention and active sessions first, review next,
   // idle/new empty sessions last.
@@ -1027,6 +1077,7 @@ export function SessionChatModal({
                           <button
                             data-session-id={session.id}
                             onClick={() => handleTabClick(session.id)}
+                            onAuxClick={e => handleTabAuxClick(e, session)}
                             onDoubleClick={() =>
                               handleStartRenameImmediate(
                                 session.id,
@@ -1087,30 +1138,7 @@ export function SessionChatModal({
                                 }
                                 onClick={e => {
                                   e.stopPropagation()
-                                  const activeSessions = sessions.filter(
-                                    s => !s.archived_at
-                                  )
-                                  if (activeSessions.length <= 1) {
-                                    const action = () => {
-                                      handleDeleteSession(session.id)
-                                      onClose()
-                                    }
-                                    const sessionIsEmpty =
-                                      !session.message_count
-                                    if (
-                                      preferences?.confirm_session_close !==
-                                        false &&
-                                      !sessionIsEmpty
-                                    ) {
-                                      pendingCloseAction.current = action
-                                      setCloseConfirmOpen(true)
-                                    } else {
-                                      action()
-                                    }
-                                  } else {
-                                    selectVisualNeighbor(session.id)
-                                    handleArchiveSession(session.id)
-                                  }
+                                  removeSessionTab(session)
                                 }}
                                 className="ml-0.5 opacity-60 sm:opacity-0 sm:group-hover/tab:opacity-60 hover:!opacity-100"
                                 size="xs"
