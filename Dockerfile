@@ -347,6 +347,37 @@ RUN set -eux; \
     rm -f /tmp/stripe.tgz; \
     chmod +x /usr/local/bin/stripe
 
+# --- Typst (markup-based typesetting compiler) ---
+ARG TYPST_VERSION=0.14.2
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) typst_arch=x86_64-unknown-linux-musl ;; \
+      arm64) typst_arch=aarch64-unknown-linux-musl ;; \
+      *) echo "typst: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-${typst_arch}.tar.xz" \
+      -o /tmp/typst.tar.xz; \
+    tar -xJf /tmp/typst.tar.xz -C /tmp; \
+    mv "/tmp/typst-${typst_arch}/typst" /usr/local/bin/typst; \
+    rm -rf /tmp/typst.tar.xz "/tmp/typst-${typst_arch}"; \
+    chmod +x /usr/local/bin/typst
+
+# --- golangci-lint (Go meta-linter) ---
+ARG GOLANGCI_LINT_VERSION=2.12.2
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64|arm64) ;; \
+      *) echo "golangci-lint: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}.tar.gz" \
+      -o /tmp/glci.tar.gz; \
+    tar -xzf /tmp/glci.tar.gz -C /tmp; \
+    mv "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}/golangci-lint" /usr/local/bin/golangci-lint; \
+    rm -rf /tmp/glci.tar.gz "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${arch}"; \
+    chmod +x /usr/local/bin/golangci-lint
+
 # --- CodeScene CLI (`cs`) ---
 # Distributed as a zip from downloads.codescene.io. Linux uses `amd64` /
 # `aarch64` (note: not `arm64`) in the artifact name. Pin a concrete
