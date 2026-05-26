@@ -347,6 +347,23 @@ RUN set -eux; \
     rm -f /tmp/stripe.tgz; \
     chmod +x /usr/local/bin/stripe
 
+# --- rtk (rtk-ai/rtk — LLM token-saving CLI proxy) ---
+# amd64 ships as a static musl build; arm64 ships gnu. Both are single-binary
+# tarballs with the binary at the archive root.
+ARG RTK_VERSION=0.42.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) rtk_arch=x86_64-unknown-linux-musl ;; \
+      arm64) rtk_arch=aarch64-unknown-linux-gnu ;; \
+      *) echo "rtk: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/rtk-${rtk_arch}.tar.gz" \
+      -o /tmp/rtk.tgz; \
+    tar -xzf /tmp/rtk.tgz -C /usr/local/bin rtk; \
+    rm -f /tmp/rtk.tgz; \
+    chmod +x /usr/local/bin/rtk
+
 # --- Typst (markup-based typesetting compiler) ---
 ARG TYPST_VERSION=0.14.2
 RUN set -eux; \
@@ -399,13 +416,19 @@ RUN set -eux; \
 
 # --- nvm (Node Version Manager) ---
 # Installed alongside the apt-managed Node so users can switch Node versions
-# per-shell with `nvm install`/`nvm use`. nvm is a shell function (not just a
-# binary on PATH), so login shells must source nvm.sh — we drop a profile.d
-# snippet for that. Interactive non-login shells (bash -i) also pick it up
-# because Debian's /etc/bash.bashrc sources /etc/profile.d/*.sh when invoked
-# via openvscode-server's integrated terminal.
+# per-shell with `nvm install`/`nvm use`. nvm is a *bash function* (not just
+# a binary on PATH) so the shell has to source nvm.sh to see it. We wire it
+# up everywhere bash starts:
+#   - /etc/profile.d/nvm.sh      -> login bash (e.g. `bash -l`)
+#   - /etc/bash.bashrc           -> interactive non-login bash
+#                                   (openvscode-server's integrated terminal
+#                                   launches `bash -i`, not `bash -l`)
+#   - BASH_ENV                   -> non-interactive bash scripts (`bash -c`)
+# nvm cannot run under dash/sh, so terminals must be bash; SHELL is set
+# below so openvscode-server picks bash by default.
 ARG NVM_VERSION=v0.40.1
 ENV NVM_DIR=/root/.nvm
+ENV BASH_ENV=/etc/profile.d/nvm.sh
 RUN mkdir -p "$NVM_DIR" \
  && curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | bash \
  && printf '%s\n' \
@@ -413,7 +436,13 @@ RUN mkdir -p "$NVM_DIR" \
         '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' \
         '[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"' \
         > /etc/profile.d/nvm.sh \
- && chmod 0644 /etc/profile.d/nvm.sh
+ && chmod 0644 /etc/profile.d/nvm.sh \
+ && printf '\n%s\n' \
+        '# nvm (interactive non-login bash, e.g. VS Code integrated terminal)' \
+        'export NVM_DIR="/root/.nvm"' \
+        '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' \
+        '[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"' \
+        >> /etc/bash.bashrc
 
 # --- Bun (JS runtime / package manager) ---
 # Lift the binary directly from the same image the frontend build stage uses
@@ -486,6 +515,7 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENV HOME=/root \
+    SHELL=/bin/bash \
     DISPLAY_NUM=99 \
     JEAN_HOST=0.0.0.0 \
     JEAN_PORT=3456 \
