@@ -34,7 +34,7 @@ use super::linear_issues::{
 };
 use super::names::generate_unique_workspace_name;
 use super::release_notes::{
-    build_pr_issue_refs_from_commit_range, build_pr_issue_refs_from_commit_subjects,
+    build_pr_prompt_context_from_revision_range, build_release_notes_prompt_context,
     format_issue_groups, PrIssueRefsMap,
 };
 use super::storage::{get_project_worktrees_dir, load_projects_data, save_projects_data};
@@ -218,7 +218,7 @@ fn attach_default_avatar(project: &mut Project) {
 
 /// Generate a unique name by appending 4 random alphanumeric chars,
 /// checking against both storage and git branches.
-fn generate_unique_suffix_name(
+pub fn generate_unique_suffix_name(
     name: &str,
     project_path: &str,
     project_id: &str,
@@ -249,7 +249,7 @@ fn now() -> u64 {
         .as_secs()
 }
 
-fn sanitize_folder_name(name: &str) -> String {
+pub fn sanitize_folder_name(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' {
@@ -830,6 +830,175 @@ pub async fn get_worktree(app: AppHandle, worktree_id: String) -> Result<Worktre
         .ok_or_else(|| format!("Worktree not found: {worktree_id}"))
 }
 
+/// Get a bounded summary of a worktree's git changes.
+#[tauri::command]
+pub async fn get_worktree_changes(
+    app: AppHandle,
+    worktree_id: String,
+    max_files: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let max_files = max_files.unwrap_or(100).clamp(1, 500);
+    let (worktree, project_default_branch) =
+        resolve_worktree_and_project_default(&app, &worktree_id)?;
+    let base_branch = worktree
+        .base_branch
+        .clone()
+        .unwrap_or_else(|| project_default_branch.clone());
+    let status = crate::projects::git_status::get_branch_status(
+        &crate::projects::git_status::ActiveWorktreeInfo {
+            worktree_id: worktree.id.clone(),
+            worktree_path: worktree.path.clone(),
+            base_branch: base_branch.clone(),
+            pr_number: worktree.pr_number,
+            pr_url: worktree.pr_url.clone(),
+            pr_push_remote: worktree.pr_push_remote.clone(),
+            pr_push_branch: worktree.pr_push_branch.clone(),
+        },
+    )
+    .ok();
+    let porcelain = git_output(&worktree.path, &["status", "--porcelain=v1"])?;
+    let all_files = parse_porcelain_files(&porcelain);
+    let truncated = all_files.len() > max_files;
+    let files: Vec<serde_json::Value> = all_files
+        .into_iter()
+        .take(max_files)
+        .map(|(status, path)| serde_json::json!({ "status": status, "path": path }))
+        .collect();
+
+    Ok(serde_json::json!({
+        "worktreeId": worktree.id,
+        "worktreePath": worktree.path,
+        "branch": worktree.branch,
+        "baseBranch": base_branch,
+        "status": status,
+        "files": files,
+        "filesTruncated": truncated,
+        "porcelain": porcelain,
+    }))
+}
+
+/// Get a bounded unified git diff for a worktree.
+#[tauri::command]
+pub async fn get_worktree_diff(
+    app: AppHandle,
+    worktree_id: String,
+    diff_type: Option<String>,
+    path: Option<String>,
+    max_bytes: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    const DEFAULT_DIFF_MAX_BYTES: usize = 60_000;
+    const MAX_DIFF_BYTES: usize = 200_000;
+
+    let diff_type = diff_type.unwrap_or_else(|| "uncommitted".to_string());
+    let max_bytes = max_bytes
+        .unwrap_or(DEFAULT_DIFF_MAX_BYTES)
+        .clamp(1, MAX_DIFF_BYTES);
+    let (worktree, project_default_branch) =
+        resolve_worktree_and_project_default(&app, &worktree_id)?;
+    let base_branch = worktree.base_branch.unwrap_or(project_default_branch);
+    let mut args = match diff_type.as_str() {
+        "uncommitted" => vec![
+            "diff".to_string(),
+            "HEAD".to_string(),
+            "--unified=3".to_string(),
+        ],
+        "branch" => vec![
+            "diff".to_string(),
+            "--unified=3".to_string(),
+            format!("origin/{base_branch}...HEAD"),
+        ],
+        other => {
+            return Err(format!(
+                "Invalid diffType: {other}; expected uncommitted or branch"
+            ))
+        }
+    };
+    let path = path.filter(|p| !p.trim().is_empty());
+    if let Some(path) = path.as_deref() {
+        args.push("--".to_string());
+        args.push(path.to_string());
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let raw_patch = git_output(&worktree.path, &arg_refs)?;
+    let (patch, truncated) = truncate_utf8(&raw_patch, max_bytes);
+
+    Ok(serde_json::json!({
+        "worktreeId": worktree.id,
+        "diffType": diff_type,
+        "baseBranch": base_branch,
+        "path": path,
+        "maxBytes": max_bytes,
+        "truncated": truncated,
+        "rawBytes": raw_patch.len(),
+        "patch": patch,
+    }))
+}
+
+fn resolve_worktree_and_project_default(
+    app: &AppHandle,
+    worktree_id: &str,
+) -> Result<(Worktree, String), String> {
+    let data = load_projects_data(app)?;
+    let worktree = data
+        .find_worktree(worktree_id)
+        .cloned()
+        .ok_or_else(|| format!("Unknown worktreeId: {worktree_id}"))?;
+    let project = data
+        .find_project(&worktree.project_id)
+        .ok_or_else(|| format!("Worktree {worktree_id} has no parent project"))?;
+    Ok((worktree, project.default_branch.clone()))
+}
+
+fn git_output(repo_path: &str, args: &[&str]) -> Result<String, String> {
+    let output = silent_command("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git {} failed: {stderr}", args.join(" ")));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn parse_porcelain_files(porcelain: &str) -> Vec<(String, String)> {
+    porcelain
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let status = line[..2].trim().to_string();
+            let path = line[3..]
+                .rsplit_once(" -> ")
+                .map(|(_, path)| path)
+                .unwrap_or(&line[3..])
+                .trim_matches('"')
+                .to_string();
+            Some((status, path))
+        })
+        .collect()
+}
+
+fn truncate_utf8(input: &str, max_bytes: usize) -> (String, bool) {
+    if input.len() <= max_bytes {
+        return (input.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    (
+        format!(
+            "{}\n\n[diff truncated: showing {end} of {} bytes]",
+            &input[..end],
+            input.len()
+        ),
+        true,
+    )
+}
+
 /// Create a new worktree for a project (runs in background)
 ///
 /// This command returns immediately with a "pending" worktree.
@@ -849,8 +1018,11 @@ pub async fn create_worktree(
     advisory_context: Option<AdvisoryContext>,
     linear_context: Option<LinearIssueContext>,
     custom_name: Option<String>,
+    auto_open_in_jean: Option<bool>,
 ) -> Result<Worktree, String> {
     log::trace!("Creating worktree for project: {project_id}");
+
+    let auto_open_in_jean = auto_open_in_jean.unwrap_or(true);
 
     let data = load_projects_data(&app)?;
 
@@ -987,6 +1159,7 @@ pub async fn create_worktree(
         issue_number: issue_context.as_ref().map(|ctx| ctx.number as u64),
         security_alert_number: security_context.as_ref().map(|ctx| ctx.number as u64),
         advisory_ghsa_id: advisory_context.as_ref().map(|ctx| ctx.ghsa_id.clone()),
+        auto_open_in_jean,
     };
     if let Err(e) = app.emit_all("worktree:creating", &creating_event) {
         log::error!("Failed to emit worktree:creating event: {e}");
@@ -1614,7 +1787,10 @@ pub async fn create_worktree(
                     "Background: Worktree created successfully: {}",
                     worktree.name
                 );
-                let created_event = WorktreeCreatedEvent { worktree };
+                let created_event = WorktreeCreatedEvent {
+                    worktree,
+                    auto_open_in_jean,
+                };
                 if let Err(e) = app_clone.emit_all("worktree:created", &created_event) {
                     log::error!("Failed to emit worktree:created event: {e}");
                 }
@@ -1708,8 +1884,10 @@ pub async fn create_worktree_from_existing_branch(
     security_context: Option<SecurityAlertContext>,
     advisory_context: Option<AdvisoryContext>,
     linear_context: Option<LinearIssueContext>,
+    auto_open_in_jean: Option<bool>,
 ) -> Result<Worktree, String> {
     log::trace!("Creating worktree from existing branch {branch_name} for project: {project_id}");
+    let auto_open_in_jean = auto_open_in_jean.unwrap_or(true);
 
     let data = load_projects_data(&app)?;
 
@@ -1747,6 +1925,7 @@ pub async fn create_worktree_from_existing_branch(
         issue_number: issue_context.as_ref().map(|ctx| ctx.number as u64),
         security_alert_number: security_context.as_ref().map(|ctx| ctx.number as u64),
         advisory_ghsa_id: advisory_context.as_ref().map(|ctx| ctx.ghsa_id.clone()),
+        auto_open_in_jean,
     };
     if let Err(e) = app.emit_all("worktree:creating", &creating_event) {
         log::error!("Failed to emit worktree:creating event: {e}");
@@ -2206,7 +2385,10 @@ pub async fn create_worktree_from_existing_branch(
                     "Background: Worktree created successfully from existing branch: {}",
                     worktree.name
                 );
-                let created_event = WorktreeCreatedEvent { worktree };
+                let created_event = WorktreeCreatedEvent {
+                    worktree,
+                    auto_open_in_jean,
+                };
                 if let Err(e) = app_clone.emit_all("worktree:created", &created_event) {
                     log::error!("Failed to emit worktree:created event: {e}");
                 }
@@ -2369,6 +2551,7 @@ pub async fn checkout_pr(
         issue_number: None,
         security_alert_number: None,
         advisory_ghsa_id: None,
+        auto_open_in_jean: true,
     };
     if let Err(e) = app.emit_all("worktree:creating", &creating_event) {
         log::error!("Failed to emit worktree:creating event: {e}");
@@ -2762,7 +2945,10 @@ pub async fn checkout_pr(
                     pr_number,
                     worktree.name
                 );
-                let created_event = WorktreeCreatedEvent { worktree };
+                let created_event = WorktreeCreatedEvent {
+                    worktree,
+                    auto_open_in_jean: true,
+                };
                 if let Err(e) = app_clone.emit_all("worktree:created", &created_event) {
                     log::error!("Failed to emit worktree:created event: {e}");
                 }
@@ -3497,6 +3683,7 @@ pub async fn import_worktree(
     // Emit created event
     let event = WorktreeCreatedEvent {
         worktree: worktree.clone(),
+        auto_open_in_jean: true,
     };
     if let Err(e) = app.emit_all("worktree:created", &event) {
         log::error!("Failed to emit worktree:created event: {e}");
@@ -5083,6 +5270,84 @@ pub struct DetectPrResponse {
     pub title: String,
 }
 
+/// Response from manually linking a PR to a worktree.
+#[derive(Serialize, Clone)]
+pub struct LinkWorktreePrResponse {
+    pub pr_number: u32,
+    pub pr_url: String,
+    pub title: String,
+}
+
+/// Validate and link a GitHub PR to a worktree by exact PR number.
+#[tauri::command]
+pub async fn link_worktree_pr(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    pr_number: u32,
+) -> Result<LinkWorktreePrResponse, String> {
+    if pr_number == 0 {
+        return Err("PR number must be greater than 0".to_string());
+    }
+
+    log::trace!("Linking PR #{pr_number} to worktree {worktree_id}");
+
+    let gh = resolve_gh_binary(&app);
+    let output = silent_command(&gh)
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "number,url,title",
+        ])
+        .current_dir(&worktree_path)
+        .output()
+        .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("gh auth login") || stderr.contains("authentication") {
+            return Err("GitHub CLI not authenticated. Run 'gh auth login' first.".to_string());
+        }
+        if stderr.contains("Could not resolve") || stderr.contains("not found") {
+            return Err(format!("PR #{pr_number} not found"));
+        }
+        return Err(format!("Failed to load PR #{pr_number}: {stderr}"));
+    }
+
+    let view_json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse PR #{pr_number}: {e}"))?;
+    let viewed_pr_number = view_json["number"].as_u64().unwrap_or(0) as u32;
+    let pr_url = view_json["url"].as_str().unwrap_or("").to_string();
+    let title = view_json["title"].as_str().unwrap_or("").to_string();
+
+    if viewed_pr_number == 0 || pr_url.is_empty() {
+        return Err(format!("PR #{pr_number} did not return a valid URL"));
+    }
+
+    let mut data = load_projects_data(&app)?;
+    let worktree = data
+        .worktrees
+        .iter_mut()
+        .find(|w| w.id == worktree_id)
+        .ok_or_else(|| format!("Worktree not found: {worktree_id}"))?;
+
+    worktree.pr_number = Some(viewed_pr_number);
+    worktree.pr_url = Some(pr_url.clone());
+    worktree.pr_push_remote = None;
+    worktree.pr_push_branch = None;
+
+    save_projects_data(&app, &data)?;
+
+    log::trace!("Successfully linked PR #{viewed_pr_number} to worktree {worktree_id}");
+    Ok(LinkWorktreePrResponse {
+        pr_number: viewed_pr_number,
+        pr_url,
+        title,
+    })
+}
+
 /// Detect an open PR for the current branch of a worktree without linking it.
 #[tauri::command]
 pub async fn detect_open_pr_for_branch(
@@ -5322,6 +5587,8 @@ pub async fn clear_worktree_pr(app: AppHandle, worktree_id: String) -> Result<()
     worktree.pr_url = None;
     worktree.pr_push_remote = None;
     worktree.pr_push_branch = None;
+    worktree.cached_pr_status = None;
+    worktree.cached_check_status = None;
 
     save_projects_data(&app, &data)?;
 
@@ -5624,7 +5891,17 @@ const PR_CONTENT_PROMPT: &str = r#"<task>Generate a pull request title and descr
 
 <diff>
 {diff}
-</diff>"#;
+</diff>
+
+<instructions>
+- Use merged pull request metadata as the primary source when present; use commits and diff as fallback context.
+- Inspect pull request titles, bodies, and commit messages for GitHub closing keywords: close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved.
+- Normalize closing keywords in the final body to lowercase forms: closes, fixes, resolves.
+- Reference the pull request number for each relevant bullet when known: `(#123)`.
+- If a pull request closes/fixes/resolves issues, include the issue refs after the PR using the detected keyword: `(#123, fixes #456, #789)`.
+- Do not invent pull request numbers or issue references; only use detected metadata.
+- Keep the description concise and user-facing; avoid internal implementation details unless needed for review.
+</instructions>"#;
 
 /// Structured response from PR content generation
 #[derive(Debug, Deserialize, Serialize)]
@@ -5828,12 +6105,17 @@ fn generate_pr_content(
 
     let commits = get_branch_commits(repo_path, target_branch, head_ref)?;
     let commit_count = count_branch_commits(repo_path, target_branch, head_ref)?;
-    let related_pr_issue_refs = build_pr_issue_refs_from_commit_range(
+    let pr_prompt_context = build_pr_prompt_context_from_revision_range(
         app,
         repo_path,
         &format!("origin/{target_branch}..{head_ref}"),
     )
-    .unwrap_or_default();
+    .unwrap_or_else(
+        |_| crate::projects::release_notes::ReleaseNotesPromptContext {
+            pull_requests: String::new(),
+            pr_issue_refs: PrIssueRefsMap::new(),
+        },
+    );
     generate_pr_content_from_inputs(
         app,
         repo_path,
@@ -5849,7 +6131,8 @@ fn generate_pr_content(
         &commits,
         commit_count,
         &diff,
-        &related_pr_issue_refs,
+        &pr_prompt_context.pull_requests,
+        &pr_prompt_context.pr_issue_refs,
     )
 }
 
@@ -6287,83 +6570,6 @@ pub async fn merge_github_pr(
 // AI-Powered PR Update
 // =============================================================================
 
-/// Response from updating a PR with AI-generated content
-#[derive(Debug, Clone, Serialize)]
-pub struct UpdatePrResponse {
-    pub pr_number: u32,
-    pub title: String,
-    pub body: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PrGenerationTargetInfo {
-    number: u32,
-    #[serde(default)]
-    base_ref_name: String,
-    #[serde(default)]
-    head_ref_name: String,
-    #[serde(default)]
-    commits: Vec<PrGenerationCommit>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PrGenerationCommit {
-    #[serde(default)]
-    message_headline: String,
-}
-
-fn get_pr_generation_target_info(
-    gh: &std::path::Path,
-    repo_path: &str,
-    pr_number: u32,
-) -> Result<PrGenerationTargetInfo, String> {
-    let output = silent_command(gh)
-        .args([
-            "pr",
-            "view",
-            &pr_number.to_string(),
-            "--json",
-            "number,baseRefName,headRefName,commits",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh pr view: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("gh auth login") || stderr.contains("authentication") {
-            return Err("GitHub CLI not authenticated. Run 'gh auth login' first.".to_string());
-        }
-        return Err(format!("Failed to load PR #{pr_number}: {stderr}"));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str::<PrGenerationTargetInfo>(&stdout)
-        .map_err(|e| format!("Failed to parse PR #{pr_number}: {e}"))
-}
-
-fn get_pr_generation_diff(
-    repo_path: &str,
-    pr_number: u32,
-    gh: &std::path::Path,
-) -> Result<String, String> {
-    let output = silent_command(gh)
-        .args(["pr", "diff", &pr_number.to_string()])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh pr diff: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to get diff for PR #{pr_number}: {stderr}"));
-    }
-
-    let diff = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(truncate_diff_at_file_boundaries(&diff, 200_000))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn generate_pr_content_from_inputs(
     app: &AppHandle,
@@ -6380,9 +6586,14 @@ fn generate_pr_content_from_inputs(
     commits: &str,
     commit_count: u32,
     diff: &str,
+    detected_pull_requests: &str,
     related_pr_issue_refs: &PrIssueRefsMap,
 ) -> Result<PrContentResponse, String> {
-    let related_pull_requests = format_related_pull_requests(related_pr_issue_refs);
+    let related_pull_requests = if detected_pull_requests.trim().is_empty() {
+        format_related_pull_requests(related_pr_issue_refs)
+    } else {
+        detected_pull_requests.to_string()
+    };
 
     let prompt_template = custom_prompt
         .filter(|p| !p.trim().is_empty())
@@ -6523,188 +6734,6 @@ fn generate_pr_content_from_inputs(
     Ok(response)
 }
 
-/// Generate AI content for updating a PR (does not apply changes)
-///
-/// Returns the generated title and body for the frontend to display/edit.
-#[tauri::command]
-pub async fn generate_pr_update_content(
-    app: AppHandle,
-    worktree_path: String,
-    pr_number: Option<u32>,
-    session_id: Option<String>,
-    custom_prompt: Option<String>,
-    model: Option<String>,
-    custom_profile_name: Option<String>,
-    reasoning_effort: Option<String>,
-) -> Result<UpdatePrResponse, String> {
-    log::trace!("Generating PR update content for: {worktree_path}");
-
-    let data = load_projects_data(&app)?;
-    let worktree = data
-        .worktrees
-        .iter()
-        .find(|w| w.path == worktree_path)
-        .ok_or_else(|| format!("Worktree not found: {worktree_path}"))?;
-
-    let project = data
-        .find_project(&worktree.project_id)
-        .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
-
-    // Gather issue/PR context for this session AND worktree (same logic as create_pr_with_ai_content)
-    let effective_session_id = session_id.as_deref().unwrap_or("");
-    let worktree_id = &worktree.id;
-
-    let (mut issue_nums, mut pr_nums, _security_nums) =
-        get_session_context_numbers(&app, effective_session_id).unwrap_or_default();
-    let mut context_content =
-        get_session_context_content(&app, effective_session_id, &project.path).unwrap_or_default();
-
-    if worktree_id != effective_session_id {
-        let (wt_issue_nums, wt_pr_nums, _wt_security_nums) =
-            get_session_context_numbers(&app, worktree_id).unwrap_or_default();
-        for n in wt_issue_nums {
-            if !issue_nums.contains(&n) {
-                issue_nums.push(n);
-            }
-        }
-        for n in wt_pr_nums {
-            if !pr_nums.contains(&n) {
-                pr_nums.push(n);
-            }
-        }
-        let wt_content =
-            get_session_context_content(&app, worktree_id, &project.path).unwrap_or_default();
-        if !wt_content.is_empty() {
-            if context_content.is_empty() {
-                context_content = wt_content;
-            } else {
-                context_content = format!("{context_content}\n\n{wt_content}");
-            }
-        }
-    }
-
-    let selected_pr_number = pr_number
-        .or(worktree.pr_number)
-        .ok_or_else(|| "Enter a pull request number".to_string())?;
-    let gh = resolve_gh_binary(&app);
-    let pr_target = get_pr_generation_target_info(&gh, &worktree_path, selected_pr_number)?;
-    let commit_subjects = pr_target
-        .commits
-        .iter()
-        .map(|commit| commit.message_headline.clone())
-        .collect::<Vec<_>>();
-    let commits = commit_subjects.join("\n");
-    let commit_count = pr_target.commits.len() as u32;
-    let diff = get_pr_generation_diff(&worktree_path, selected_pr_number, &gh)?;
-    if diff.trim().is_empty() {
-        return Err(format!("No changes found for PR #{selected_pr_number}"));
-    }
-    let related_pr_issue_refs =
-        build_pr_issue_refs_from_commit_subjects(&app, &worktree_path, &commit_subjects)
-            .unwrap_or_default();
-
-    let pr_magic_backend = crate::get_preferences_path(&app)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|c| serde_json::from_str::<crate::AppPreferences>(&c).ok())
-        .and_then(|p| p.magic_prompt_backends.pr_content_backend);
-    let mut pr_content = generate_pr_content_from_inputs(
-        &app,
-        &worktree_path,
-        &pr_target.head_ref_name,
-        &pr_target.base_ref_name,
-        custom_prompt.as_deref(),
-        model.as_deref(),
-        &context_content,
-        custom_profile_name.as_deref(),
-        Some(worktree_id),
-        pr_magic_backend.as_deref(),
-        reasoning_effort.as_deref(),
-        &commits,
-        commit_count,
-        &diff,
-        &related_pr_issue_refs,
-    )?;
-
-    // Gather Linear identifiers
-    let project_name = &project.name;
-    let mut linear_identifiers =
-        get_session_linear_identifiers(&app, effective_session_id, project_name)
-            .unwrap_or_default();
-    if worktree_id != effective_session_id {
-        let wt_linear =
-            get_session_linear_identifiers(&app, worktree_id, project_name).unwrap_or_default();
-        for id in wt_linear {
-            if !linear_identifiers.contains(&id) {
-                linear_identifiers.push(id);
-            }
-        }
-    }
-
-    // Also check worktree's linear_issue_identifier field
-    if let Some(ref lid) = worktree.linear_issue_identifier {
-        if !linear_identifiers.contains(lid) {
-            linear_identifiers.push(lid.clone());
-        }
-    }
-
-    // Append unconditional issue/PR/Linear references to the body
-    let mut refs: Vec<String> = Vec::new();
-    for num in &issue_nums {
-        refs.push(format!("Fixes #{num}"));
-    }
-    for num in &pr_nums {
-        refs.push(format!("Related to #{num}"));
-    }
-    for identifier in &linear_identifiers {
-        refs.push(format!("Addresses {identifier}"));
-    }
-    if !refs.is_empty() {
-        pr_content.body = format!("{}\n\n---\n\n{}", pr_content.body, refs.join("\n"));
-    }
-
-    Ok(UpdatePrResponse {
-        pr_number: selected_pr_number,
-        title: pr_content.title,
-        body: pr_content.body,
-    })
-}
-
-/// Update a PR's title and body on GitHub
-#[tauri::command]
-pub async fn update_pr_description(
-    app: AppHandle,
-    worktree_path: String,
-    pr_number: u32,
-    title: String,
-    body: String,
-) -> Result<(), String> {
-    log::trace!("Updating PR #{pr_number} description");
-
-    let gh = resolve_gh_binary(&app);
-    let output = silent_command(&gh)
-        .args([
-            "pr",
-            "edit",
-            &pr_number.to_string(),
-            "--title",
-            &title,
-            "--body",
-            &body,
-        ])
-        .current_dir(&worktree_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh pr edit: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to update PR: {stderr}"));
-    }
-
-    log::trace!("Successfully updated PR #{pr_number}");
-    Ok(())
-}
-
 // =============================================================================
 // AI-Powered Commit Creation
 // =============================================================================
@@ -6714,6 +6743,14 @@ const COMMIT_MESSAGE_SCHEMA: &str = r#"{"type":"object","properties":{"message":
 
 /// Prompt template for commit message generation
 const COMMIT_MESSAGE_PROMPT: &str = r#"Generate a conventional commit message for these staged changes.
+
+Rules:
+- Output a commit message about the actual staged code changes only.
+- Do not describe this prompt, commit-message guidance, instructions, inspection, or the act of generating a commit message.
+- Avoid vague subjects like "update files", "inspect changes", "adjust code", or "misc changes".
+- Use a specific Conventional Commits subject: type(optional-scope): concrete behavior changed.
+- First line must be 72 characters or fewer.
+- If prompt/config files changed, name the product behavior affected, not "guidance".
 
 Files changed:
 {diff_stat}
@@ -6731,6 +6768,82 @@ Recent commits (style reference):
 #[derive(Debug, Deserialize)]
 struct CommitMessageResponse {
     message: String,
+}
+
+fn commit_message_subject(message: &str) -> &str {
+    message.lines().next().unwrap_or("").trim()
+}
+
+fn validate_commit_message(message: &str, _diff_stat: &str, _status: &str) -> Result<(), String> {
+    let subject = commit_message_subject(message);
+    if subject.is_empty() {
+        return Err("commit message subject is empty".to_string());
+    }
+
+    if subject.chars().count() > 72 {
+        return Err("commit message subject exceeds 72 characters".to_string());
+    }
+
+    static CONVENTIONAL_COMMIT_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"^(feat|fix|docs|style|refactor|perf|test|chore)(\([a-z0-9._-]+\))?!?: .+")
+            .expect("valid conventional commit regex")
+    });
+    if !CONVENTIONAL_COMMIT_RE.is_match(subject) {
+        return Err("commit message must use Conventional Commits format".to_string());
+    }
+
+    let lower_subject = subject.to_lowercase();
+    let meta_terms = [
+        "commit message guidance",
+        "commit guidance",
+        "message guidance",
+        "commit message prompt",
+        "prompt instructions",
+        "inspect commit message",
+    ];
+    if meta_terms.iter().any(|term| lower_subject.contains(term)) {
+        return Err(
+            "commit message is meta/generic instead of describing staged changes".to_string(),
+        );
+    }
+
+    let prompt_like_terms = ["guidance", "prompt", "instructions"];
+    if prompt_like_terms
+        .iter()
+        .any(|term| lower_subject.contains(term))
+    {
+        return Err(
+            "commit message is meta/generic instead of describing staged changes".to_string(),
+        );
+    }
+
+    let generic_subjects = [
+        "chore: update files",
+        "chore: update changes",
+        "chore: inspect changes",
+        "chore: adjust files",
+        "chore: misc changes",
+        "fix: update files",
+        "fix: update changes",
+        "refactor: update files",
+    ];
+    if generic_subjects
+        .iter()
+        .any(|generic| lower_subject.trim() == *generic)
+    {
+        return Err("commit message is too generic for the staged changes".to_string());
+    }
+
+    Ok(())
+}
+
+fn build_commit_retry_prompt(original_prompt: &str, rejection_reason: &str) -> String {
+    format!(
+        "Previous generated commit message was rejected: {rejection_reason}\n\n\
+Generate a replacement commit message that describes the actual staged diff only. \
+Never mention commit-message guidance, prompts, instructions, or inspection unless those exact user-facing product concepts are the changed feature.\n\n\
+{original_prompt}"
+    )
 }
 
 /// Response from creating a commit with AI-generated message
@@ -6995,8 +7108,61 @@ fn push_for_commit(
     }
 }
 
-/// Generate commit message using Claude CLI with JSON schema
+/// Generate commit message using the configured magic backend and validate it.
+#[allow(clippy::too_many_arguments)]
 fn generate_commit_message(
+    app: &AppHandle,
+    prompt: &str,
+    model: Option<&str>,
+    custom_profile_name: Option<&str>,
+    working_dir: Option<&std::path::Path>,
+    worktree_id: Option<&str>,
+    magic_backend: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> Result<CommitMessageResponse, String> {
+    let response = generate_commit_message_once(
+        app,
+        prompt,
+        model,
+        custom_profile_name,
+        working_dir,
+        worktree_id,
+        magic_backend,
+        reasoning_effort,
+    )?;
+
+    match validate_commit_message(&response.message, prompt, prompt) {
+        Ok(()) => Ok(response),
+        Err(first_reason) => {
+            log::warn!(
+                "Generated commit message rejected, retrying once: {} ({first_reason})",
+                commit_message_subject(&response.message)
+            );
+            let retry_prompt = build_commit_retry_prompt(prompt, &first_reason);
+            let retry_response = generate_commit_message_once(
+                app,
+                &retry_prompt,
+                model,
+                custom_profile_name,
+                working_dir,
+                worktree_id,
+                magic_backend,
+                reasoning_effort,
+            )?;
+            validate_commit_message(&retry_response.message, prompt, prompt).map_err(|reason| {
+                format!(
+                    "AI generated invalid commit message twice. Last rejection: {reason}. Message: {}",
+                    commit_message_subject(&retry_response.message)
+                )
+            })?;
+            Ok(retry_response)
+        }
+    }
+}
+
+/// Generate commit message using Claude CLI with JSON schema
+#[allow(clippy::too_many_arguments)]
+fn generate_commit_message_once(
     app: &AppHandle,
     prompt: &str,
     model: Option<&str>,
@@ -7359,6 +7525,35 @@ fn extract_codex_review_structured_output(output: &str) -> Result<String, String
     Err("No structured output found in Codex response".to_string())
 }
 
+fn build_codex_review_args(
+    actual_model: &str,
+    is_fast: bool,
+    schema_file: &Path,
+    working_dir: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![
+        "exec".into(),
+        "--json".into(),
+        "--model".into(),
+        actual_model.into(),
+        "--full-auto".into(),
+        "--output-schema".into(),
+        schema_file.as_os_str().to_os_string(),
+    ];
+    if is_fast {
+        args.push("-c".into());
+        args.push("service_tier=\"fast\"".into());
+    }
+    if let Some(dir) = working_dir {
+        args.push("--cd".into());
+        args.push(dir.as_os_str().to_os_string());
+    } else {
+        args.push("--skip-git-repo-check".into());
+    }
+    args.push("-".into());
+    args
+}
+
 fn execute_codex_review(
     app: &AppHandle,
     prompt: &str,
@@ -7385,26 +7580,15 @@ fn execute_codex_review(
     );
 
     let mut cmd = crate::platform::silent_command(&cli_path);
-    cmd.args([
-        "exec",
-        "--json",
-        "--model",
+    cmd.args(build_codex_review_args(
         actual_model,
-        "--full-auto",
-        "--output-schema",
-    ]);
-    if is_fast {
-        cmd.args(["-c", "service_tier=\"fast\""]);
-    }
-    cmd.arg(&schema_file);
+        is_fast,
+        &schema_file,
+        working_dir,
+    ));
     if let Some(dir) = working_dir {
-        cmd.arg("--cd");
-        cmd.arg(dir);
         cmd.current_dir(dir);
-    } else {
-        cmd.arg("--skip-git-repo-check");
     }
-    cmd.arg("-");
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -8060,6 +8244,45 @@ pub async fn run_coderabbit_review(
 }
 
 #[cfg(test)]
+mod codex_review_args_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn fast_service_tier_does_not_split_output_schema_from_schema_path() {
+        let schema_file = Path::new("/tmp/jean-codex-review-schema.json");
+        let working_dir = Path::new("/tmp/project");
+
+        let args = build_codex_review_args("gpt-5.3-codex", true, schema_file, Some(working_dir));
+
+        let output_schema_position = args
+            .iter()
+            .position(|arg| arg == "--output-schema")
+            .expect("--output-schema arg is present");
+        assert_eq!(
+            args.get(output_schema_position + 1),
+            Some(&schema_file.as_os_str().to_os_string()),
+            "schema path must immediately follow --output-schema"
+        );
+        assert!(args.windows(2).any(|window| {
+            window
+                == [
+                    OsString::from("-c"),
+                    OsString::from("service_tier=\"fast\""),
+                ]
+        }));
+        assert!(args.windows(2).any(|window| {
+            window
+                == [
+                    OsString::from("--cd"),
+                    working_dir.as_os_str().to_os_string(),
+                ]
+        }));
+        assert_eq!(args.last(), Some(&OsString::from("-")));
+    }
+}
+
+#[cfg(test)]
 mod coderabbit_review_tests {
     use super::*;
 
@@ -8302,19 +8525,31 @@ const RELEASE_NOTES_SCHEMA: &str = r#"{
 
 const RELEASE_NOTES_PROMPT: &str = r#"Generate release notes for changes since the `{tag}` release ({previous_release_name}).
 
+## Merged pull requests and detected issue references
+
+{pull_requests}
+
+## Required PR/issue reference formats
+
+{related_pull_requests}
+
 ## Commits since {tag}
 
 {commits}
 
 ## Instructions
 
-- Write a concise release title
-- Group changes into categories: Features, Fixes, Improvements, Breaking Changes (only include categories that have entries)
-- Use bullet points with brief descriptions
-- Reference PR numbers if visible in commit messages
-- Skip merge commits and trivial changes (typos, formatting)
-- Write in past tense ("Added", "Fixed", "Improved")
-- Keep it concise and user-facing (skip internal implementation details)"#;
+- Write a concise release title.
+- Group changes into categories: Features, Fixes, Improvements, Breaking Changes (only include categories that have entries).
+- Explicitly use the merged pull request metadata above as the primary source, then use commits as fallback context.
+- Inspect PR titles, PR bodies, and PR commit messages for GitHub closing keywords: close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved.
+- Always normalize closing keywords to lowercase final forms: closes, fixes, resolves.
+- Reference the PR number for each bullet when known: `(#123)`.
+- If a PR closes/fixes/resolves issues, include the issue refs after the PR using the detected keyword: `(#123, fixes #456, #789)`.
+- Do not invent PR numbers or issue references; only use the detected metadata above.
+- Skip merge commits and trivial changes (typos, formatting).
+- Write in past tense ("Added", "Fixed", "Improved").
+- Keep it concise and user-facing (skip internal implementation details)."#;
 
 /// Generate release notes content using Claude CLI
 fn generate_release_notes_content(
@@ -8379,6 +8614,9 @@ fn generate_release_notes_content(
         commits
     };
 
+    let release_notes_context = build_release_notes_prompt_context(app, project_path, tag)?;
+    let related_pull_requests = format_related_pull_requests(&release_notes_context.pr_issue_refs);
+
     // Build prompt
     let prompt_template = custom_prompt
         .filter(|p| !p.trim().is_empty())
@@ -8387,7 +8625,9 @@ fn generate_release_notes_content(
     let prompt = prompt_template
         .replace("{tag}", tag)
         .replace("{previous_release_name}", release_name)
-        .replace("{commits}", &commits);
+        .replace("{commits}", &commits)
+        .replace("{pull_requests}", &release_notes_context.pull_requests)
+        .replace("{related_pull_requests}", &related_pull_requests);
 
     let model_str = model.unwrap_or("sonnet");
 
@@ -8404,10 +8644,13 @@ fn generate_release_notes_content(
             Some(std::path::Path::new(project_path)),
             reasoning_effort,
         )?;
-        return serde_json::from_str(&json_str).map_err(|e| {
+        let mut response: ReleaseNotesResponse = serde_json::from_str(&json_str).map_err(|e| {
             log::error!("Failed to parse OpenCode release notes JSON: {e}, content: {json_str}");
             format!("Failed to parse release notes: {e}")
-        });
+        })?;
+        response.body =
+            augment_pr_references_in_body(&response.body, &release_notes_context.pr_issue_refs);
+        return Ok(response);
     }
 
     if backend == crate::chat::types::Backend::Codex {
@@ -8420,10 +8663,13 @@ fn generate_release_notes_content(
             Some(std::path::Path::new(project_path)),
             reasoning_effort,
         )?;
-        return serde_json::from_str(&json_str).map_err(|e| {
+        let mut response: ReleaseNotesResponse = serde_json::from_str(&json_str).map_err(|e| {
             log::error!("Failed to parse Codex release notes JSON: {e}, content: {json_str}");
             format!("Failed to parse release notes: {e}")
-        });
+        })?;
+        response.body =
+            augment_pr_references_in_body(&response.body, &release_notes_context.pr_issue_refs);
+        return Ok(response);
     }
 
     if backend == crate::chat::types::Backend::Cursor {
@@ -8434,10 +8680,13 @@ fn generate_release_notes_content(
             model_str,
             Some(std::path::Path::new(project_path)),
         )?;
-        return serde_json::from_str(&json_str).map_err(|e| {
+        let mut response: ReleaseNotesResponse = serde_json::from_str(&json_str).map_err(|e| {
             log::error!("Failed to parse Cursor release notes JSON: {e}, content: {json_str}");
             format!("Failed to parse release notes: {e}")
-        });
+        })?;
+        response.body =
+            augment_pr_references_in_body(&response.body, &release_notes_context.pr_issue_refs);
+        return Ok(response);
     }
 
     let cli_path = resolve_cli_binary(app);
@@ -8496,12 +8745,16 @@ fn generate_release_notes_content(
     let json_content = extract_structured_output(&stdout)?;
     log::trace!("Extracted release notes JSON: {json_content}");
 
-    serde_json::from_str::<ReleaseNotesResponse>(&json_content)
-        .map_err(|e| format!("Failed to parse release notes response: {e}"))
+    let mut response = serde_json::from_str::<ReleaseNotesResponse>(&json_content)
+        .map_err(|e| format!("Failed to parse release notes response: {e}"))?;
+    response.body =
+        augment_pr_references_in_body(&response.body, &release_notes_context.pr_issue_refs);
+    Ok(response)
 }
 
 fn augment_pr_references_in_body(body: &str, pr_issue_refs: &PrIssueRefsMap) -> String {
-    RELEASE_NOTES_PAREN_RE
+    let mut referenced_prs = std::collections::BTreeSet::new();
+    let mut augmented = RELEASE_NOTES_PAREN_RE
         .replace_all(body, |captures: &regex::Captures<'_>| {
             let Some(content_match) = captures.get(1) else {
                 return captures[0].to_string();
@@ -8516,6 +8769,7 @@ fn augment_pr_references_in_body(body: &str, pr_issue_refs: &PrIssueRefsMap) -> 
             let Ok(pr_number) = pr_number_match.as_str().parse::<u32>() else {
                 return captures[0].to_string();
             };
+            referenced_prs.insert(pr_number);
             let Some(issue_groups) = pr_issue_refs.get(&pr_number) else {
                 return captures[0].to_string();
             };
@@ -8525,12 +8779,32 @@ fn augment_pr_references_in_body(body: &str, pr_issue_refs: &PrIssueRefsMap) -> 
 
             format!("(#{pr_number}, {})", format_issue_groups(issue_groups))
         })
-        .into_owned()
+        .into_owned();
+
+    let missing_refs = pr_issue_refs
+        .iter()
+        .filter(|(pr_number, issue_groups)| {
+            !referenced_prs.contains(pr_number) && !issue_groups.is_empty()
+        })
+        .map(|(pr_number, issue_groups)| {
+            format!("- (#{pr_number}, {})", format_issue_groups(issue_groups))
+        })
+        .collect::<Vec<_>>();
+
+    if !missing_refs.is_empty() {
+        if !augmented.ends_with('\n') {
+            augmented.push_str("\n\n");
+        }
+        augmented.push_str("Related issue references:\n");
+        augmented.push_str(&missing_refs.join("\n"));
+    }
+
+    augmented
 }
 
 fn format_related_pull_requests(pr_issue_refs: &PrIssueRefsMap) -> String {
     if pr_issue_refs.is_empty() {
-        return "No merged pull requests were detected from commit subjects in this branch."
+        return "No merged pull requests with closing issue references were detected in this release window."
             .to_string();
     }
 
@@ -8585,6 +8859,20 @@ mod release_notes_body_tests {
         let result =
             augment_pr_references_in_body(body, &issue_map(&[(9503, &[("fixes", &[9501, 9504])])]));
         assert_eq!(result, "- Added support (#9503, fixes #9501, #9504)");
+    }
+
+    #[test]
+    fn appends_missing_known_pr_references_not_present_in_body() {
+        let body = "- Added support";
+        let result =
+            augment_pr_references_in_body(body, &issue_map(&[(9503, &[("fixes", &[9501])])]));
+        assert_eq!(
+            result,
+            "- Added support
+
+Related issue references:
+- (#9503, fixes #9501)"
+        );
     }
 
     #[test]
@@ -10115,6 +10403,59 @@ pub async fn list_codex_skills() -> Result<Vec<ClaudeSkill>, String> {
     Ok(skills)
 }
 
+/// List OpenCode skills from the OpenCode config directory.
+#[tauri::command]
+pub async fn list_opencode_skills() -> Result<Vec<ClaudeSkill>, String> {
+    log::trace!("Listing OpenCode skills");
+
+    let mut skills_map = std::collections::HashMap::new();
+
+    if let Some(home) = get_home_dir() {
+        collect_skills_from_dir(&opencode_config_dir(&home).join("skills"), &mut skills_map);
+    }
+
+    let mut skills: Vec<ClaudeSkill> = skills_map.into_values().collect();
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    log::trace!("Found {} OpenCode skills", skills.len());
+    Ok(skills)
+}
+
+/// List Cursor skills from ~/.cursor/skills-cursor/.
+#[tauri::command]
+pub async fn list_cursor_skills() -> Result<Vec<ClaudeSkill>, String> {
+    log::trace!("Listing Cursor skills");
+
+    let mut skills_map = std::collections::HashMap::new();
+
+    if let Some(home) = get_home_dir() {
+        collect_skills_from_dir(&home.join(".cursor").join("skills-cursor"), &mut skills_map);
+    }
+
+    let mut skills: Vec<ClaudeSkill> = skills_map.into_values().collect();
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    log::trace!("Found {} Cursor skills", skills.len());
+    Ok(skills)
+}
+
+fn opencode_config_dir(home: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
+        return std::path::PathBuf::from(xdg_config_home).join("opencode");
+    }
+
+    #[cfg(windows)]
+    {
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            return std::path::PathBuf::from(app_data).join("opencode");
+        }
+        return home.join("AppData").join("Roaming").join("opencode");
+    }
+
+    #[cfg(not(windows))]
+    {
+        home.join(".config").join("opencode")
+    }
+}
+
 /// A group of skills from an installed Claude plugin
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -10751,6 +11092,53 @@ Body
     }
 
     #[test]
+    fn validate_commit_message_rejects_commit_guidance_meta_subject() {
+        let result = validate_commit_message(
+            "chore: inspect commit message guidance",
+            "src-tauri/src/projects/commands.rs | 12 ++++++------",
+            "M  src-tauri/src/projects/commands.rs",
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("meta"));
+    }
+
+    #[test]
+    fn validate_commit_message_rejects_generic_subjects() {
+        let result = validate_commit_message(
+            "chore: update files",
+            "src/components/chat/ChatToolbar.tsx | 8 +++++---",
+            "M  src/components/chat/ChatToolbar.tsx",
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("generic"));
+    }
+
+    #[test]
+    fn validate_commit_message_accepts_specific_conventional_commit() {
+        let result = validate_commit_message(
+            "fix(chat): preserve mobile toolbar actions",
+            "src/components/chat/toolbar/MobileToolbarMenu.tsx | 8 +++++---",
+            "M  src/components/chat/toolbar/MobileToolbarMenu.tsx",
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_commit_retry_prompt_includes_rejection_reason_and_original_context() {
+        let retry_prompt = build_commit_retry_prompt(
+            "Generate a conventional commit message.\nDiff:\n+new behavior",
+            "commit message is meta/generic",
+        );
+
+        assert!(retry_prompt.contains("Previous generated commit message was rejected"));
+        assert!(retry_prompt.contains("commit message is meta/generic"));
+        assert!(retry_prompt.contains("+new behavior"));
+    }
+
+    #[test]
     fn test_build_claude_structured_output_args_uses_two_turns_and_plan_mode() {
         let args = build_claude_structured_output_args("sonnet", "none", REVIEW_SCHEMA);
 
@@ -10761,5 +11149,28 @@ Body
         assert!(args
             .windows(2)
             .any(|w| w == ["--json-schema", REVIEW_SCHEMA]));
+    }
+
+    #[test]
+    fn parse_porcelain_files_handles_renames() {
+        let parsed = parse_porcelain_files(" M src/lib.rs\nR  old.rs -> new.rs\n?? scratch.txt\n");
+
+        assert_eq!(
+            parsed,
+            vec![
+                ("M".to_string(), "src/lib.rs".to_string()),
+                ("R".to_string(), "new.rs".to_string()),
+                ("??".to_string(), "scratch.txt".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn truncate_utf8_preserves_char_boundaries() {
+        let (truncated, was_truncated) = truncate_utf8("åååå", 3);
+
+        assert!(was_truncated);
+        assert!(truncated.starts_with('å'));
+        assert!(truncated.contains("diff truncated"));
     }
 }

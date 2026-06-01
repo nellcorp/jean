@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import {
+  act,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createElement } from 'react'
 import {
@@ -7,6 +14,7 @@ import {
   useSavePreferences,
   preferencesQueryKeys,
 } from './preferences'
+import { AppearancePane } from '@/components/preferences/panes/AppearancePane'
 import type { AppPreferences } from '@/types/preferences'
 import {
   FONT_SIZE_DEFAULT,
@@ -22,11 +30,29 @@ import {
   modelOptions,
   normalizeClaudeModel,
   normalizeCodexModel,
+  defaultPreferences,
 } from '@/types/preferences'
 import { DEFAULT_KEYBINDINGS } from '@/types/keybindings'
 
 vi.mock('@/lib/transport', () => ({
   invoke: vi.fn(),
+}))
+
+vi.mock('@/lib/platform', () => ({
+  isMacOS: true,
+  isWindows: false,
+  isLinux: false,
+  getModifierSymbol: vi.fn(() => '⌘'),
+  getFileManagerName: vi.fn(() => 'Finder'),
+  openExternal: vi.fn(),
+  preOpenWindow: vi.fn(() => null),
+}))
+
+vi.mock('@/hooks/use-theme', () => ({
+  useTheme: () => ({
+    theme: 'system',
+    setTheme: vi.fn(),
+  }),
 }))
 
 vi.mock('sonner', () => ({
@@ -64,6 +90,7 @@ const createWrapper = (queryClient: QueryClient) => {
 describe('model option helpers', () => {
   it('uses 1M Claude variants where available and keeps no-1M-only models', () => {
     expect(modelOptions.map(option => option.value)).toEqual([
+      'claude-opus-4-8[1m]',
       'claude-opus-4-7[1m]',
       'claude-opus-4-6[1m]',
       'claude-opus-4-5-20251101',
@@ -71,6 +98,7 @@ describe('model option helpers', () => {
       'haiku',
     ])
     expect(normalizeClaudeModel('sonnet')).toBe('claude-sonnet-4-6[1m]')
+    expect(normalizeClaudeModel('claude-opus-4-8')).toBe('claude-opus-4-8[1m]')
     expect(normalizeClaudeModel('claude-opus-4-7')).toBe('claude-opus-4-7[1m]')
   })
 
@@ -102,6 +130,17 @@ describe('model option helpers', () => {
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       'Every Codex plan-mode response'
     )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('Jean Worktree Policy')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'Do NOT create git worktrees manually'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('Jean MCP/tools')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'VERY IMPORTANT: Keep Code Simple'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'Always implement the simplest maintainable solution'
+    )
   })
 })
 
@@ -114,6 +153,14 @@ describe('preferences service', () => {
     // Mock Tauri environment
     Object.defineProperty(window, '__TAURI_INTERNALS__', {
       value: { invoke: vi.fn() },
+      configurable: true,
+    })
+    Object.defineProperty(globalThis, 'ResizeObserver', {
+      value: class ResizeObserver {
+        observe = () => undefined
+        unobserve = () => undefined
+        disconnect = () => undefined
+      },
       configurable: true,
     })
   })
@@ -182,6 +229,7 @@ describe('preferences service', () => {
         known_mcp_servers: [],
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
+        has_seen_jean_mcp_intro: false,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -194,6 +242,7 @@ describe('preferences service', () => {
         confirm_session_close: true,
         default_execution_mode: 'plan',
         default_backend: 'claude',
+        default_new_session_kind: 'chat',
         selected_codex_model: 'gpt-5.5',
         selected_opencode_model: 'opencode/gpt-5.3-codex',
         selected_cursor_model: 'cursor/auto',
@@ -218,7 +267,13 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         gh_cli_source: 'jean',
         expand_tool_calls_by_default: false,
+        window_vibrancy: false,
+        terminal_background: 'auto',
+        terminal_background_custom: null,
         auto_update_ai_backends: true,
+        jean_mcp_enabled: false,
+        jean_mcp_max_depth: 3,
+        jean_mcp_rate_limit_per_minute: 20,
       }
       vi.mocked(invoke).mockResolvedValueOnce(mockPreferences)
 
@@ -230,6 +285,7 @@ describe('preferences service', () => {
 
       expect(invoke).toHaveBeenCalledWith('load_preferences')
       expect(result.current.data?.theme).toBe('dark')
+      expect(result.current.data?.jean_mcp_enabled).toBe(false)
     })
 
     it('returns defaults when not in Tauri context', async () => {
@@ -243,7 +299,8 @@ describe('preferences service', () => {
       await waitFor(() => expect(result.current.isSuccess).toBe(true))
 
       expect(result.current.data?.theme).toBe('system')
-      expect(result.current.data?.selected_model).toBe('claude-opus-4-7[1m]')
+      expect(result.current.data?.selected_model).toBe('claude-opus-4-8[1m]')
+      expect(result.current.data?.jean_mcp_enabled).toBe(true)
     })
 
     it('returns defaults on backend error', async () => {
@@ -257,6 +314,7 @@ describe('preferences service', () => {
       await waitFor(() => expect(result.current.isSuccess).toBe(true))
 
       expect(result.current.data?.theme).toBe('system')
+      expect(result.current.data?.jean_mcp_enabled).toBe(true)
     })
 
     it('migrates old keybindings to new defaults', async () => {
@@ -315,6 +373,7 @@ describe('preferences service', () => {
         known_mcp_servers: [],
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
+        has_seen_jean_mcp_intro: false,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -327,6 +386,7 @@ describe('preferences service', () => {
         confirm_session_close: true,
         default_execution_mode: 'plan',
         default_backend: 'claude',
+        default_new_session_kind: 'chat',
         selected_codex_model: 'gpt-5.5',
         selected_opencode_model: 'opencode/gpt-5.3-codex',
         selected_cursor_model: 'cursor/auto',
@@ -351,7 +411,13 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         gh_cli_source: 'jean',
         expand_tool_calls_by_default: false,
+        window_vibrancy: false,
+        terminal_background: 'auto',
+        terminal_background_custom: null,
         auto_update_ai_backends: true,
+        jean_mcp_enabled: false,
+        jean_mcp_max_depth: 3,
+        jean_mcp_rate_limit_per_minute: 20,
       }
       vi.mocked(invoke).mockResolvedValueOnce(prefsWithOldBinding)
 
@@ -420,6 +486,7 @@ describe('preferences service', () => {
         known_mcp_servers: [],
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
+        has_seen_jean_mcp_intro: false,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -432,6 +499,7 @@ describe('preferences service', () => {
         confirm_session_close: true,
         default_execution_mode: 'plan',
         default_backend: 'claude',
+        default_new_session_kind: 'chat',
         selected_codex_model:
           'gpt-5.3-fast' as AppPreferences['selected_codex_model'],
         selected_opencode_model: 'opencode/gpt-5.3-codex',
@@ -457,7 +525,13 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         gh_cli_source: 'jean',
         expand_tool_calls_by_default: false,
+        window_vibrancy: false,
+        terminal_background: 'auto',
+        terminal_background_custom: null,
         auto_update_ai_backends: true,
+        jean_mcp_enabled: false,
+        jean_mcp_max_depth: 3,
+        jean_mcp_rate_limit_per_minute: 20,
       }
       vi.mocked(invoke).mockResolvedValueOnce(prefsWithDeprecatedFastModel)
 
@@ -527,6 +601,7 @@ describe('preferences service', () => {
         known_mcp_servers: [],
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
+        has_seen_jean_mcp_intro: false,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -539,6 +614,7 @@ describe('preferences service', () => {
         confirm_session_close: true,
         default_execution_mode: 'plan',
         default_backend: 'claude',
+        default_new_session_kind: 'chat',
         selected_codex_model: 'gpt-5.5',
         selected_opencode_model: 'opencode/gpt-5.3-codex',
         selected_cursor_model: 'cursor/auto',
@@ -563,7 +639,13 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         gh_cli_source: 'jean',
         expand_tool_calls_by_default: false,
+        window_vibrancy: false,
+        terminal_background: 'auto',
+        terminal_background_custom: null,
         auto_update_ai_backends: true,
+        jean_mcp_enabled: false,
+        jean_mcp_max_depth: 3,
+        jean_mcp_rate_limit_per_minute: 20,
       }
 
       const { result } = renderHook(() => useSavePreferences(), {
@@ -635,6 +717,7 @@ describe('preferences service', () => {
         known_mcp_servers: [],
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
+        has_seen_jean_mcp_intro: false,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -647,6 +730,7 @@ describe('preferences service', () => {
         confirm_session_close: true,
         default_execution_mode: 'plan',
         default_backend: 'claude',
+        default_new_session_kind: 'chat',
         selected_codex_model: 'gpt-5.5',
         selected_opencode_model: 'opencode/gpt-5.3-codex',
         selected_cursor_model: 'cursor/auto',
@@ -671,7 +755,13 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         gh_cli_source: 'jean',
         expand_tool_calls_by_default: false,
+        window_vibrancy: false,
+        terminal_background: 'auto',
+        terminal_background_custom: null,
         auto_update_ai_backends: true,
+        jean_mcp_enabled: false,
+        jean_mcp_max_depth: 3,
+        jean_mcp_rate_limit_per_minute: 20,
       }
 
       const { result } = renderHook(() => useSavePreferences(), {
@@ -686,6 +776,48 @@ describe('preferences service', () => {
         preferencesQueryKeys.preferences()
       )
       expect(cached).toEqual(newPrefs)
+    })
+
+    it('persists window vibrancy and returns it on subsequent loads', async () => {
+      const { invoke } = await import('@/lib/transport')
+      let persistedPreferences: AppPreferences = {
+        ...defaultPreferences,
+        window_vibrancy: false,
+      }
+      vi.mocked(invoke).mockImplementation(async (command, args) => {
+        if (command === 'save_preferences') {
+          persistedPreferences = (args as { preferences: AppPreferences })
+            .preferences
+          return undefined
+        }
+        if (command === 'load_preferences') return persistedPreferences
+        throw new Error(`Unexpected command ${command}`)
+      })
+
+      const prefsWithVibrancy: AppPreferences = {
+        ...persistedPreferences,
+        window_vibrancy: true,
+      }
+      const { result: saveResult } = renderHook(() => useSavePreferences(), {
+        wrapper: createWrapper(queryClient),
+      })
+
+      await act(async () => {
+        await saveResult.current.mutateAsync(prefsWithVibrancy)
+      })
+
+      expect(persistedPreferences.window_vibrancy).toBe(true)
+      expect(invoke).toHaveBeenCalledWith('save_preferences', {
+        preferences: prefsWithVibrancy,
+      })
+
+      const reloadQueryClient = createTestQueryClient()
+      const { result: loadResult } = renderHook(() => usePreferences(), {
+        wrapper: createWrapper(reloadQueryClient),
+      })
+
+      await waitFor(() => expect(loadResult.current.isSuccess).toBe(true))
+      expect(loadResult.current.data?.window_vibrancy).toBe(true)
     })
 
     it('skips persistence when not in Tauri context', async () => {
@@ -743,6 +875,7 @@ describe('preferences service', () => {
         known_mcp_servers: [],
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
+        has_seen_jean_mcp_intro: false,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -755,6 +888,7 @@ describe('preferences service', () => {
         confirm_session_close: true,
         default_execution_mode: 'plan',
         default_backend: 'claude',
+        default_new_session_kind: 'chat',
         selected_codex_model: 'gpt-5.5',
         selected_opencode_model: 'opencode/gpt-5.3-codex',
         selected_cursor_model: 'cursor/auto',
@@ -779,7 +913,13 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         gh_cli_source: 'jean',
         expand_tool_calls_by_default: false,
+        window_vibrancy: false,
+        terminal_background: 'auto',
+        terminal_background_custom: null,
         auto_update_ai_backends: true,
+        jean_mcp_enabled: false,
+        jean_mcp_max_depth: 3,
+        jean_mcp_rate_limit_per_minute: 20,
       }
 
       const { result } = renderHook(() => useSavePreferences(), {
@@ -849,6 +989,7 @@ describe('preferences service', () => {
         known_mcp_servers: [],
         has_seen_feature_tour: false,
         has_seen_jean_config_wizard: false,
+        has_seen_jean_mcp_intro: false,
         chrome_enabled: true,
         zoom_level: 100,
         custom_cli_profiles: [],
@@ -861,6 +1002,7 @@ describe('preferences service', () => {
         confirm_session_close: true,
         default_execution_mode: 'plan',
         default_backend: 'claude',
+        default_new_session_kind: 'chat',
         selected_codex_model: 'gpt-5.5',
         selected_opencode_model: 'opencode/gpt-5.3-codex',
         selected_cursor_model: 'cursor/auto',
@@ -885,7 +1027,13 @@ describe('preferences service', () => {
         opencode_cli_source: 'jean',
         gh_cli_source: 'jean',
         expand_tool_calls_by_default: false,
+        window_vibrancy: false,
+        terminal_background: 'auto',
+        terminal_background_custom: null,
         auto_update_ai_backends: true,
+        jean_mcp_enabled: false,
+        jean_mcp_max_depth: 3,
+        jean_mcp_rate_limit_per_minute: 20,
       }
 
       const { result } = renderHook(() => useSavePreferences(), {
@@ -896,6 +1044,55 @@ describe('preferences service', () => {
 
       await waitFor(() => expect(result.current.isError).toBe(true))
 
+      expect(toast.error).toHaveBeenCalledWith('Failed to save preferences', {
+        description: 'Save failed',
+      })
+    })
+  })
+
+  describe('AppearancePane window vibrancy', () => {
+    it('keeps the switch off and skips runtime vibrancy when persistence fails', async () => {
+      const { invoke } = await import('@/lib/transport')
+      const { toast } = await import('sonner')
+      vi.mocked(invoke).mockImplementation(async command => {
+        if (command === 'load_preferences') {
+          return { ...defaultPreferences, window_vibrancy: false }
+        }
+        if (command === 'patch_preferences') {
+          throw new Error('Save failed')
+        }
+        if (command === 'set_window_vibrancy') return undefined
+        throw new Error(`Unexpected command ${command}`)
+      })
+
+      const user = userEvent.setup()
+      render(
+        createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          createElement(AppearancePane)
+        )
+      )
+
+      const switchEl = await screen.findByRole('switch')
+      expect(switchEl).toHaveAttribute('aria-checked', 'false')
+
+      await user.click(switchEl)
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('patch_preferences', {
+          patch: { window_vibrancy: true },
+        })
+      })
+      expect(invoke).not.toHaveBeenCalledWith('set_window_vibrancy', {
+        enabled: true,
+      })
+      expect(
+        queryClient.getQueryData<AppPreferences>(
+          preferencesQueryKeys.preferences()
+        )?.window_vibrancy
+      ).toBe(false)
+      expect(switchEl).toHaveAttribute('aria-checked', 'false')
       expect(toast.error).toHaveBeenCalledWith('Failed to save preferences', {
         description: 'Save failed',
       })

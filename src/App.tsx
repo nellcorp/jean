@@ -45,6 +45,7 @@ import { useQueueProcessor } from './hooks/useQueueProcessor'
 import { useBackgroundInvestigation } from './hooks/useBackgroundInvestigation'
 import { useAutoArchiveOnMerge } from './hooks/useAutoArchiveOnMerge'
 import { useMagicPromptAutoDefaults } from './hooks/useMagicPromptAutoDefaults'
+import { usePreferences } from './services/preferences'
 import useStreamingEvents from './components/chat/hooks/useStreamingEvents'
 import { hydrateRunningSnapshot } from './lib/hydrate-running-snapshot'
 import { preloadAllSounds } from './lib/sounds'
@@ -70,7 +71,7 @@ function WebLoadingScreen() {
 /** Full-screen overlay shown while the WebSocket reconnects so stale cached data isn't visible. */
 function WsReconnectOverlay() {
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-background/95">
       <div className="flex flex-col items-center gap-3">
         <div className="size-6 animate-spin rounded-full border-2 border-muted border-t-primary" />
         <span className="text-sm text-muted-foreground">Reconnecting…</span>
@@ -86,7 +87,7 @@ function WsAuthErrorOverlay() {
   if (!authError) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/90 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/90">
       <div className="mx-4 max-w-md rounded-lg border border-destructive/50 bg-background p-6 shadow-lg">
         <div className="flex items-center gap-2 text-destructive">
           <svg
@@ -112,6 +113,10 @@ function App() {
   // Track preloading state for web view
   const [isPreloading, setIsPreloading] = useState(!isNativeApp())
   const queryClient = useQueryClient()
+  const { data: preferences } = usePreferences()
+  const onboardingOpen = useUIStore(state => state.onboardingOpen)
+  const featureTourOpen = useUIStore(state => state.featureTourOpen)
+  const jeanMcpIntroOpen = useUIStore(state => state.jeanMcpIntroOpen)
   const hasStartedTransportRef = useRef(false)
 
   // Holds the update object so the title bar indicator can trigger install later
@@ -645,6 +650,20 @@ function App() {
     }
   }, [])
 
+  // Pause animations when window loses focus to save GPU
+  useEffect(() => {
+    const onBlur = () =>
+      document.documentElement.classList.add('window-blurred')
+    const onFocus = () =>
+      document.documentElement.classList.remove('window-blurred')
+    window.addEventListener('blur', onBlur)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      window.removeEventListener('blur', onBlur)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [])
+
   const [cliCheckReady, setCliCheckReady] = useState(false)
   useEffect(() => {
     if (!isNativeApp()) return
@@ -744,6 +763,66 @@ function App() {
     isGhAuthLoading,
     cliCheckReady,
     queryClient,
+  ])
+
+  // Show the one-time Jean MCP announcement only after setup is complete.
+  // This must never compete with first-run onboarding or the feature tour.
+  useEffect(() => {
+    if (!isNativeApp()) return
+    if (!cliCheckReady || !preferences) return
+    if (preferences.has_seen_jean_mcp_intro) return
+    if (onboardingOpen || featureTourOpen || jeanMcpIntroOpen) return
+
+    if (!claudeStatus || !codexStatus || !opencodeStatus || !ghStatus) return
+
+    const isLoading =
+      isClaudeStatusLoading ||
+      isCodexStatusLoading ||
+      isOpencodeStatusLoading ||
+      isGhStatusLoading ||
+      (claudeStatus?.installed && isClaudeAuthLoading) ||
+      (codexStatus?.installed && isCodexAuthLoading) ||
+      (opencodeStatus?.installed && isOpencodeAuthLoading) ||
+      (ghStatus?.installed && isGhAuthLoading)
+    if (isLoading) return
+
+    const ghReady = !!ghStatus?.installed && !!ghAuth?.authenticated
+    const claudeReady = !!claudeStatus?.installed && !!claudeAuth?.authenticated
+    const codexReady = !!codexStatus?.installed && !!codexAuth?.authenticated
+    const opencodeReady =
+      !!opencodeStatus?.installed && !!opencodeAuth?.authenticated
+    const hasAiBackendReady = claudeReady || codexReady || opencodeReady
+
+    // If setup is incomplete, onboarding owns the startup surface.
+    if (!ghReady || !hasAiBackendReady) return
+
+    // Existing first-run tour has priority; show MCP intro on a later tick/reload
+    // after that preference has been marked seen.
+    if (!preferences.has_seen_feature_tour) return
+
+    useUIStore.getState().setJeanMcpIntroOpen(true)
+  }, [
+    preferences,
+    onboardingOpen,
+    featureTourOpen,
+    jeanMcpIntroOpen,
+    claudeStatus,
+    codexStatus,
+    opencodeStatus,
+    ghStatus,
+    claudeAuth,
+    codexAuth,
+    opencodeAuth,
+    ghAuth,
+    isClaudeStatusLoading,
+    isCodexStatusLoading,
+    isOpencodeStatusLoading,
+    isGhStatusLoading,
+    isClaudeAuthLoading,
+    isCodexAuthLoading,
+    isOpencodeAuthLoading,
+    isGhAuthLoading,
+    cliCheckReady,
   ])
 
   // Show feature tour after CLI onboarding completes (first launch or manual trigger)

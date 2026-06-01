@@ -76,8 +76,14 @@ const DEFAULT_GLOBAL_SYSTEM_PROMPT: &str = "\
 \n\
 ## Core Principles\n\
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.\n\
+- **VERY IMPORTANT: Keep Code Simple**: Do not over-engineer. Always implement the simplest maintainable solution. Avoid extra abstractions, frameworks, configuration, or future-proofing unless clearly required.\n\
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.\n\
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.\n\
+\n\
+## Jean Worktree Policy\n\
+- Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.\n\
+- If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.\n\
+- If already in a Jean worktree or base/main workspace, continue in the current workspace.\n\
 \n\
 ## Important!\n\
 \n\
@@ -352,13 +358,13 @@ fn build_claude_args(
     }
 
     // Model (strip "-fast" suffix: "opus-fast" → model="opus" + fastMode setting)
-    let is_fast = if let Some(m) = model {
+    let (is_fast, fast_base_model) = if let Some(m) = model {
         let (actual_model, fast) = split_fast_model(m);
         args.push("--model".to_string());
         args.push(actual_model.to_string());
-        fast
+        (fast, fast.then(|| actual_model.to_string()))
     } else {
-        false
+        (false, None)
     };
 
     // Permission mode
@@ -434,6 +440,16 @@ fn build_claude_args(
         }
     }
 
+    // Fast mode picks the CLI's default fast Opus version (4.8 in Claude Code
+    // v2.1.154+), ignoring --model for the Opus version. Pin to 4.6 when the
+    // user explicitly selected the 4.6 fast variant.
+    if fast_base_model.as_deref() == Some("claude-opus-4-6[1m]") {
+        env_vars.push((
+            "CLAUDE_CODE_OPUS_4_6_FAST_MODE_OVERRIDE".to_string(),
+            "1".to_string(),
+        ));
+    }
+
     // Emit --settings if we have any settings to pass
     if let Some(settings) = &settings_json {
         args.push("--settings".to_string());
@@ -462,25 +478,7 @@ fn build_claude_args(
     args.push("--allowedTools".to_string());
     args.push("Bash(*claude-cli/claude*)".to_string());
 
-    // MCP server configuration
-    if let Some(config) = mcp_config {
-        if !config.is_empty() {
-            args.push("--mcp-config".to_string());
-            args.push(config.to_string());
-            args.push("--strict-mcp-config".to_string());
-
-            // Auto-allow all tools from configured MCP servers
-            // Pattern "mcp__<name>" matches all tools from that server
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(config) {
-                if let Some(servers) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
-                    for server_name in servers.keys() {
-                        args.push("--allowedTools".to_string());
-                        args.push(format!("mcp__{server_name}"));
-                    }
-                }
-            }
-        }
-    }
+    append_mcp_config_args(&mut args, mcp_config);
 
     // Chrome browser integration (beta)
     if chrome_enabled {
@@ -909,6 +907,10 @@ fn build_claude_args(
     // Debug env vars
     env_vars.push(("JEAN_SESSION_ID".to_string(), session_id.to_string()));
     env_vars.push(("JEAN_WORKTREE_ID".to_string(), worktree_id.to_string()));
+    // Jean MCP recursion-depth chain. Always set so a Claude spawned by another
+    // Jean-spawned Claude can be capped at the configured depth.
+    let (depth_key, depth_val) = super::jean_mcp::child_depth_env();
+    env_vars.push((depth_key, depth_val));
     env_vars.push((
         "JEAN_MODEL".to_string(),
         model.unwrap_or("default").to_string(),
@@ -922,6 +924,34 @@ fn build_claude_args(
     }
 
     (args, env_vars)
+}
+
+fn append_mcp_config_args(args: &mut Vec<String>, mcp_config: Option<&str>) {
+    let Some(config) = mcp_config else {
+        return;
+    };
+    if config.is_empty() {
+        return;
+    }
+
+    args.push("--mcp-config".to_string());
+    args.push(config.to_string());
+    args.push("--strict-mcp-config".to_string());
+
+    // Auto-allow all tools from configured MCP servers. Claude CLI has accepted
+    // both the server-level form and the wildcard form across releases; include
+    // both so non-interactive `--print` runs can actually execute MCP calls
+    // instead of stopping after emitting a tool_use that Jean cannot approve.
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(config) {
+        if let Some(servers) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
+            for server_name in servers.keys() {
+                args.push("--allowedTools".to_string());
+                args.push(format!("mcp__{server_name}"));
+                args.push("--allowedTools".to_string());
+                args.push(format!("mcp__{server_name}__*"));
+            }
+        }
+    }
 }
 
 /// Execute Claude CLI in detached mode.
@@ -2202,5 +2232,31 @@ mod tests {
             .contains("after the user answers native `request_user_input`"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Every Codex plan-mode response"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("OpenCode question"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean Worktree Policy"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Do NOT create git worktrees manually"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean MCP/tools"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("VERY IMPORTANT: Keep Code Simple"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
+            .contains("Always implement the simplest maintainable solution"));
+    }
+
+    #[test]
+    fn mcp_config_auto_allows_server_and_wildcard_tools() {
+        let config = r#"{
+            "mcpServers": {
+                "jean-dev": { "type": "stdio", "command": "jean" },
+                "github": { "type": "stdio", "command": "github-mcp" }
+            }
+        }"#;
+        let mut args = Vec::new();
+
+        append_mcp_config_args(&mut args, Some(config));
+
+        assert!(args.contains(&"--mcp-config".to_string()));
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+        assert!(args.contains(&"mcp__jean-dev".to_string()));
+        assert!(args.contains(&"mcp__jean-dev__*".to_string()));
+        assert!(args.contains(&"mcp__github".to_string()));
+        assert!(args.contains(&"mcp__github__*".to_string()));
     }
 }
