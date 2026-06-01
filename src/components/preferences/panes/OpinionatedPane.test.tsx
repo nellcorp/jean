@@ -41,10 +41,13 @@ describe('OpinionatedPane', () => {
 
     await screen.findByRole('button', { name: /Superpowers/i })
 
-    const uninstallButtons = screen.getAllByRole('button', { name: /Uninstall/i })
+    const uninstallButtons = screen.getAllByRole('button', {
+      name: /Uninstall/i,
+    })
     const superpowersUninstall = uninstallButtons[1]
-    expect(superpowersUninstall).toBeDefined()
-    await user.click(superpowersUninstall!)
+    if (!superpowersUninstall)
+      throw new Error('Superpowers Uninstall button not found')
+    await user.click(superpowersUninstall)
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('uninstall_opinionated_plugin', {

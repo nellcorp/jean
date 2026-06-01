@@ -157,9 +157,9 @@ describe('preferences service', () => {
     })
     Object.defineProperty(globalThis, 'ResizeObserver', {
       value: class ResizeObserver {
-        observe() {}
-        unobserve() {}
-        disconnect() {}
+        observe = () => undefined
+        unobserve = () => undefined
+        disconnect = () => undefined
       },
       configurable: true,
     })
