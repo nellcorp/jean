@@ -127,7 +127,45 @@ describe('DesktopToolbarControls', () => {
     expect(onSetExecutionMode).toHaveBeenCalledWith('build')
   })
 
-  it('hides Claude-only Max effort for Codex', () => {
+  it('shows a desktop Magic button that opens the magic modal', async () => {
+    const user = userEvent.setup()
+    const onOpenMagicModal = vi.fn()
+
+    renderDesktopToolbarControls({ onOpenMagicModal })
+
+    await user.click(screen.getByRole('button', { name: /magic/i }))
+
+    expect(onOpenMagicModal).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a desktop Attachments button after Magic that opens file picker', async () => {
+    const user = userEvent.setup()
+    const onAttach = vi.fn()
+
+    renderDesktopToolbarControls({ onAttach })
+
+    const magicButton = screen.getByRole('button', { name: /magic/i })
+    const attachmentsButton = screen.getByRole('button', {
+      name: /attachments/i,
+    })
+
+    expect(
+      magicButton.compareDocumentPosition(attachmentsButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+
+    await user.click(attachmentsButton)
+
+    expect(onAttach).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables the desktop Magic button while questions are pending', () => {
+    renderDesktopToolbarControls({ hasPendingQuestions: true })
+
+    expect(screen.getByRole('button', { name: /magic/i })).toBeDisabled()
+  })
+
+  it('hides Claude-only Max and Ultracode effort for Codex', () => {
     renderDesktopToolbarControls({
       isCodex: true,
       selectedBackend: 'codex',
@@ -138,6 +176,7 @@ describe('DesktopToolbarControls', () => {
 
     expect(screen.getByText('xHigh')).toBeInTheDocument()
     expect(screen.queryByText('Max')).not.toBeInTheDocument()
+    expect(screen.queryByText('Ultracode')).not.toBeInTheDocument()
   })
 
   it('keeps Max effort available for Claude adaptive thinking', () => {
@@ -150,5 +189,17 @@ describe('DesktopToolbarControls', () => {
     })
 
     expect(screen.getAllByText('Max').length).toBeGreaterThan(0)
+  })
+
+  it('keeps Ultracode effort available for Claude adaptive thinking', () => {
+    renderDesktopToolbarControls({
+      isCodex: false,
+      selectedBackend: 'claude',
+      useAdaptiveThinking: true,
+      selectedEffortLevel: 'ultracode',
+      thinkingDropdownOpen: true,
+    })
+
+    expect(screen.getAllByText('Ultracode').length).toBeGreaterThan(0)
   })
 })

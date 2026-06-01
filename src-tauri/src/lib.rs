@@ -18,6 +18,10 @@ mod codex_cli;
 mod cursor_cli;
 mod gh_cli;
 pub mod http_server;
+pub mod jean_mcp_config;
+pub mod jean_mcp_core;
+pub mod jean_mcp_socket;
+pub mod jean_mcp_stdio;
 mod opencode_cli;
 mod opencode_server;
 mod opinionated;
@@ -82,11 +86,11 @@ fn greet(name: &str) -> String {
 pub struct AppPreferences {
     pub theme: String,
     #[serde(default = "default_model")]
-    pub selected_model: String, // Claude model: claude-opus-4-7[1m], claude-opus-4-6[1m], haiku
+    pub selected_model: String, // Claude model: claude-opus-4-8[1m], claude-opus-4-7[1m], haiku
     #[serde(default = "default_thinking_level")]
     pub thinking_level: String, // Thinking level: off, think, megathink, ultrathink
     #[serde(default = "default_effort_level")]
-    pub default_effort_level: String, // Effort level for Opus adaptive thinking: low, medium, high, xhigh, max
+    pub default_effort_level: String, // Effort level for Opus adaptive thinking: low, medium, high, xhigh, max, ultracode
     #[serde(default = "default_terminal")]
     pub terminal: String, // Terminal app: terminal, warp, ghostty, iterm2, powershell, windows-terminal
     #[serde(default = "default_terminal_renderer")]
@@ -102,11 +106,11 @@ pub struct AppPreferences {
     #[serde(default = "default_auto_branch_naming")]
     pub auto_branch_naming: bool, // Automatically generate branch names from first message
     #[serde(default = "default_branch_naming_model")]
-    pub branch_naming_model: String, // Model for generating branch names: haiku, sonnet, claude-opus-4-7, claude-opus-4-6
+    pub branch_naming_model: String, // Model for generating branch names: haiku, sonnet, claude-opus-4-8, claude-opus-4-7
     #[serde(default = "default_auto_session_naming")]
     pub auto_session_naming: bool, // Automatically generate session names from first message
     #[serde(default = "default_session_naming_model")]
-    pub session_naming_model: String, // Model for generating session names: haiku, sonnet, claude-opus-4-7, claude-opus-4-6
+    pub session_naming_model: String, // Model for generating session names: haiku, sonnet, claude-opus-4-8, claude-opus-4-7
     #[serde(default = "default_font_size")]
     pub ui_font_size: u32, // Font size for UI text in pixels (10-24)
     #[serde(default = "default_font_size")]
@@ -189,6 +193,8 @@ pub struct AppPreferences {
     pub has_seen_feature_tour: bool, // Whether user has seen the feature tour onboarding
     #[serde(default)]
     pub has_seen_jean_config_wizard: bool, // Whether user has seen the jean.json setup wizard
+    #[serde(default)]
+    pub has_seen_jean_mcp_intro: bool, // Whether user has seen the Jean MCP server announcement
     #[serde(default = "default_chrome_enabled")]
     pub chrome_enabled: bool, // Enable browser automation via Chrome extension
     #[serde(default = "default_zoom_level")]
@@ -209,6 +215,8 @@ pub struct AppPreferences {
     pub default_execution_mode: String, // Default execution mode: "plan", "build", or "yolo"
     #[serde(default = "default_backend")]
     pub default_backend: String, // Default CLI backend: "claude", "codex", "opencode", or "cursor"
+    #[serde(default = "default_new_session_kind")]
+    pub default_new_session_kind: String, // Default new session action: "chat", "terminal", or a CLI backend
     #[serde(default = "default_codex_model")]
     pub selected_codex_model: String, // Default Codex model
     #[serde(default = "default_opencode_model")]
@@ -257,8 +265,32 @@ pub struct AppPreferences {
     pub coderabbit_cli_source: String, // CodeRabbit CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default)]
     pub expand_tool_calls_by_default: bool, // Expand all tool call collapsibles by default (default: false)
+    #[serde(default)]
+    pub window_vibrancy: bool, // macOS window vibrancy effect (high GPU cost, default false)
+    #[serde(default = "default_terminal_background")]
+    pub terminal_background: String, // "auto" | "light" | "dark" | "custom"
+    #[serde(default)]
+    pub terminal_background_custom: Option<String>, // hex like "#101010"; only used when mode == "custom"
     #[serde(default = "default_auto_update_ai_backends")]
     pub auto_update_ai_backends: bool, // Automatically update AI backend CLIs when a new version is available
+    #[serde(default = "default_jean_mcp_enabled")]
+    pub jean_mcp_enabled: bool, // Expose Jean MCP server to spawned CLIs through explicit CLI config entries
+    #[serde(default = "default_jean_mcp_max_depth")]
+    pub jean_mcp_max_depth: u32, // Max recursive spawn depth via Jean MCP (default 3)
+    #[serde(default = "default_jean_mcp_rate_limit")]
+    pub jean_mcp_rate_limit_per_minute: u32, // Per-source rate limit for session-spawning tools (default 20)
+}
+
+fn default_jean_mcp_enabled() -> bool {
+    true
+}
+
+fn default_jean_mcp_max_depth() -> u32 {
+    3
+}
+
+fn default_jean_mcp_rate_limit() -> u32 {
+    20
 }
 
 fn default_true() -> Option<bool> {
@@ -267,6 +299,10 @@ fn default_true() -> Option<bool> {
 
 fn default_restore_last_session() -> bool {
     true
+}
+
+fn default_terminal_background() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,12 +365,15 @@ fn default_chat_font() -> String {
 }
 
 fn default_model() -> String {
-    "claude-opus-4-7[1m]".to_string()
+    "claude-opus-4-8[1m]".to_string()
 }
 
 fn migrate_default_claude_model(model: &str) -> Option<&'static str> {
     match model {
+        "claude-opus-4-8" => Some("claude-opus-4-8[1m]"),
         "claude-opus-4-7" => Some("claude-opus-4-7[1m]"),
+        "claude-opus-4-7[1m]" => Some("claude-opus-4-8[1m]"),
+        "claude-opus-4-7[1m]-fast" => Some("claude-opus-4-8[1m]-fast"),
         "claude-opus-4-6" => Some("claude-opus-4-6[1m]"),
         "claude-opus-4-6-fast" => Some("claude-opus-4-6[1m]-fast"),
         "sonnet" => Some("claude-sonnet-4-6[1m]"),
@@ -449,6 +488,10 @@ fn default_backend() -> String {
     "claude".to_string()
 }
 
+fn default_new_session_kind() -> String {
+    "chat".to_string()
+}
+
 fn default_cli_source() -> String {
     "jean".to_string()
 }
@@ -556,6 +599,11 @@ mod tests {
         assert!(prompt.contains("Claude AskUserQuestion"));
         assert!(prompt.contains("OpenCode question"));
         assert!(prompt.contains("Use a plain-text Unresolved Questions section only"));
+        assert!(prompt.contains("Jean Worktree Policy"));
+        assert!(prompt.contains("Do NOT create git worktrees manually"));
+        assert!(prompt.contains("Jean MCP/tools"));
+        assert!(prompt.contains("VERY IMPORTANT: Keep Code Simple"));
+        assert!(prompt.contains("Always implement the simplest maintainable solution"));
     }
 
     #[test]
@@ -589,6 +637,58 @@ mod tests {
         let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
 
         assert!(prefs.web_access_sounds_enabled);
+    }
+
+    #[test]
+    fn app_preferences_default_jean_mcp_intro_unseen_for_existing_prefs() {
+        assert!(!AppPreferences::default().has_seen_jean_mcp_intro);
+
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        prefs_json
+            .as_object_mut()
+            .unwrap()
+            .remove("has_seen_jean_mcp_intro");
+
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+        assert!(!prefs.has_seen_jean_mcp_intro);
+    }
+
+    #[test]
+    fn app_preferences_default_jean_mcp_enabled_for_new_and_missing_prefs() {
+        assert!(AppPreferences::default().jean_mcp_enabled);
+
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        prefs_json
+            .as_object_mut()
+            .unwrap()
+            .remove("jean_mcp_enabled");
+
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+        assert!(prefs.jean_mcp_enabled);
+    }
+
+    #[test]
+    fn app_preferences_preserves_explicit_jean_mcp_enabled() {
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        prefs_json
+            .as_object_mut()
+            .unwrap()
+            .insert("jean_mcp_enabled".to_string(), json!(true));
+
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+        assert!(prefs.jean_mcp_enabled);
+    }
+
+    #[test]
+    fn app_preferences_preserves_explicit_jean_mcp_disabled() {
+        let mut prefs_json = serde_json::to_value(AppPreferences::default()).unwrap();
+        prefs_json
+            .as_object_mut()
+            .unwrap()
+            .insert("jean_mcp_enabled".to_string(), json!(false));
+
+        let prefs: AppPreferences = serde_json::from_value(prefs_json).unwrap();
+        assert!(!prefs.jean_mcp_enabled);
     }
 
     #[test]
@@ -704,7 +804,7 @@ pub struct MagicPrompts {
     pub review_comments: Option<String>,
 }
 
-fn default_investigate_issue_prompt() -> String {
+pub(crate) fn default_investigate_issue_prompt() -> String {
     r#"<task>
 
 Investigate the loaded GitHub {issueWord} ({issueRefs})
@@ -735,7 +835,7 @@ Investigate the loaded GitHub {issueWord} ({issueRefs})
         .to_string()
 }
 
-fn default_investigate_pr_prompt() -> String {
+pub(crate) fn default_investigate_pr_prompt() -> String {
     r#"<task>
 
 Investigate the loaded GitHub {prWord} ({prRefs})
@@ -798,7 +898,17 @@ fn default_pr_content_prompt() -> String {
 
 <diff>
 {diff}
-</diff>"#
+</diff>
+
+<instructions>
+- Use merged pull request metadata as the primary source when present; use commits and diff as fallback context.
+- Inspect pull request titles, bodies, and commit messages for GitHub closing keywords: close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved.
+- Normalize closing keywords in the final body to lowercase forms: closes, fixes, resolves.
+- Reference the pull request number for each relevant bullet when known: `(#123)`.
+- If a pull request closes/fixes/resolves issues, include the issue refs after the PR using the detected keyword: `(#123, fixes #456, #789)`.
+- Do not invent pull request numbers or issue references; only use detected metadata.
+- Keep the description concise and user-facing; avoid internal implementation details unless needed for review.
+</instructions>"#
         .to_string()
 }
 
@@ -1059,19 +1169,31 @@ Investigate the loaded Linear {linearWord} ({linearRefs})
 fn default_release_notes_prompt() -> String {
     r#"Generate release notes for changes since the `{tag}` release ({previous_release_name}).
 
+## Merged pull requests and detected issue references
+
+{pull_requests}
+
+## Required PR/issue reference formats
+
+{related_pull_requests}
+
 ## Commits since {tag}
 
 {commits}
 
 ## Instructions
 
-- Write a concise release title
-- Group changes into categories: Features, Fixes, Improvements, Breaking Changes (only include categories that have entries)
-- Use bullet points with brief descriptions
-- Reference PR numbers if visible in commit messages
-- Skip merge commits and trivial changes (typos, formatting)
-- Write in past tense ("Added", "Fixed", "Improved")
-- Keep it concise and user-facing (skip internal implementation details)"#
+- Write a concise release title.
+- Group changes into categories: Features, Fixes, Improvements, Breaking Changes (only include categories that have entries).
+- Explicitly use the merged pull request metadata above as the primary source, then use commits as fallback context.
+- Inspect PR titles, PR bodies, and PR commit messages for GitHub closing keywords: close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved.
+- Always normalize closing keywords to lowercase final forms: closes, fixes, resolves.
+- Reference the PR number for each bullet when known: `(#123)`.
+- If a PR closes/fixes/resolves issues, include the issue refs after the PR using the detected keyword: `(#123, fixes #456, #789)`.
+- Do not invent PR numbers or issue references; only use the detected metadata above.
+- Skip merge commits and trivial changes (typos, formatting).
+- Write in past tense ("Added", "Fixed", "Improved").
+- Keep it concise and user-facing (skip internal implementation details)."#
         .to_string()
 }
 
@@ -1133,7 +1255,7 @@ Address the following review comments from PR #{prNumber}
         .to_string()
 }
 
-fn default_parallel_execution_prompt() -> String {
+pub(crate) fn default_parallel_execution_prompt() -> String {
     r#"In plan mode, structure plans so subagents can work simultaneously. In build/execute mode, use subagents in parallel for faster implementation.
 
 When launching multiple Task subagents, prefer sending them in a single message rather than sequentially. Group independent work items (e.g., editing separate files, researching unrelated questions) into parallel Task calls. Only sequence Tasks when one depends on another's output.
@@ -1203,8 +1325,14 @@ fn default_global_system_prompt() -> String {
 
 ## Core Principles
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.
+- **VERY IMPORTANT: Keep Code Simple**: Do not over-engineer. Always implement the simplest maintainable solution. Avoid extra abstractions, frameworks, configuration, or future-proofing unless clearly required.
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+
+## Jean Worktree Policy
+- Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.
+- If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.
+- If already in a Jean worktree or base/main workspace, continue in the current workspace.
 
 ## Important!
 
@@ -1271,10 +1399,9 @@ impl Default for MagicPromptModels {
 }
 
 impl MagicPromptModels {
-    /// Upgrade legacy default model values left on existing installs:
-    /// fields that previously defaulted to `"opus"` (Opus 4.6) are bumped to
-    /// the new default (`"claude-opus-4-7[1m]"`). Users who explicitly picked
-    /// other models are untouched. Returns true if any field changed.
+    /// Upgrade previous Opus defaults left on existing installs to the current
+    /// default (`"claude-opus-4-8[1m]"`). Users who explicitly picked non-Opus
+    /// default models are untouched. Returns true if any field changed.
     fn migrate_legacy_defaults(&mut self) -> bool {
         let new_opus = default_model();
         let opus_fields: [&mut String; 10] = [
@@ -1291,7 +1418,7 @@ impl MagicPromptModels {
         ];
         let mut changed = false;
         for field in opus_fields {
-            if field == "opus" {
+            if matches!(field.as_str(), "opus" | "claude-opus-4-7[1m]") {
                 *field = new_opus.clone();
                 changed = true;
             }
@@ -1532,6 +1659,7 @@ impl Default for AppPreferences {
             known_mcp_servers: Vec::new(),
             has_seen_feature_tour: false,
             has_seen_jean_config_wizard: false,
+            has_seen_jean_mcp_intro: false,
             chrome_enabled: default_chrome_enabled(),
             zoom_level: default_zoom_level(),
             custom_cli_profiles: Vec::new(),
@@ -1542,6 +1670,7 @@ impl Default for AppPreferences {
             confirm_session_close: default_confirm_session_close(),
             default_execution_mode: default_execution_mode(),
             default_backend: default_backend(),
+            default_new_session_kind: default_new_session_kind(),
             selected_codex_model: default_codex_model(),
             selected_opencode_model: default_opencode_model(),
             selected_cursor_model: default_cursor_model(),
@@ -1566,7 +1695,13 @@ impl Default for AppPreferences {
             gh_cli_source: default_cli_source(),
             coderabbit_cli_source: default_cli_source(),
             expand_tool_calls_by_default: false,
+            window_vibrancy: false,
+            terminal_background: default_terminal_background(),
+            terminal_background_custom: None,
             auto_update_ai_backends: default_auto_update_ai_backends(),
+            jean_mcp_enabled: default_jean_mcp_enabled(),
+            jean_mcp_max_depth: default_jean_mcp_max_depth(),
+            jean_mcp_rate_limit_per_minute: default_jean_mcp_rate_limit(),
         }
     }
 }
@@ -1836,7 +1971,7 @@ async fn load_preferences(app: AppHandle) -> Result<AppPreferences, String> {
         needs_resave = true;
     }
 
-    // Migrate legacy magic-prompt model names ("opus" → "claude-opus-4-7[1m]")
+    // Migrate legacy magic-prompt model names ("opus" → "claude-opus-4-8[1m]")
     // and legacy auto-naming models ("haiku" → "sonnet")
     needs_resave |= preferences.magic_prompt_models.migrate_legacy_defaults();
     if preferences.branch_naming_model == "haiku" {
@@ -1933,6 +2068,15 @@ async fn save_preferences(app: AppHandle, preferences: AppPreferences) -> Result
         profile.file_path = String::new();
     }
 
+    if prefs_for_disk.jean_mcp_enabled
+        && prefs_for_disk
+            .http_server_token
+            .as_ref()
+            .is_none_or(|token| token.is_empty())
+    {
+        prefs_for_disk.http_server_token = Some(http_server::auth::generate_token());
+    }
+
     let json_content = serde_json::to_string_pretty(&prefs_for_disk).map_err(|e| {
         log::error!("Failed to serialize preferences: {e}");
         format!("Failed to serialize preferences: {e}")
@@ -1955,6 +2099,8 @@ async fn save_preferences(app: AppHandle, preferences: AppPreferences) -> Result
     })?;
 
     log::trace!("Successfully saved preferences to {prefs_path:?}");
+
+    schedule_jean_mcp_socket_sync(app.clone());
 
     // Sync native menu accelerators (macOS only)
     #[cfg(target_os = "macos")]
@@ -1988,6 +2134,64 @@ async fn patch_preferences(app: AppHandle, patch: Value) -> Result<(), String> {
     let merged: AppPreferences =
         serde_json::from_value(current_json).map_err(|e| format!("Merge error: {e}"))?;
     save_preferences(app, merged).await
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_window_opacity(window: &tauri::WebviewWindow, opaque: bool) -> Result<(), String> {
+    use objc2_app_kit::{NSColor, NSWindow};
+
+    let ns_window_ptr = window.ns_window().map_err(|e| format!("ns_window: {e}"))?;
+    if ns_window_ptr.is_null() {
+        return Err("ns_window pointer is null".into());
+    }
+    let ptr_addr = ns_window_ptr as usize;
+
+    window
+        .run_on_main_thread(move || unsafe {
+            let ns_window: &NSWindow = &*(ptr_addr as *const NSWindow);
+            ns_window.setOpaque(opaque);
+            let bg = if opaque {
+                NSColor::windowBackgroundColor()
+            } else {
+                NSColor::clearColor()
+            };
+            ns_window.setBackgroundColor(Some(&bg));
+        })
+        .map_err(|e| format!("run_on_main_thread: {e}"))
+}
+
+#[tauri::command]
+async fn set_window_vibrancy(app: AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::window::Effect;
+        if let Some(window) = app.get_webview_window("main") {
+            if enabled {
+                // Window must be transparent for the vibrancy effect to be visible.
+                apply_macos_window_opacity(&window, false)?;
+                window
+                    .set_effects(tauri::utils::config::WindowEffectsConfig {
+                        effects: vec![Effect::Sidebar],
+                        radius: Some(12.0),
+                        state: Some(tauri::window::EffectState::Active),
+                        color: None,
+                    })
+                    .map_err(|e| format!("Failed to set vibrancy: {e}"))?;
+            } else {
+                window
+                    .set_effects(None)
+                    .map_err(|e| format!("Failed to clear vibrancy: {e}"))?;
+                // Make the window opaque so the compositor stops blending the
+                // transparent backing layer (huge WindowServer GPU win).
+                apply_macos_window_opacity(&window, true)?;
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, enabled);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2505,6 +2709,150 @@ async fn regenerate_http_token(app: AppHandle) -> Result<String, String> {
     Ok(new_token)
 }
 
+async fn sync_jean_mcp_socket_from_preferences(
+    app: AppHandle,
+    prefs: &AppPreferences,
+) -> Result<(), String> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let handle_state = app.try_state::<Arc<Mutex<Option<jean_mcp_socket::JeanMcpSocketHandle>>>>();
+    let Some(state) = handle_state else {
+        return Ok(());
+    };
+
+    if !prefs.jean_mcp_enabled {
+        let mut guard = state.lock().await;
+        if let Some(handle) = guard.take() {
+            let _ = handle.shutdown_tx.send(());
+            log::info!("Jean MCP proxy socket stopped");
+        }
+        emit_jean_mcp_socket_status(&app, false);
+        return Ok(());
+    }
+
+    let token = prefs
+        .http_server_token
+        .clone()
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(http_server::auth::generate_token);
+    let path = jean_mcp_socket::socket_path(&app)?;
+
+    {
+        let mut guard = state.lock().await;
+        if let Some(handle) = guard.as_ref() {
+            if handle.path == path && handle.token == token {
+                return Ok(());
+            }
+        }
+        if let Some(handle) = guard.take() {
+            let _ = handle.shutdown_tx.send(());
+            log::info!("Jean MCP proxy socket restarting due to preference changes");
+        }
+    }
+
+    let handle = jean_mcp_socket::start_socket_server(app.clone(), path, token).await?;
+    log::info!("Jean MCP proxy socket started: {}", handle.path.display());
+
+    let mut guard = state.lock().await;
+    *guard = Some(handle);
+    emit_jean_mcp_socket_status(&app, true);
+    Ok(())
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JeanMcpSocketStatusEvent {
+    running: bool,
+}
+
+fn emit_jean_mcp_socket_status(app: &AppHandle, running: bool) {
+    if let Err(e) = app.emit(
+        "jean-mcp-socket-status",
+        JeanMcpSocketStatusEvent { running },
+    ) {
+        log::warn!("Failed to emit Jean MCP socket status: {e}");
+    }
+}
+
+fn schedule_jean_mcp_socket_sync(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let prefs = match load_preferences(app.clone()).await {
+            Ok(prefs) => prefs,
+            Err(e) => {
+                log::error!("Failed to load preferences for Jean MCP socket sync: {e}");
+                return;
+            }
+        };
+        if let Err(e) = sync_jean_mcp_socket_from_preferences(app, &prefs).await {
+            log::error!("Failed to sync Jean MCP proxy socket: {e}");
+        }
+    });
+}
+
+/// Snippet payloads users can paste into CLI config files to expose Jean's MCP
+/// server explicitly. One-click install writes the same entries.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JeanMcpSnippet {
+    pub enabled: bool,
+    pub server_running: bool,
+    pub mode: jean_mcp_config::JeanMcpInstallMode,
+    pub server_name: String,
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub claude: Option<String>,
+    pub cursor: Option<String>,
+    pub codex_toml: Option<String>,
+    pub opencode_json: Option<String>,
+}
+
+#[tauri::command]
+async fn get_jean_mcp_config_snippet(app: AppHandle) -> Result<JeanMcpSnippet, String> {
+    let prefs = load_preferences(app.clone()).await?;
+    let (running, socket_path, token) = jean_mcp_socket::get_socket_status(app.clone()).await;
+    let mode = jean_mcp_config::current_mode();
+    let server_name = mode.server_name().to_string();
+    let command = jean_mcp_config::get_stable_launcher_command();
+
+    let entry = match (&socket_path, &token) {
+        (Some(socket), Some(token)) if running => Some(jean_mcp_config::JeanMcpEntry {
+            mode,
+            server_name: server_name.clone(),
+            command,
+            socket: socket.clone(),
+            token: token.clone(),
+        }),
+        _ => None,
+    };
+    let claude = entry.as_ref().map(|entry| entry.claude_snippet());
+    let cursor = entry.as_ref().map(|entry| entry.cursor_snippet());
+    let codex_toml = entry.as_ref().map(|entry| entry.codex_snippet());
+    let opencode_json = entry.as_ref().map(|entry| entry.opencode_snippet());
+
+    Ok(JeanMcpSnippet {
+        enabled: prefs.jean_mcp_enabled,
+        server_running: running,
+        mode,
+        server_name,
+        url: socket_path,
+        token,
+        claude,
+        cursor,
+        codex_toml,
+        opencode_json,
+    })
+}
+
+#[tauri::command]
+async fn install_jean_mcp_config(
+    app: AppHandle,
+    backends: Option<Vec<String>>,
+    mode: Option<String>,
+) -> Result<Vec<jean_mcp_config::JeanMcpInstallResult>, String> {
+    jean_mcp_config::install_jean_mcp_config_impl(app, backends, mode).await
+}
+
 /// Convert a frontend shortcut string (e.g. "mod+shift+m") to Tauri accelerator format (e.g. "CmdOrCtrl+Shift+M")
 #[cfg(target_os = "macos")]
 fn shortcut_to_accelerator(shortcut: &str) -> String {
@@ -2793,6 +3141,14 @@ fn parse_cli_args() -> CliArgs {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if std::env::args().any(|arg| arg == jean_mcp_core::JEAN_MCP_STDIO_ARG) {
+        if let Err(e) = jean_mcp_stdio::run_stdio_server() {
+            eprintln!("Jean MCP server failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let cli_args = parse_cli_args();
     let headless = cli_args.headless;
 
@@ -2955,6 +3311,33 @@ pub fn run() {
 
             log::info!("Startup: orphaned server cleanup spawned at {:?}", setup_start.elapsed());
 
+            let opinionated_cleanup_started_at = setup_start.elapsed();
+            tauri::async_runtime::spawn(async move {
+                let result = tokio::task::spawn_blocking(|| {
+                    opinionated::cleanup_disallowed_opinionated_skills_on_startup()
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(count)) if count > 0 => log::info!(
+                        "Startup: removed {count} disallowed opinionated skill path(s)"
+                    ),
+                    Ok(Ok(_)) => log::trace!(
+                        "Startup: no disallowed opinionated skills found during cleanup"
+                    ),
+                    Ok(Err(e)) => log::warn!(
+                        "Startup: disallowed opinionated skill cleanup failed: {e}"
+                    ),
+                    Err(e) => log::warn!(
+                        "Startup: disallowed opinionated skill cleanup task failed: {e}"
+                    ),
+                }
+            });
+            log::info!(
+                "Startup: opinionated skill cleanup spawned at {:?}",
+                opinionated_cleanup_started_at
+            );
+
             // Allow image access from all known project/worktree directories.
             let app_handle = app.handle().clone();
             match crate::projects::storage::load_projects_data(&app_handle) {
@@ -2989,6 +3372,46 @@ pub fn run() {
             }
 
             log::info!("Startup: projects loaded + asset scopes registered at {:?}", setup_start.elapsed());
+
+            // Apply window vibrancy / opacity from saved preferences (macOS only).
+            // The bundled tauri.conf.json sets `transparent: true` so vibrancy is
+            // possible at runtime, but the default preference is opaque. Without
+            // this branch the compositor would keep blending a transparent
+            // backing layer for every user that hasn't enabled vibrancy.
+            #[cfg(target_os = "macos")]
+            if !headless {
+                let vibrancy_handle = app.handle().clone();
+                let mut want_vibrancy = false;
+                if let Ok(prefs_path) = get_preferences_path(&vibrancy_handle) {
+                    if prefs_path.exists() {
+                        if let Ok(contents) = std::fs::read_to_string(&prefs_path) {
+                            if let Ok(prefs) = serde_json::from_str::<AppPreferences>(&contents) {
+                                want_vibrancy = prefs.window_vibrancy;
+                            }
+                        }
+                    }
+                }
+                if let Some(window) = vibrancy_handle.get_webview_window("main") {
+                    if want_vibrancy {
+                        use tauri::window::Effect;
+                        let _ = apply_macos_window_opacity(&window, false);
+                        let _ = window.set_effects(tauri::utils::config::WindowEffectsConfig {
+                            effects: vec![Effect::Sidebar],
+                            radius: Some(12.0),
+                            state: Some(tauri::window::EffectState::Active),
+                            color: None,
+                        });
+                        log::info!("Applied window vibrancy from saved preferences");
+                    } else {
+                        // Match set_window_vibrancy(false): clear any effect
+                        // before going opaque so no NSVisualEffectView lingers
+                        // in the layer tree for the compositor to blend.
+                        let _ = window.set_effects(None);
+                        let _ = apply_macos_window_opacity(&window, true);
+                        log::info!("Window opaque (vibrancy disabled in preferences)");
+                    }
+                }
+            }
 
             // NOTE: Run recovery (crash recovery) is handled by check_resumable_sessions
             // which the frontend calls once it's ready. Previously this was done here in
@@ -3122,6 +3545,9 @@ pub fn run() {
             app.manage(std::sync::Arc::new(tokio::sync::Mutex::new(
                 None::<http_server::server::HttpServerHandle>,
             )));
+            app.manage(std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<jean_mcp_socket::JeanMcpSocketHandle>,
+            )));
             log::trace!("HTTP server infrastructure initialized");
 
             // Start HTTP server (always in headless mode, or if auto-start configured)
@@ -3190,6 +3616,32 @@ pub fn run() {
                 }
             });
 
+            // Start Jean MCP's local stdio proxy socket when enabled. Spawned CLIs
+            // connect via stdio to a helper process, which forwards over this socket.
+            let app_handle_mcp = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match load_preferences(app_handle_mcp.clone()).await {
+                    Ok(mut prefs) if prefs.jean_mcp_enabled => {
+                        if prefs
+                            .http_server_token
+                            .as_ref()
+                            .is_none_or(|token| token.is_empty())
+                        {
+                            prefs.http_server_token = Some(http_server::auth::generate_token());
+                            if let Err(e) = save_preferences(app_handle_mcp.clone(), prefs).await {
+                                log::error!("Failed to save/start Jean MCP socket: {e}");
+                            }
+                        } else if let Err(e) =
+                            sync_jean_mcp_socket_from_preferences(app_handle_mcp, &prefs).await
+                        {
+                            log::error!("Failed to start Jean MCP socket: {e}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::error!("Failed to load preferences for Jean MCP socket: {e}"),
+                }
+            });
+
             log::info!("Startup: setup() completed in {:?}", setup_start.elapsed());
             Ok(())
         })
@@ -3198,6 +3650,7 @@ pub fn run() {
             load_preferences,
             save_preferences,
             patch_preferences,
+            set_window_vibrancy,
             save_cli_profile,
             delete_cli_profile,
             load_ui_state,
@@ -3218,6 +3671,8 @@ pub fn run() {
             projects::remove_project,
             projects::list_worktrees,
             projects::get_worktree,
+            projects::get_worktree_changes,
+            projects::get_worktree_diff,
             projects::create_worktree,
             projects::create_worktree_from_existing_branch,
             projects::checkout_pr,
@@ -3246,8 +3701,6 @@ pub fn run() {
             projects::open_pull_request,
             projects::create_pr_with_ai_content,
             projects::merge_github_pr,
-            projects::generate_pr_update_content,
-            projects::update_pr_description,
             projects::create_commit_with_ai,
             projects::revert_last_local_commit,
             projects::run_review_with_ai,
@@ -3272,6 +3725,7 @@ pub fn run() {
             projects::get_pr_prompt,
             projects::get_review_prompt,
             projects::save_worktree_pr,
+            projects::link_worktree_pr,
             projects::detect_and_link_pr,
             projects::detect_open_pr_for_branch,
             projects::clear_worktree_pr,
@@ -3298,6 +3752,8 @@ pub fn run() {
             projects::list_claude_commands,
             projects::resolve_claude_command,
             projects::list_codex_skills,
+            projects::list_opencode_skills,
+            projects::list_cursor_skills,
             projects::list_plugin_skills,
             // GitHub issues commands
             projects::list_github_issues,
@@ -3388,6 +3844,8 @@ pub fn run() {
             browser::has_active_browser_tab,
             // Chat commands - Session management
             chat::get_sessions,
+            chat::list_sessions_summary,
+            chat::get_session_status,
             chat::list_all_sessions,
             chat::get_session,
             chat::load_older_session_messages,
@@ -3426,6 +3884,7 @@ pub fn run() {
             chat::respond_codex_permissions_request,
             chat::respond_codex_user_input_request,
             chat::respond_codex_mcp_elicitation,
+            jean_mcp_core::start_background_investigation,
             chat::respond_codex_dynamic_tool_call,
             chat::codex_goal_set,
             chat::codex_goal_get,
@@ -3535,9 +3994,12 @@ pub fn run() {
             list_http_bind_host_options,
             validate_http_bind_host,
             regenerate_http_token,
+            get_jean_mcp_config_snippet,
+            install_jean_mcp_config,
             // Opinionated plugin commands
             opinionated::check_opinionated_plugin_status,
             opinionated::install_opinionated_plugin,
+            opinionated::uninstall_opinionated_plugin,
             // OpenCode server commands
             opencode_server::start_opencode_server,
             opencode_server::stop_opencode_server,

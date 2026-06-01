@@ -7,7 +7,6 @@ export type CodexGoalExecutionMode = Extract<ExecutionMode, 'build' | 'yolo'>
 // =============================================================================
 // Notification Sounds
 // =============================================================================
-
 export type NotificationSound = 'none' | 'workwork' | 'jobsdone'
 export type TerminalRenderer = 'xterm' | 'ghostty-web'
 export type TerminalFont =
@@ -29,7 +28,6 @@ export const notificationSoundOptions: {
 // =============================================================================
 // Magic Prompts - Customizable prompts for AI-powered features
 // =============================================================================
-
 /**
  * Default prompts for magic commands. These can be customized in Settings.
  * Field names use snake_case to match Rust struct exactly.
@@ -194,7 +192,17 @@ export const DEFAULT_PR_CONTENT_PROMPT = `<task>Generate a pull request title an
 
 <diff>
 {diff}
-</diff>`
+</diff>
+
+<instructions>
+- Use merged pull request metadata as the primary source when present; use commits and diff as fallback context.
+- Inspect pull request titles, bodies, and commit messages for GitHub closing keywords: close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved.
+- Normalize closing keywords in the final body to lowercase forms: closes, fixes, resolves.
+- Reference the pull request number for each relevant bullet when known: \`(#123)\`.
+- If a pull request closes/fixes/resolves issues, include the issue refs after the PR using the detected keyword: \`(#123, fixes #456, #789)\`.
+- Do not invent pull request numbers or issue references; only use detected metadata.
+- Keep the description concise and user-facing; avoid internal implementation details unless needed for review.
+</instructions>`
 
 /** Default prompt for commit message generation */
 export const DEFAULT_COMMIT_MESSAGE_PROMPT = `Generate a conventional commit message for these staged changes.
@@ -455,19 +463,31 @@ Investigate the loaded Linear {linearWord} ({linearRefs})
 /** Default prompt for generating release notes */
 export const DEFAULT_RELEASE_NOTES_PROMPT = `Generate release notes for changes since the \`{tag}\` release ({previous_release_name}).
 
+## Merged pull requests and detected issue references
+
+{pull_requests}
+
+## Required PR/issue reference formats
+
+{related_pull_requests}
+
 ## Commits since {tag}
 
 {commits}
 
 ## Instructions
 
-- Write a concise release title
-- Group changes into categories: Features, Fixes, Improvements, Breaking Changes (only include categories that have entries)
-- Use bullet points with brief descriptions
-- Reference PR numbers if visible in commit messages
-- Skip merge commits and trivial changes (typos, formatting)
-- Write in past tense ("Added", "Fixed", "Improved")
-- Keep it concise and user-facing (skip internal implementation details)`
+- Write a concise release title.
+- Group changes into categories: Features, Fixes, Improvements, Breaking Changes (only include categories that have entries).
+- Explicitly use the merged pull request metadata above as the primary source, then use commits as fallback context.
+- Inspect PR titles, PR bodies, and PR commit messages for GitHub closing keywords: close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved.
+- Always normalize closing keywords to lowercase final forms: closes, fixes, resolves.
+- Reference the PR number for each bullet when known: \`(#123)\`.
+- If a PR closes/fixes/resolves issues, include the issue refs after the PR using the detected keyword: \`(#123, fixes #456, #789)\`.
+- Do not invent PR numbers or issue references; only use the detected metadata above.
+- Skip merge commits and trivial changes (typos, formatting).
+- Write in past tense ("Added", "Fixed", "Improved").
+- Keep it concise and user-facing (skip internal implementation details).`
 
 /** Default prompt for generating session names */
 export const DEFAULT_SESSION_NAMING_PROMPT = `<task>Generate a short, human-friendly name for this chat session based on the user's request.</task>
@@ -556,8 +576,14 @@ export const DEFAULT_GLOBAL_SYSTEM_PROMPT = `### 1. Plan Mode Default
 
 ## Core Principles
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.
+- **VERY IMPORTANT: Keep Code Simple**: Do not over-engineer. Always implement the simplest maintainable solution. Avoid extra abstractions, frameworks, configuration, or future-proofing unless clearly required.
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+
+## Jean Worktree Policy
+- Do NOT create git worktrees manually (\`git worktree add\`, Superpowers \`using-git-worktrees\`, or similar) unless the user explicitly asks for a new worktree.
+- If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.
+- If already in a Jean worktree or base/main workspace, continue in the current workspace.
 
 ## Important!
 
@@ -658,20 +684,20 @@ export interface MagicPromptReasoningEfforts {
 
 /** Default models for each magic prompt */
 export const DEFAULT_MAGIC_PROMPT_MODELS: MagicPromptModels = {
-  investigate_issue_model: 'claude-opus-4-7[1m]',
-  investigate_pr_model: 'claude-opus-4-7[1m]',
-  investigate_workflow_run_model: 'claude-opus-4-7[1m]',
+  investigate_issue_model: 'claude-opus-4-8[1m]',
+  investigate_pr_model: 'claude-opus-4-8[1m]',
+  investigate_workflow_run_model: 'claude-opus-4-8[1m]',
   pr_content_model: 'sonnet',
   commit_message_model: 'sonnet',
-  code_review_model: 'claude-opus-4-7[1m]',
-  context_summary_model: 'claude-opus-4-7[1m]',
-  resolve_conflicts_model: 'claude-opus-4-7[1m]',
+  code_review_model: 'claude-opus-4-8[1m]',
+  context_summary_model: 'claude-opus-4-8[1m]',
+  resolve_conflicts_model: 'claude-opus-4-8[1m]',
   release_notes_model: 'sonnet',
   session_naming_model: 'sonnet',
-  investigate_security_alert_model: 'claude-opus-4-7[1m]',
-  investigate_advisory_model: 'claude-opus-4-7[1m]',
-  investigate_linear_issue_model: 'claude-opus-4-7[1m]',
-  review_comments_model: 'claude-opus-4-7[1m]',
+  investigate_security_alert_model: 'claude-opus-4-8[1m]',
+  investigate_advisory_model: 'claude-opus-4-8[1m]',
+  investigate_linear_issue_model: 'claude-opus-4-8[1m]',
+  review_comments_model: 'claude-opus-4-8[1m]',
 }
 
 function makeMagicPromptModelsPreset(
@@ -912,7 +938,7 @@ export interface AppPreferences {
   theme: string
   selected_model: ClaudeModel // Claude model ID passed to --model flag
   thinking_level: ThinkingLevel // Thinking level: 'off' | 'think' | 'megathink' | 'ultrathink'
-  default_effort_level: EffortLevel // Effort level for Opus adaptive thinking: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  default_effort_level: EffortLevel // Effort level for Opus adaptive thinking: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultracode'
   terminal: TerminalApp // Terminal app: 'terminal' | 'warp' | 'ghostty' | 'iterm2' | 'powershell' | 'windows-terminal'
   terminal_renderer?: TerminalRenderer // Embedded terminal renderer: 'xterm' or 'ghostty-web' (experimental)
   terminal_font?: TerminalFont // Embedded terminal font
@@ -963,6 +989,7 @@ export interface AppPreferences {
   known_mcp_servers: string[] // All MCP server names ever seen (prevents re-enabling user-disabled servers)
   has_seen_feature_tour: boolean // Whether user has seen the feature tour onboarding
   has_seen_jean_config_wizard: boolean // Whether user has seen the jean.json setup wizard
+  has_seen_jean_mcp_intro: boolean // Whether user has seen the Jean MCP server announcement
   chrome_enabled: boolean // Enable browser automation via Chrome extension
   zoom_level: number // Zoom level percentage (50-200, default 100)
   custom_cli_profiles: CustomCliProfile[] // Custom CLI settings profiles (e.g., OpenRouter, MiniMax)
@@ -973,6 +1000,7 @@ export interface AppPreferences {
   confirm_session_close: boolean // Show confirmation dialog before closing sessions/worktrees
   default_execution_mode: ExecutionMode // Default execution mode for new sessions: 'plan', 'build', or 'yolo'
   default_backend: CliBackend // Default CLI backend for new sessions: 'claude', 'codex', 'opencode', or 'cursor'
+  default_new_session_kind: NewSessionKind // Default action for CMD+T: 'chat', 'terminal', or a CLI backend
   selected_codex_model: CodexModel // Default Codex model
   selected_opencode_model: string // Default OpenCode model (provider/model)
   selected_cursor_model: CursorModel // Default Cursor model
@@ -998,8 +1026,26 @@ export interface AppPreferences {
   gh_cli_source: 'jean' | 'path' // GitHub CLI source: 'jean' (managed) or 'path' (system PATH)
   coderabbit_cli_source?: 'jean' | 'path' // CodeRabbit CLI source: 'jean' (managed) or 'path' (system PATH)
   expand_tool_calls_by_default: boolean // Expand all tool call collapsibles by default
+  window_vibrancy: boolean // macOS window vibrancy effect (high GPU cost, default false)
+  terminal_background: TerminalBackgroundMode // Override the terminal background independently of the app theme
+  terminal_background_custom: string | null // Hex color used when terminal_background === 'custom'
   auto_update_ai_backends: boolean // Auto-install CLI updates in background when a new version is detected
+  jean_mcp_enabled: boolean // Expose Jean MCP server to spawned CLIs through explicit CLI config entries
+  jean_mcp_max_depth: number // Max recursive spawn depth via Jean MCP (default 3)
+  jean_mcp_rate_limit_per_minute: number // Per-source rate limit for session-spawning tools (default 20)
 }
+
+export type TerminalBackgroundMode = 'auto' | 'light' | 'dark' | 'custom'
+
+export const terminalBackgroundOptions: {
+  value: TerminalBackgroundMode
+  label: string
+}[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+  { value: 'custom', label: 'Custom color' },
+]
 
 export interface CustomCliProfile {
   name: string // Display name, e.g. "OpenRouter"
@@ -1090,11 +1136,15 @@ export const fileEditModeOptions: { value: FileEditMode; label: string }[] = [
 ]
 
 export type ClaudeModel =
+  | 'claude-opus-4-8'
+  | 'claude-opus-4-8[1m]'
   | 'claude-opus-4-7'
   | 'claude-opus-4-7[1m]'
   | 'claude-opus-4-6'
   | 'claude-opus-4-5-20251101'
   | 'claude-opus-4-6[1m]'
+  | 'claude-opus-4-8[1m]-fast'
+  | 'claude-opus-4-7[1m]-fast'
   | 'claude-opus-4-6-fast'
   | 'claude-opus-4-6[1m]-fast'
   | 'opus' // Legacy/provider-alias: resolved by CLI via ANTHROPIC_DEFAULT_OPUS_MODEL env
@@ -1103,6 +1153,7 @@ export type ClaudeModel =
   | 'haiku'
 
 export const modelOptions: { value: ClaudeModel; label: string }[] = [
+  { value: 'claude-opus-4-8[1m]', label: 'Claude Opus 4.8 (1M)' },
   { value: 'claude-opus-4-7[1m]', label: 'Claude Opus 4.7 (1M)' },
   { value: 'claude-opus-4-6[1m]', label: 'Claude Opus 4.6 (1M)' },
   { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5' },
@@ -1111,6 +1162,7 @@ export const modelOptions: { value: ClaudeModel; label: string }[] = [
 ]
 
 const legacyClaudeDefaultModelMap = {
+  'claude-opus-4-8': 'claude-opus-4-8[1m]',
   'claude-opus-4-7': 'claude-opus-4-7[1m]',
   'claude-opus-4-6': 'claude-opus-4-6[1m]',
   'claude-opus-4-6-fast': 'claude-opus-4-6[1m]-fast',
@@ -1119,6 +1171,8 @@ const legacyClaudeDefaultModelMap = {
 
 const knownClaudeModels = new Set<string>([
   ...modelOptions.map(option => option.value),
+  'claude-opus-4-8[1m]-fast',
+  'claude-opus-4-7[1m]-fast',
   'claude-opus-4-6[1m]-fast',
   'opus',
 ])
@@ -1132,12 +1186,14 @@ export function normalizeClaudeModel(model: string): ClaudeModel {
 
   return knownClaudeModels.has(model)
     ? (model as ClaudeModel)
-    : 'claude-opus-4-7[1m]'
+    : 'claude-opus-4-8[1m]'
 }
 
 // Claude models that support fast service tier. Fast mode is exposed via a
 // separate UI toggle, not as standalone dropdown entries.
 export const CLAUDE_FAST_MODEL_MAP = {
+  'claude-opus-4-8[1m]': 'claude-opus-4-8[1m]-fast',
+  'claude-opus-4-7[1m]': 'claude-opus-4-7[1m]-fast',
   'claude-opus-4-6[1m]': 'claude-opus-4-6[1m]-fast',
 } as const
 
@@ -1204,12 +1260,16 @@ export const effortLevelOptions: {
     description: 'Extra high Claude Opus effort',
   },
   { value: 'max', label: 'Max', description: 'Maximum Claude Opus effort' },
+  {
+    value: 'ultracode',
+    label: 'Ultracode',
+    description: 'xHigh effort plus automatic Claude Code workflows',
+  },
 ]
 
 // =============================================================================
 // Codex Types
 // =============================================================================
-
 export type CodexModel =
   | 'gpt-5.5'
   | 'gpt-5.5-fast'
@@ -1326,7 +1386,6 @@ export type MagicPromptReasoningEffort =
 // =============================================================================
 // Magic Prompt Model (unified type for both Claude and Codex)
 // =============================================================================
-
 export type OpenCodeModel = `opencode/${string}`
 export type CursorModel = `cursor/${string}`
 export type MagicPromptModel =
@@ -1365,7 +1424,6 @@ export const codexReasoningOptions: {
 // =============================================================================
 // CLI Backend
 // =============================================================================
-
 export type CliBackend = 'claude' | 'codex' | 'opencode' | 'cursor'
 
 export const backendOptions: { value: CliBackend; label: string }[] = [
@@ -1448,6 +1506,27 @@ export const openInDefaultOptions: { value: OpenInDefault; label: string }[] = [
   { value: 'finder', label: 'Finder' },
   { value: 'github', label: 'GitHub' },
 ]
+
+export type NewSessionKind = 'chat' | 'terminal' | CliBackend
+
+export const newSessionKindOptions: {
+  value: NewSessionKind
+  label: string
+}[] = [
+  { value: 'chat', label: 'Jean Chat' },
+  { value: 'terminal', label: 'Terminal' },
+  { value: 'codex', label: 'Codex' },
+  { value: 'claude', label: 'Claude' },
+  { value: 'opencode', label: 'OpenCode' },
+  { value: 'cursor', label: 'Cursor' },
+]
+
+export function getNewSessionKindLabel(
+  kind: NewSessionKind | undefined
+): string {
+  const option = newSessionKindOptions.find(opt => opt.value === kind)
+  return option?.label ?? 'Jean Chat'
+}
 
 export function getOpenInDefaultLabel(
   openIn: OpenInDefault | undefined,
@@ -1658,7 +1737,7 @@ export function getEditorLabel(editor: EditorApp | undefined): string {
 
 export const defaultPreferences: AppPreferences = {
   theme: 'system',
-  selected_model: 'claude-opus-4-7[1m]',
+  selected_model: 'claude-opus-4-8[1m]',
   thinking_level: 'ultrathink',
   default_effort_level: 'high',
   terminal: isWindows ? 'powershell' : 'terminal',
@@ -1711,6 +1790,7 @@ export const defaultPreferences: AppPreferences = {
   known_mcp_servers: [], // Default: no known servers
   has_seen_feature_tour: false, // Default: not seen
   has_seen_jean_config_wizard: false, // Default: not seen
+  has_seen_jean_mcp_intro: false, // Default: not seen
   chrome_enabled: true, // Default: enabled
   zoom_level: ZOOM_LEVEL_DEFAULT,
   custom_cli_profiles: [],
@@ -1720,6 +1800,7 @@ export const defaultPreferences: AppPreferences = {
   confirm_session_close: true, // Default: enabled (show confirmation)
   default_execution_mode: 'plan', // Default: plan mode
   default_backend: 'claude', // Default: Claude
+  default_new_session_kind: 'chat', // Default: Jean Chat for CMD+T
   selected_codex_model: 'gpt-5.5', // Default: latest Codex model
   selected_opencode_model: 'opencode/gpt-5.3-codex', // Default OpenCode model
   selected_cursor_model: 'cursor/auto', // Default Cursor model
@@ -1745,5 +1826,11 @@ export const defaultPreferences: AppPreferences = {
   gh_cli_source: 'jean', // Default: Jean-managed
   coderabbit_cli_source: 'jean', // Default: Jean-managed
   expand_tool_calls_by_default: false, // Default: collapsed
+  window_vibrancy: false, // Default: disabled (high GPU cost)
+  terminal_background: 'auto',
+  terminal_background_custom: null,
   auto_update_ai_backends: true, // Default: auto-update AI backends in the background
+  jean_mcp_enabled: true, // Default: enabled
+  jean_mcp_max_depth: 3,
+  jean_mcp_rate_limit_per_minute: 20,
 }

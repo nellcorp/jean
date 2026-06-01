@@ -132,7 +132,6 @@ import {
 } from './VirtualizedMessageList'
 import { RecentContexts } from './RecentContexts'
 import {
-  appendPromptMetadataToPlainText,
   buildPromptAttachmentMetadata,
   encodePromptAttachmentMetadata,
   stripAllMarkers,
@@ -660,10 +659,13 @@ export function ChatWindow({
   )
   const rawSelectedEffortLevel: EffortLevel =
     sessionEffortLevel ?? defaultEffortLevel
-  const selectedEffortLevel: EffortLevel =
-    isCodexBackend && rawSelectedEffortLevel === 'max'
+  const selectedEffortLevel: EffortLevel = isCodexBackend
+    ? rawSelectedEffortLevel === 'max'
       ? 'high'
-      : rawSelectedEffortLevel
+      : rawSelectedEffortLevel === 'ultracode'
+        ? 'xhigh'
+        : rawSelectedEffortLevel
+    : rawSelectedEffortLevel
 
   // MCP servers: resolve enabled servers cascade (session → project → global)
   // Fetches from ALL installed backends so toolbar shows grouped sections
@@ -2089,12 +2091,9 @@ export function ChatWindow({
         : getFilename(path)
     })
     const encodedMetadata = encodePromptAttachmentMetadata(metadata)
-    const fallbackText = appendPromptMetadataToPlainText(cleanText, metadata)
-
-    // Write to clipboard: plain text + HTML with embedded metadata.
-    // The fallback plain text includes a trailing comment sentinel so HTTP web
-    // access (where rich clipboard APIs may be unavailable) preserves
-    // attachments when pasted back into Jean.
+    // Write to clipboard: plain text + HTML with embedded metadata. If rich
+    // clipboard writes are unavailable, fall back to clean plain text so normal
+    // external paste targets never receive Jean metadata comments.
     const escapedCleanText = cleanText
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -2102,11 +2101,12 @@ export function ChatWindow({
     const htmlContent = `<span data-jean-prompt="${encodedMetadata}">${escapedCleanText}</span>`
 
     try {
-      await copyHtmlToClipboard(htmlContent, cleanText, fallbackText)
+      await copyHtmlToClipboard(htmlContent, cleanText, cleanText)
       toast.success('Prompt copied')
     } catch {
-      // Fallback to plain text with metadata so attachments still round-trip.
-      await copyToClipboard(fallbackText)
+      // User-safe fallback: avoid leaking Jean metadata comments into normal
+      // external paste targets when rich clipboard writes are unavailable.
+      await copyToClipboard(cleanText)
       toast.success('Prompt copied')
     }
   }, [])
@@ -2733,8 +2733,7 @@ export function ChatWindow({
                                   onSubmit={(_toolCallId, answers) =>
                                     handleCodexUserInputAnswer(
                                       activeCodexUserInputRequest,
-                                      answers,
-                                      activeCodexUserInputQuestions
+                                      answers
                                     )
                                   }
                                   isSkipped={false}

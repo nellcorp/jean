@@ -176,19 +176,21 @@ export interface Worktree {
 /** Event payload when worktree creation starts */
 export interface WorktreeCreatingEvent {
   id: string
-  project_id: string
+  projectId: string
   name: string
   path: string
   branch: string
-  pr_number?: number
-  issue_number?: number
-  security_alert_number?: number
-  advisory_ghsa_id?: string
+  prNumber?: number
+  issueNumber?: number
+  securityAlertNumber?: number
+  advisoryGhsaId?: string
+  autoOpenInJean: boolean
 }
 
 /** Event payload when worktree creation completes */
 export interface WorktreeCreatedEvent {
   worktree: Worktree
+  autoOpenInJean: boolean
 }
 
 /** Event payload when worktree setup script completes (after worktree:created) */
@@ -348,6 +350,13 @@ export interface CreatePrResponse {
 
 /** Response from detecting an existing PR for the current branch */
 export interface DetectPrResponse {
+  pr_number: number
+  pr_url: string
+  title: string
+}
+
+/** Response from manually linking a PR to a worktree */
+export interface LinkWorktreePrResponse {
   pr_number: number
   pr_url: string
   title: string
