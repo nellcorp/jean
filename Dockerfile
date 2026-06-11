@@ -276,6 +276,20 @@ RUN set -eux; \
 
 
 
+# --- cloudflared (Cloudflare Tunnel client) ---
+# Single static binary published per-arch at the GitHub release root.
+ARG CLOUDFLARED_VERSION=2025.5.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) cf_arch=amd64 ;; \
+      arm64) cf_arch=arm64 ;; \
+      *) echo "cloudflared: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${cf_arch}" \
+      -o /usr/local/bin/cloudflared \
+ && chmod +x /usr/local/bin/cloudflared
+
 # --- Go + gopls (golang.go extension) ---
 ARG GO_VERSION=1.26.2
 RUN set -eux; \
