@@ -272,7 +272,8 @@ RUN set -eux; \
       -o /tmp/stern.tgz; \
     tar -xzf /tmp/stern.tgz -C /usr/local/bin stern; \
     rm -f /tmp/stern.tgz; \
-    chmod +x /usr/local/bin/stern
+    chmod +x /usr/local/bin/stern; \
+    ln -sf /usr/local/bin/stern /usr/local/bin/logs
 
 
 
@@ -333,6 +334,18 @@ RUN set -eux; \
  && unzip /tmp/tls.zip -d /usr/local/bin \
  && rm -f /tmp/tls.zip \
  && chmod +x /usr/local/bin/terraform-ls
+
+# --- Terraform CLI (hashicorp.terraform extension) ---
+# Symlinked to `tf` for a shorter invocation.
+ARG TERRAFORM_VERSION=1.13.4
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${arch}.zip" \
+      -o /tmp/tf.zip \
+ && unzip -o /tmp/tf.zip terraform -d /usr/local/bin \
+ && rm -f /tmp/tf.zip \
+ && chmod +x /usr/local/bin/terraform \
+ && ln -sf /usr/local/bin/terraform /usr/local/bin/tf
 
 # --- Atlas (ariga.io) — DB schema migration CLI ---
 ARG ATLAS_VERSION=v0.38.0
