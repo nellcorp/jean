@@ -324,7 +324,8 @@ export function StackedGroup({
     if (item.type === 'thinking') {
       thinkingCount++
     } else {
-      toolCounts.set(item.tool.name, (toolCounts.get(item.tool.name) ?? 0) + 1)
+      const name = getToolSummaryName(item.tool.name)
+      toolCounts.set(name, (toolCounts.get(name) ?? 0) + 1)
     }
   }
 
@@ -432,7 +433,7 @@ function SubThinkingItem({ thinking }: SubThinkingItemProps) {
         <CollapsibleContent>
           <div className="border-t border-border/30 px-2 py-1.5">
             <div className="pl-2 border-l-2 border-purple-500/30 text-[0.625rem] text-muted-foreground/70">
-              <Markdown>{thinking}</Markdown>
+              <Markdown variant="tool-call">{thinking}</Markdown>
             </div>
           </div>
         </CollapsibleContent>
@@ -625,6 +626,60 @@ function formatWakeupDelay(seconds: number): string {
   return remMins > 0 ? `${hours}h ${remMins}m` : `${hours}h`
 }
 
+function normalizeCommandCodeToolForDisplay(
+  name: string,
+  input: Record<string, unknown>
+): { name: string; input: Record<string, unknown> } {
+  switch (name) {
+    case 'read_file':
+      return {
+        name: 'Read',
+        input: {
+          ...input,
+          file_path:
+            input.file_path ??
+            input.absolutePath ??
+            input.filePath ??
+            input.path,
+        },
+      }
+    case 'write_file':
+      return {
+        name: 'Write',
+        input: {
+          ...input,
+          file_path:
+            input.file_path ??
+            input.filePath ??
+            input.absolutePath ??
+            input.path,
+        },
+      }
+    case 'read_multiple_files':
+      return {
+        name: 'ReadMultipleFiles',
+        input: {
+          ...input,
+          path: input.path ?? input.targetDirectory,
+        },
+      }
+    case 'shell_command':
+      return { name: 'Bash', input }
+    case 'read_directory':
+      return { name: 'List', input }
+    case 'glob':
+      return { name: 'Glob', input }
+    case 'grep':
+      return { name: 'Grep', input }
+    default:
+      return { name, input }
+  }
+}
+
+function getToolSummaryName(name: string): string {
+  return normalizeCommandCodeToolForDisplay(name, {}).name
+}
+
 /** Live-ticking remaining seconds for a pending ScheduleWakeup. */
 function useWakeupRemaining(fireAtUnix: number | undefined): number | null {
   const [nowUnix, setNowUnix] = useState<number | null>(null)
@@ -681,9 +736,13 @@ function ScheduleWakeupCountdown({ toolCallId }: ScheduleWakeupIndicatorProps) {
 }
 
 function getToolDisplay(toolCall: ToolCall): ToolDisplay {
-  const input = (toolCall.input ?? {}) as Record<string, unknown>
+  const normalized = normalizeCommandCodeToolForDisplay(
+    toolCall.name,
+    (toolCall.input ?? {}) as Record<string, unknown>
+  )
+  const input = normalized.input
 
-  switch (toolCall.name) {
+  switch (normalized.name) {
     case 'Read': {
       const filePath = input.file_path as string | undefined
       const filename = filePath ? getFilename(filePath) : filePath
@@ -791,6 +850,26 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
         label: 'Glob',
         detail: pattern,
         expandedContent: `Pattern: ${pattern ?? '(none)'}\nPath: ${path ?? '(cwd)'}`,
+      }
+    }
+
+    case 'ReadMultipleFiles': {
+      const path = input.path as string | undefined
+      const include = input.include
+      const includeText = Array.isArray(include)
+        ? include.join(', ')
+        : typeof include === 'string'
+          ? include
+          : undefined
+      const detail =
+        includeText && path
+          ? `${includeText} in ${path}`
+          : (includeText ?? path)
+      return {
+        icon: <FileText className="h-4 w-4 shrink-0" />,
+        label: 'Read Multiple Files',
+        detail,
+        expandedContent: `Path: ${path ?? '(cwd)'}${includeText ? `\nInclude: ${includeText}` : ''}`,
       }
     }
 
@@ -972,7 +1051,9 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
           instructions.length > 0
             ? 'Read-only analysis instructions'
             : undefined,
-        expandedContent: <Markdown>{markdownBody}</Markdown>,
+        expandedContent: (
+          <Markdown variant="tool-call">{markdownBody}</Markdown>
+        ),
       }
     }
 
@@ -1051,6 +1132,7 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
       }
     }
 
+    case 'List':
     case 'list': {
       const path = input.path as string | undefined
       return {
@@ -1137,7 +1219,7 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
           />
         ),
         expandedContent: markdownBody ? (
-          <Markdown>{markdownBody}</Markdown>
+          <Markdown variant="tool-call">{markdownBody}</Markdown>
         ) : (
           JSON.stringify(input, null, 2)
         ),
@@ -1196,10 +1278,12 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
     }
 
     default: {
-      const isMcpTool = toolCall.name.startsWith('mcp__')
+      const isMcpTool = normalized.name.startsWith('mcp__')
       return {
         icon: <Terminal className="h-4 w-4 shrink-0" />,
-        label: isMcpTool ? toolCall.name : `${toolCall.name} (unhandled tool)`,
+        label: isMcpTool
+          ? normalized.name
+          : `${normalized.name} (unhandled tool)`,
         detail: undefined,
         expandedContent: JSON.stringify(input, null, 2),
       }

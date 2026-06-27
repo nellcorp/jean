@@ -272,9 +272,24 @@ RUN set -eux; \
       -o /tmp/stern.tgz; \
     tar -xzf /tmp/stern.tgz -C /usr/local/bin stern; \
     rm -f /tmp/stern.tgz; \
-    chmod +x /usr/local/bin/stern
+    chmod +x /usr/local/bin/stern; \
+    ln -sf /usr/local/bin/stern /usr/local/bin/logs
 
 
+
+# --- cloudflared (Cloudflare Tunnel client) ---
+# Single static binary published per-arch at the GitHub release root.
+ARG CLOUDFLARED_VERSION=2025.5.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) cf_arch=amd64 ;; \
+      arm64) cf_arch=arm64 ;; \
+      *) echo "cloudflared: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${cf_arch}" \
+      -o /usr/local/bin/cloudflared \
+ && chmod +x /usr/local/bin/cloudflared
 
 # --- Go + gopls (golang.go extension) ---
 ARG GO_VERSION=1.26.2
@@ -319,6 +334,32 @@ RUN set -eux; \
  && unzip /tmp/tls.zip -d /usr/local/bin \
  && rm -f /tmp/tls.zip \
  && chmod +x /usr/local/bin/terraform-ls
+
+# --- Terraform CLI (hashicorp.terraform extension) ---
+# Symlinked to `tf` for a shorter invocation.
+ARG TERRAFORM_VERSION=1.13.4
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${arch}.zip" \
+      -o /tmp/tf.zip \
+ && unzip -o /tmp/tf.zip terraform -d /usr/local/bin \
+ && rm -f /tmp/tf.zip \
+ && chmod +x /usr/local/bin/terraform \
+ && ln -sf /usr/local/bin/terraform /usr/local/bin/tf
+
+# --- AWS CLI v2 (official zip installer) ---
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) aws_arch=x86_64 ;; \
+      arm64) aws_arch=aarch64 ;; \
+      *) echo "aws-cli: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" \
+      -o /tmp/awscliv2.zip; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/aws
 
 # --- Atlas (ariga.io) — DB schema migration CLI ---
 ARG ATLAS_VERSION=v0.38.0

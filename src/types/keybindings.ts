@@ -22,7 +22,6 @@ export type KeybindingAction =
   | 'approve_plan_worktree_build'
   | 'approve_plan_worktree_yolo'
   | 'open_plan'
-  | 'open_recap'
   | 'restore_last_archived'
   | 'focus_canvas_search'
   | 'toggle_terminal'
@@ -35,6 +34,8 @@ export type KeybindingAction =
   | 'cancel_prompt'
   | 'scroll_chat_up'
   | 'scroll_chat_down'
+  | 'scroll_chat_up_medium'
+  | 'scroll_chat_down_medium'
   | 'scroll_chat_up_small'
   | 'scroll_chat_down_small'
   | 'open_github_dashboard'
@@ -82,7 +83,6 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   approve_plan_worktree_build: 'mod+alt+enter',
   approve_plan_worktree_yolo: 'mod+alt+y',
   open_plan: 'p',
-  open_recap: 'r',
   restore_last_archived: 'mod+alt+shift+t',
   focus_canvas_search: 'slash',
   toggle_terminal: 'mod+backquote',
@@ -95,6 +95,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   cancel_prompt: 'mod+alt+backspace',
   scroll_chat_up: 'mod+arrowup',
   scroll_chat_down: 'mod+arrowdown',
+  scroll_chat_up_medium: 'mod+alt+arrowup',
+  scroll_chat_down_medium: 'mod+alt+arrowdown',
   scroll_chat_up_small: 'arrowup',
   scroll_chat_down_small: 'arrowdown',
   open_github_dashboard: 'mod+shift+d',
@@ -253,13 +255,7 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     default_shortcut: 'p',
     category: 'chat',
   },
-  {
-    action: 'open_recap',
-    label: 'Open recap',
-    description: 'Open the session recap dialog for the selected session',
-    default_shortcut: 'r',
-    category: 'chat',
-  },
+
   {
     action: 'new_worktree',
     label: 'New worktree',
@@ -349,6 +345,20 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     label: 'Scroll chat down',
     description: 'Scroll the chat message list down by one page',
     default_shortcut: 'mod+arrowdown',
+    category: 'chat',
+  },
+  {
+    action: 'scroll_chat_up_medium',
+    label: 'Scroll chat up (medium)',
+    description: 'Scroll the chat message list up by a medium increment',
+    default_shortcut: 'mod+alt+arrowup',
+    category: 'chat',
+  },
+  {
+    action: 'scroll_chat_down_medium',
+    label: 'Scroll chat down (medium)',
+    description: 'Scroll the chat message list down by a medium increment',
+    default_shortcut: 'mod+alt+arrowdown',
     category: 'chat',
   },
   {

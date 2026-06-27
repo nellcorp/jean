@@ -1,7 +1,8 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useState, type RefObject } from 'react'
 import { invoke } from '@/lib/transport'
 import { openExternal } from '@/lib/platform'
 import { dismissibleToast } from '@/lib/dismissible-toast'
+import { toastActionLabel } from '@/lib/toast-action-label'
 import type { QueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { generateId } from '@/lib/uuid'
@@ -9,6 +10,7 @@ import { useChatStore } from '@/store/chat-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
 import { chatQueryKeys } from '@/services/chat'
+import { buildMcpConfigJson } from '@/services/mcp'
 import { saveWorktreePr, projectsQueryKeys } from '@/services/projects'
 import {
   gitPush,
@@ -24,6 +26,7 @@ import type {
   CreatePrResponse,
   CreateCommitResponse,
   DetectPrResponse,
+  RevertCommitResponse,
   ReviewResponse,
   MergeWorktreeResponse,
   MergeConflictsResponse,
@@ -32,9 +35,16 @@ import type {
   Worktree,
   Project,
 } from '@/types/projects'
-import type { Session } from '@/types/chat'
+import type {
+  EffortLevel,
+  McpServerInfo,
+  Session,
+  ThinkingLevel,
+} from '@/types/chat'
 import {
+  DEFAULT_PARALLEL_EXECUTION_PROMPT,
   DEFAULT_RESOLVE_CONFLICTS_PROMPT,
+  DEFAULT_MAGIC_PROMPT_MODES,
   resolveMagicPromptBackend,
   resolveMagicPromptProvider,
   type CliBackend,
@@ -44,6 +54,11 @@ import type { InvestigateOverride } from './useMagicCommands'
 
 interface SessionMutation<T> {
   mutate: (args: T) => void
+}
+
+interface SendMessageMutation {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  mutate: (args: any, opts?: any) => void
 }
 
 interface SessionSettingArgs {
@@ -72,6 +87,11 @@ interface UseGitOperationsParams {
   setSessionProvider: SessionMutation<
     SessionSettingArgs & { provider: string | null }
   >
+  sendMessage: SendMessageMutation
+  selectedThinkingLevelRef: RefObject<ThinkingLevel>
+  selectedEffortLevelRef: RefObject<EffortLevel>
+  mcpServersDataRef: RefObject<McpServerInfo[] | undefined>
+  enabledMcpServersRef: RefObject<string[]>
 }
 
 interface UseGitOperationsReturn {
@@ -83,6 +103,8 @@ interface UseGitOperationsReturn {
   handlePull: (remote?: string) => Promise<void>
   /** Pushes commits to remote */
   handlePush: (remote?: string) => Promise<void>
+  /** Reverts the latest local commit */
+  handleRevertLastCommit: () => Promise<void>
   /** Creates PR with AI-generated title and description */
   handleOpenPr: () => Promise<void>
   /** Runs AI code review. */
@@ -125,6 +147,11 @@ export function useGitOperations({
   setSessionModel,
   setSessionBackend,
   setSessionProvider,
+  sendMessage,
+  selectedThinkingLevelRef,
+  selectedEffortLevelRef,
+  mcpServersDataRef,
+  enabledMcpServersRef,
 }: UseGitOperationsParams): UseGitOperationsReturn {
   // Merge dialog state
   const [showMergeDialog, setShowMergeDialog] = useState(false)
@@ -159,7 +186,7 @@ export function useGitOperations({
         (backend === 'codex'
           ? (preferences?.selected_codex_model ?? 'gpt-5.5')
           : backend === 'opencode'
-            ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.3-codex')
+            ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.5')
             : backend === 'cursor'
               ? (preferences?.selected_cursor_model ?? 'cursor/auto')
               : (preferences?.selected_model ?? 'sonnet'))
@@ -226,6 +253,123 @@ export function useGitOperations({
   )
 
   // Handle Commit - creates commit with AI-generated message (no push)
+
+  const sendConflictResolutionPrompt = useCallback(
+    ({
+      session,
+      worktreeId,
+      worktreePath,
+      prompt,
+      backend,
+      model,
+      provider,
+      executionMode,
+    }: {
+      session: Session
+      worktreeId: string
+      worktreePath: string
+      prompt: string
+      backend: CliBackend
+      model: string
+      provider: string | null
+      executionMode: 'plan' | 'yolo'
+    }) => {
+      const store = useChatStore.getState()
+      store.setLastSentMessage(session.id, prompt)
+      store.setError(session.id, null)
+      store.setExecutionMode(session.id, executionMode)
+      store.setExecutingMode(session.id, executionMode)
+      store.clearInputDraft(session.id)
+
+      const isCustomProvider = Boolean(provider && provider !== '__anthropic__')
+      const customProfileName = isCustomProvider ? provider : undefined
+      const usesEffortLevel =
+        backend === 'codex' || backend === 'opencode' || backend === 'pi'
+
+      sendMessage.mutate(
+        {
+          sessionId: session.id,
+          worktreeId,
+          worktreePath,
+          message: prompt,
+          model,
+          executionMode,
+          thinkingLevel: selectedThinkingLevelRef.current,
+          effortLevel: usesEffortLevel
+            ? selectedEffortLevelRef.current
+            : undefined,
+          mcpConfig: buildMcpConfigJson(
+            mcpServersDataRef.current ?? [],
+            enabledMcpServersRef.current,
+            backend
+          ),
+          customProfileName,
+          parallelExecutionPrompt:
+            preferences?.parallel_execution_prompt_enabled
+              ? (preferences.magic_prompts?.parallel_execution ??
+                DEFAULT_PARALLEL_EXECUTION_PROMPT)
+              : undefined,
+          chromeEnabled: preferences?.chrome_enabled ?? false,
+          aiLanguage: preferences?.ai_language,
+          backend: backend !== 'claude' ? backend : undefined,
+        },
+        { onSettled: () => inputRef.current?.focus() }
+      )
+    },
+    [
+      enabledMcpServersRef,
+      inputRef,
+      mcpServersDataRef,
+      preferences?.ai_language,
+      preferences?.chrome_enabled,
+      preferences?.magic_prompts?.parallel_execution,
+      preferences?.parallel_execution_prompt_enabled,
+      selectedEffortLevelRef,
+      selectedThinkingLevelRef,
+      sendMessage,
+    ]
+  )
+
+  const resolveConflictSessionSelection = useCallback(
+    (override?: InvestigateOverride) => {
+      const defaultBackend = (project?.default_backend ??
+        preferences?.default_backend ??
+        'claude') as CliBackend
+      const resolvedProvider = resolveMagicPromptProvider(
+        preferences?.magic_prompt_providers,
+        'resolve_conflicts_provider',
+        preferences?.default_provider
+      )
+      const backend = (override?.backend ??
+        resolveMagicPromptBackend(
+          preferences?.magic_prompt_backends,
+          'resolve_conflicts_backend',
+          defaultBackend
+        ) ??
+        defaultBackend) as CliBackend
+      const executionMode =
+        preferences?.magic_prompt_modes?.resolve_conflicts_mode ??
+        DEFAULT_MAGIC_PROMPT_MODES.resolve_conflicts_mode
+      const model =
+        override?.model ??
+        preferences?.magic_prompt_models?.resolve_conflicts_model ??
+        (backend === 'codex'
+          ? (preferences?.selected_codex_model ?? 'gpt-5.5')
+          : backend === 'opencode'
+            ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.5')
+            : backend === 'cursor'
+              ? (preferences?.selected_cursor_model ?? 'cursor/auto')
+              : (preferences?.selected_model ?? 'sonnet'))
+      const provider =
+        override?.backend && override.backend !== 'claude'
+          ? null
+          : resolvedProvider
+
+      return { backend, model, provider, executionMode }
+    },
+    [project?.default_backend, preferences]
+  )
+
   const handleCommit = useCallback(async () => {
     if (!activeWorktreePath || !activeWorktreeId) return
 
@@ -336,7 +480,7 @@ export function useGitOperations({
             `${prefix}: No permission to push to PR #${worktree?.pr_number}. Create a separate PR instead.`,
             {
               action: {
-                label: 'Open PR',
+                label: toastActionLabel('Open PR'),
                 onClick: () =>
                   window.dispatchEvent(
                     new CustomEvent('magic-command', {
@@ -426,7 +570,7 @@ export function useGitOperations({
             `No permission to push to PR #${worktree?.pr_number}. Create a separate PR instead.`,
             {
               action: {
-                label: 'Open PR',
+                label: toastActionLabel('Open PR'),
                 onClick: () =>
                   window.dispatchEvent(
                     new CustomEvent('magic-command', {
@@ -456,6 +600,27 @@ export function useGitOperations({
       worktree?.pr_number,
     ]
   )
+
+  const handleRevertLastCommit = useCallback(async () => {
+    if (!activeWorktreePath || !activeWorktreeId) return
+
+    const { setWorktreeLoading, clearWorktreeLoading } = useChatStore.getState()
+    setWorktreeLoading(activeWorktreeId, 'commit')
+    const revertToast = dismissibleToast.loading('Reverting last commit...')
+    try {
+      const result = await invoke<RevertCommitResponse>(
+        'revert_last_local_commit',
+        { worktreePath: activeWorktreePath }
+      )
+      triggerImmediateGitPoll()
+      if (worktree?.project_id) fetchWorktreesStatus(worktree.project_id)
+      revertToast.success(`Reverted: ${result.commit_message}`)
+    } catch (error) {
+      revertToast.error(`Failed to revert: ${error}`)
+    } finally {
+      clearWorktreeLoading(activeWorktreeId)
+    }
+  }, [activeWorktreeId, activeWorktreePath, worktree?.project_id])
 
   // Handle Open PR - creates PR with AI-generated title and description in background
   const handleOpenPr = useCallback(async () => {
@@ -504,7 +669,7 @@ export function useGitOperations({
         {
           id: toastId,
           action: {
-            label: 'Open',
+            label: toastActionLabel('Open'),
             onClick: () => openExternal(result.pr_url),
           },
         }
@@ -579,7 +744,7 @@ export function useGitOperations({
               id: toastId,
               action: result.pr_url
                 ? {
-                    label: 'Open',
+                    label: toastActionLabel('Open'),
                     onClick: () => openExternal(result.pr_url),
                   }
                 : undefined,
@@ -731,7 +896,7 @@ export function useGitOperations({
           {
             id: toastId,
             action: {
-              label: 'Open',
+              label: toastActionLabel('Open'),
               onClick: () => {
                 if (!activeWorktreePath) return
                 const { setActiveSession, clearActiveWorktree } =
@@ -882,6 +1047,85 @@ export function useGitOperations({
           { worktreeId: activeWorktreeId }
         )
 
+        if (!result.has_conflicts && (worktree.pr_number || worktree.pr_url)) {
+          const prResult = await invoke<MergeConflictsResponse>(
+            'fetch_and_merge_base',
+            { worktreeId: activeWorktreeId }
+          )
+
+          if (!prResult.has_conflicts) {
+            toast.success('No conflicts — base branch merged cleanly', {
+              id: toastId,
+            })
+            triggerImmediateGitPoll()
+            triggerImmediateRemotePoll()
+            return
+          }
+
+          toast.warning(
+            `Found conflicts in ${prResult.conflicts.length} file(s)`,
+            {
+              id: toastId,
+              description: 'Opening conflict resolution session...',
+            }
+          )
+
+          const { setActiveSession, copySessionSettings, activeSessionIds } =
+            useChatStore.getState()
+          const currentSessionId = activeSessionIds[activeWorktreeId]
+
+          const newSession = await invoke<Session>('create_session', {
+            worktreeId: activeWorktreeId,
+            worktreePath: worktree.path,
+            name: 'PR: resolve conflicts',
+          })
+
+          if (currentSessionId)
+            copySessionSettings(currentSessionId, newSession.id)
+          const conflictSelection = resolveConflictSessionSelection(override)
+          applyResolveConflictSessionSelection(
+            newSession.id,
+            activeWorktreeId,
+            worktree.path,
+            override
+          )
+
+          setActiveSession(activeWorktreeId, newSession.id)
+
+          const conflictFiles = prResult.conflicts.join('\n- ')
+          const diffSection = prResult.conflict_diff
+            ? `\n\nHere is the diff showing the conflict details:\n\n\`\`\`diff\n${prResult.conflict_diff}\n\`\`\``
+            : ''
+          const baseBranch = project?.default_branch || 'main'
+          const resolveInstructions =
+            preferences?.magic_prompts?.resolve_conflicts ??
+            DEFAULT_RESOLVE_CONFLICTS_PROMPT
+
+          const conflictPrompt = `I merged \`origin/${baseBranch}\` into this branch to resolve PR conflicts, but there are merge conflicts.
+
+Conflicts in these files:
+- ${conflictFiles}${diffSection}
+
+${resolveInstructions}`
+
+          sendConflictResolutionPrompt({
+            session: newSession,
+            worktreeId: activeWorktreeId,
+            worktreePath: worktree.path,
+            prompt: conflictPrompt,
+            ...conflictSelection,
+          })
+
+          queryClient.invalidateQueries({
+            queryKey: chatQueryKeys.sessions(activeWorktreeId),
+          })
+
+          setTimeout(() => {
+            inputRef.current?.focus()
+          }, 100)
+          return
+        }
+
         if (!result.has_conflicts) {
           toast.info('No merge conflicts detected', { id: toastId })
           return
@@ -892,12 +1136,8 @@ export function useGitOperations({
           description: 'Opening conflict resolution session...',
         })
 
-        const {
-          setActiveSession,
-          setInputDraft,
-          copySessionSettings,
-          activeSessionIds,
-        } = useChatStore.getState()
+        const { setActiveSession, copySessionSettings, activeSessionIds } =
+          useChatStore.getState()
         const currentSessionId = activeSessionIds[activeWorktreeId]
 
         // Create a NEW session tab for conflict resolution
@@ -910,6 +1150,7 @@ export function useGitOperations({
         // Inherit model/mode/thinking settings from current session
         if (currentSessionId)
           copySessionSettings(currentSessionId, newSession.id)
+        const conflictSelection = resolveConflictSessionSelection(override)
         applyResolveConflictSessionSelection(
           newSession.id,
           activeWorktreeId,
@@ -937,8 +1178,13 @@ Conflicts in these files:
 
 ${resolveInstructions}`
 
-        // Set the input draft for the new session
-        setInputDraft(newSession.id, conflictPrompt)
+        sendConflictResolutionPrompt({
+          session: newSession,
+          worktreeId: activeWorktreeId,
+          worktreePath: worktree.path,
+          prompt: conflictPrompt,
+          ...conflictSelection,
+        })
 
         // Invalidate queries to refresh session list in tab bar
         queryClient.invalidateQueries({
@@ -956,10 +1202,13 @@ ${resolveInstructions}`
     [
       activeWorktreeId,
       worktree,
+      project,
       preferences,
       queryClient,
       inputRef,
       applyResolveConflictSessionSelection,
+      resolveConflictSessionSelection,
+      sendConflictResolutionPrompt,
     ]
   )
 
@@ -1003,12 +1252,8 @@ ${resolveInstructions}`
           description: 'Opening conflict resolution session...',
         })
 
-        const {
-          setActiveSession,
-          setInputDraft,
-          copySessionSettings,
-          activeSessionIds,
-        } = useChatStore.getState()
+        const { setActiveSession, copySessionSettings, activeSessionIds } =
+          useChatStore.getState()
         const currentSessionId = activeSessionIds[activeWorktreeId]
 
         // Create a NEW session tab for conflict resolution
@@ -1021,6 +1266,7 @@ ${resolveInstructions}`
         // Inherit model/mode/thinking settings from current session
         if (currentSessionId)
           copySessionSettings(currentSessionId, newSession.id)
+        const conflictSelection = resolveConflictSessionSelection(override)
         applyResolveConflictSessionSelection(
           newSession.id,
           activeWorktreeId,
@@ -1049,8 +1295,13 @@ Conflicts in these files:
 
 ${resolveInstructions}`
 
-        // Set the input draft for the new session
-        setInputDraft(newSession.id, conflictPrompt)
+        sendConflictResolutionPrompt({
+          session: newSession,
+          worktreeId: activeWorktreeId,
+          worktreePath: worktree.path,
+          prompt: conflictPrompt,
+          ...conflictSelection,
+        })
 
         // Invalidate queries to refresh session list in tab bar
         queryClient.invalidateQueries({
@@ -1073,6 +1324,8 @@ ${resolveInstructions}`
       queryClient,
       inputRef,
       applyResolveConflictSessionSelection,
+      resolveConflictSessionSelection,
+      sendConflictResolutionPrompt,
     ]
   )
 
@@ -1159,12 +1412,8 @@ ${resolveInstructions}`
             }
           )
 
-          const {
-            setActiveSession,
-            setInputDraft,
-            copySessionSettings,
-            activeSessionIds,
-          } = useChatStore.getState()
+          const { setActiveSession, copySessionSettings, activeSessionIds } =
+            useChatStore.getState()
           const currentSessionId = activeSessionIds[activeWorktreeId]
 
           // Create a NEW session tab on the CURRENT worktree for conflict resolution
@@ -1177,6 +1426,12 @@ ${resolveInstructions}`
           // Inherit model/mode/thinking settings from current session
           if (currentSessionId)
             copySessionSettings(currentSessionId, newSession.id)
+          const conflictSelection = resolveConflictSessionSelection()
+          applyResolveConflictSessionSelection(
+            newSession.id,
+            activeWorktreeId,
+            worktreeData.path
+          )
 
           // Set the new session as active
           setActiveSession(activeWorktreeId, newSession.id)
@@ -1206,8 +1461,13 @@ Then resolve the conflicts in these files:
 
 ${resolveInstructions}`
 
-          // Set the input draft for the new session
-          setInputDraft(newSession.id, conflictPrompt)
+          sendConflictResolutionPrompt({
+            session: newSession,
+            worktreeId: activeWorktreeId,
+            worktreePath: worktreeData.path,
+            prompt: conflictPrompt,
+            ...conflictSelection,
+          })
 
           // Invalidate queries to refresh session list in tab bar
           queryClient.invalidateQueries({
@@ -1232,6 +1492,9 @@ ${resolveInstructions}`
       project,
       queryClient,
       inputRef,
+      applyResolveConflictSessionSelection,
+      resolveConflictSessionSelection,
+      sendConflictResolutionPrompt,
     ]
   )
 
@@ -1240,6 +1503,7 @@ ${resolveInstructions}`
     handleCommitAndPush,
     handlePull,
     handlePush,
+    handleRevertLastCommit,
     handleOpenPr,
     handleReview,
     handleCodeRabbitReview,
