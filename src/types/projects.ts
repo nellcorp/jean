@@ -6,6 +6,27 @@ import type { AdvisoryContext, SecurityAlertContext } from '@/types/github'
  */
 export type SessionType = 'worktree' | 'base'
 
+export type WorktreeSortMode = 'created' | 'last_activity' | 'manual'
+
+export type WorktreeOrigin = 'manual' | 'auto_fix'
+
+export interface ProjectAutoFixSettings {
+  enabled: boolean
+  interval_minutes: number
+  issue_limit: number
+  max_parallel_worktrees: number
+  included_labels?: string[]
+  excluded_labels?: string[]
+  planning_backend: string
+  planning_model?: string | null
+  auto_yolo_enabled?: boolean
+  yolo_backend: string
+  yolo_model?: string | null
+  active_hours_enabled?: boolean
+  active_hours_start?: number
+  active_hours_end?: number
+}
+
 /**
  * Status of a worktree (for tracking background operations)
  */
@@ -60,6 +81,8 @@ export interface Project {
   linear_team_id?: string | null
   /** IDs of linked projects for cross-project context sharing */
   linked_project_ids?: string[]
+  /** Per-project automated issue fixing settings */
+  auto_fix_settings?: ProjectAutoFixSettings | null
 }
 
 export interface DirEntry {
@@ -163,6 +186,8 @@ export interface Worktree {
   label?: LabelData
   /** Display order within project (lower = higher in list, base sessions ignore this) */
   order: number
+  /** Origin/category for this worktree */
+  origin?: WorktreeOrigin
   /** Unix timestamp when worktree was archived (undefined = not archived) */
   archived_at?: number
   /** Unix timestamp when worktree was last opened/viewed by the user */
@@ -184,6 +209,7 @@ export interface WorktreeCreatingEvent {
   issueNumber?: number
   securityAlertNumber?: number
   advisoryGhsaId?: string
+  origin?: WorktreeOrigin
   autoOpenInJean: boolean
 }
 
@@ -279,10 +305,32 @@ export interface WorktreePathExistsEvent {
       createdAt: string
     }[]
   }
+  /** PR context to use when creating a new worktree with the suggested name */
+  pr_context?: {
+    number: number
+    title: string
+    body?: string
+    headRefName: string
+    baseRefName: string
+    comments: {
+      author: { login: string }
+      body: string
+      createdAt: string
+    }[]
+    reviews: {
+      author: { login: string }
+      body: string
+      state: string
+      submittedAt: string
+    }[]
+    diff?: string
+  }
   /** Security alert context to use when creating a new worktree with the suggested name */
   security_context?: SecurityAlertContext
   /** Advisory context to use when creating a new worktree with the suggested name */
   advisory_context?: AdvisoryContext
+  /** Origin of the worktree request */
+  origin?: WorktreeOrigin | null
 }
 
 /** Event emitted when worktree creation fails because branch already exists */
@@ -330,6 +378,8 @@ export interface WorktreeBranchExistsEvent {
   security_context?: SecurityAlertContext
   /** Advisory context to use when creating a new worktree with the suggested name */
   advisory_context?: AdvisoryContext
+  /** Origin of the worktree request */
+  origin?: WorktreeOrigin | null
 }
 
 // =============================================================================
@@ -414,7 +464,26 @@ export interface GitPushResponse {
 /** A single finding from an AI code review */
 export interface ReviewFinding {
   /** Severity level of the finding */
-  severity: 'critical' | 'warning' | 'suggestion' | 'praise'
+  severity: 'critical' | 'warning' | 'suggestion'
+  /** Primary category for the issue */
+  category?:
+    | 'security'
+    | 'correctness'
+    | 'data_loss'
+    | 'race_condition'
+    | 'api_contract'
+    | 'serialization'
+    | 'migration'
+    | 'testing'
+    | 'performance'
+    | 'maintainability'
+    | 'repo_standard'
+  /** Model confidence in the finding */
+  confidence?: 'high' | 'medium'
+  /** Whether this finding should block approval */
+  blocking?: boolean
+  /** Whether the issue was introduced or materially worsened by the diff */
+  introduced_by_diff?: boolean
   /** File path where the finding applies */
   file: string
   /** Line number if applicable */
@@ -423,6 +492,8 @@ export interface ReviewFinding {
   title: string
   /** Detailed explanation of the finding */
   description: string
+  /** Concrete scenario where the issue manifests */
+  failure_scenario?: string
   /** Optional code suggestion or fix */
   suggestion?: string
 }

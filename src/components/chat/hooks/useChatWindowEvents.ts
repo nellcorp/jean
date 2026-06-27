@@ -6,7 +6,6 @@ import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import { useTerminalStore } from '@/store/terminal-store'
 import { cancelChatMessage } from '@/services/chat'
-import { isNativeApp } from '@/lib/environment'
 import { logger } from '@/lib/logger'
 import type { ContentBlock, QueuedMessage, Session } from '@/types/chat'
 
@@ -350,7 +349,7 @@ export function useChatWindowEvents({
     const handleLoad = () => handleLoadContext()
     const handleRun = () => {
       const first = runScripts[0]
-      if (!isNativeApp() || !activeWorktreeId || !first) return
+      if (!activeWorktreeId || !first) return
       useTerminalStore.getState().startRun(activeWorktreeId, first)
     }
     window.addEventListener('command:save-context', handleSave)
@@ -413,7 +412,7 @@ export function useChatWindowEvents({
     const handler = (
       e: CustomEvent<{
         direction: 'up' | 'down'
-        amount?: 'small' | 'page'
+        amount?: 'small' | 'medium' | 'page'
       }>
     ) => {
       const viewport = scrollViewportRef.current
@@ -428,7 +427,12 @@ export function useChatWindowEvents({
       if (e.detail.direction === 'up' && scrollTop < 2) return
       beginKeyboardScroll()
       const isSmall = e.detail.amount === 'small'
-      const magnitude = isSmall ? 100 : viewport.clientHeight * 0.75
+      const isMedium = e.detail.amount === 'medium'
+      const magnitude = isSmall
+        ? 100
+        : isMedium
+          ? viewport.clientHeight * 0.35
+          : viewport.clientHeight * 0.75
       const delta = e.detail.direction === 'up' ? -magnitude : magnitude
       const now = performance.now()
       // Held-key repeat: previous press very recent → jump instantly so
@@ -444,7 +448,7 @@ export function useChatWindowEvents({
         endKeyboardScroll()
         return
       }
-      const duration = isSmall ? 120 : 250
+      const duration = isSmall ? 120 : isMedium ? 180 : 250
       const start = viewport.scrollTop
       const startTime = now
       const step = (t: number) => {

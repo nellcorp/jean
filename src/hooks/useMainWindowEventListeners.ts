@@ -174,7 +174,6 @@ function executeKeybindingAction(
   // Canvas-only actions: blocked when the session chat modal is open
   const CANVAS_ONLY_ACTIONS = new Set<KeybindingAction>([
     'open_plan',
-    'open_recap',
     'restore_last_archived',
     'focus_canvas_search',
   ])
@@ -430,10 +429,6 @@ function executeKeybindingAction(
       logger.debug('Keybinding: open_plan')
       window.dispatchEvent(new CustomEvent('open-plan'))
       break
-    case 'open_recap':
-      logger.debug('Keybinding: open_recap')
-      window.dispatchEvent(new CustomEvent('open-recap'))
-      break
     case 'restore_last_archived':
       logger.debug('Keybinding: restore_last_archived')
       window.dispatchEvent(new CustomEvent('restore-last-archived'))
@@ -498,6 +493,20 @@ function executeKeybindingAction(
     case 'scroll_chat_down':
       window.dispatchEvent(
         new CustomEvent('scroll-chat', { detail: { direction: 'down' } })
+      )
+      break
+    case 'scroll_chat_up_medium':
+      window.dispatchEvent(
+        new CustomEvent('scroll-chat', {
+          detail: { direction: 'up', amount: 'medium' },
+        })
+      )
+      break
+    case 'scroll_chat_down_medium':
+      window.dispatchEvent(
+        new CustomEvent('scroll-chat', {
+          detail: { direction: 'down', amount: 'medium' },
+        })
       )
       break
     case 'scroll_chat_up_small':
@@ -728,6 +737,29 @@ export function useMainWindowEventListeners() {
         }
       }
 
+      // On the project canvas, Cmd/Ctrl+ArrowUp/Down reorders the selected
+      // worktree. The global chat-scroll shortcuts use the same keys and run in
+      // capture phase, so handle this before they stop propagation.
+      if (
+        (matchedAction === 'scroll_chat_up' ||
+          matchedAction === 'scroll_chat_down') &&
+        !useUIStore.getState().sessionChatModalOpen &&
+        document.querySelector(
+          '[data-pdnd-worktree-scope="canvas-worktree-list"]'
+        )
+      ) {
+        e.preventDefault()
+        e.stopPropagation()
+        window.dispatchEvent(
+          new CustomEvent('move-selected-worktree', {
+            detail: {
+              direction: matchedAction === 'scroll_chat_up' ? 'up' : 'down',
+            },
+          })
+        )
+        return
+      }
+
       // Look up matching action in keybindings
       if (matchedAction) {
         const action = matchedAction
@@ -743,7 +775,9 @@ export function useMainWindowEventListeners() {
         // so canvas/list arrow navigation still works elsewhere
         if (
           action === 'scroll_chat_up_small' ||
-          action === 'scroll_chat_down_small'
+          action === 'scroll_chat_down_small' ||
+          action === 'scroll_chat_up_medium' ||
+          action === 'scroll_chat_down_medium'
         ) {
           const chatVisible =
             !!useChatStore.getState().activeWorktreeId ||
@@ -942,32 +976,9 @@ export function useMainWindowEventListeners() {
             for (const key of pendingKeys) {
               switch (key) {
                 case 'sessions':
-                  // Skip individual session queries for sessions currently
-                  // being cancelled — the cancel handler holds an optimistic
-                  // assistant message in cache that disk hasn't reconciled yet
-                  // (especially in web access mode where save_cancelled_message
-                  // RTT can exceed this 250ms debounce). The cancel handler
-                  // explicitly refetches the single session once disk is in sync.
-                  {
-                    const cancelling =
-                      useChatStore.getState().cancellingSessionIds
-                    queryClient.invalidateQueries({
-                      queryKey: chatQueryKeys.all,
-                      predicate: query => {
-                        const k = query.queryKey
-                        if (
-                          Array.isArray(k) &&
-                          k[0] === 'chat' &&
-                          k[1] === 'session' &&
-                          typeof k[2] === 'string' &&
-                          cancelling[k[2]]
-                        ) {
-                          return false
-                        }
-                        return true
-                      },
-                    })
-                  }
+                  queryClient.invalidateQueries({
+                    queryKey: chatQueryKeys.all,
+                  })
                   break
                 case 'projects':
                   queryClient.invalidateQueries({
