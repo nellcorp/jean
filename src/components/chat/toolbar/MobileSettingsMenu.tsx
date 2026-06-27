@@ -348,42 +348,42 @@ export function MobileSettingsMenu({
       </DropdownMenuTrigger>
       <DropdownMenuContent align={isMobile ? 'end' : 'start'} className="w-72">
         {customCliProfiles.length > 0 && selectedBackend === 'claude' && (
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                <Sparkles className="mr-2 h-4 w-4 text-muted-foreground" />
-                <span>Provider</span>
-                <span className="ml-auto text-xs text-muted-foreground">
-                  {providerDisplayName}
-                </span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                <DropdownMenuRadioGroup
-                  value={selectedProvider ?? '__anthropic__'}
-                  onValueChange={handleProviderChange}
-                >
-                  <DropdownMenuRadioItem value="__anthropic__">
-                    Anthropic
-                  </DropdownMenuRadioItem>
-                  {customCliProfiles.length > 0 && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel className="text-xs text-muted-foreground">
-                        Custom Providers
-                      </DropdownMenuLabel>
-                      {customCliProfiles.map(profile => (
-                        <DropdownMenuRadioItem
-                          key={profile.name}
-                          value={profile.name}
-                        >
-                          {profile.name}
-                        </DropdownMenuRadioItem>
-                      ))}
-                    </>
-                  )}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          )}
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <Sparkles className="mr-2 h-4 w-4 text-muted-foreground" />
+              <span>Provider</span>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {providerDisplayName}
+              </span>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownMenuRadioGroup
+                value={selectedProvider ?? '__anthropic__'}
+                onValueChange={handleProviderChange}
+              >
+                <DropdownMenuRadioItem value="__anthropic__">
+                  Anthropic
+                </DropdownMenuRadioItem>
+                {customCliProfiles.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-xs text-muted-foreground">
+                      Custom Providers
+                    </DropdownMenuLabel>
+                    {customCliProfiles.map(profile => (
+                      <DropdownMenuRadioItem
+                        key={profile.name}
+                        value={profile.name}
+                      >
+                        {profile.name}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </>
+                )}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
 
         <DropdownMenuItem onSelect={openBackendModelPicker}>
           <Sparkles className="h-4 w-4" />

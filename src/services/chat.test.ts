@@ -154,7 +154,9 @@ describe('reconnectNativeCliSession', () => {
     // Terminal still restored...
     expect(useUIStore.getState().sessionTerminalIds['session-1']).toBeDefined()
     // ...but no floating drawer pops and no toast fires.
-    expect(useTerminalStore.getState().modalTerminalOpen['wt-1']).toBeUndefined()
+    expect(
+      useTerminalStore.getState().modalTerminalOpen['wt-1']
+    ).toBeUndefined()
     expect(toastMock.success).not.toHaveBeenCalled()
   })
 

@@ -214,7 +214,6 @@ export function useToolbarDerivedState({
     ]
   )
 
-
   const filteredModelOptions = useMemo(() => {
     if (isCodex) return codexModelOptions
     if (isOpencode) return resolvedOpencodeModelOptions

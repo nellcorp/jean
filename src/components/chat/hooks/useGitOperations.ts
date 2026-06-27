@@ -1047,10 +1047,7 @@ export function useGitOperations({
           { worktreeId: activeWorktreeId }
         )
 
-        if (
-          !result.has_conflicts &&
-          (worktree.pr_number || worktree.pr_url)
-        ) {
+        if (!result.has_conflicts && (worktree.pr_number || worktree.pr_url)) {
           const prResult = await invoke<MergeConflictsResponse>(
             'fetch_and_merge_base',
             { worktreeId: activeWorktreeId }

@@ -347,8 +347,6 @@ export function SessionChatModal({
     labelSessionId ? (state.sessionLabels[labelSessionId] ?? null) : null
   )
 
-
-
   // Rename session state
   const renameSession = useRenameSession()
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(

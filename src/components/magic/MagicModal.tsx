@@ -1340,8 +1340,7 @@ ${resolveInstructions}`
               (resolvedBackend === 'codex'
                 ? (preferences?.selected_codex_model ?? 'gpt-5.5')
                 : resolvedBackend === 'opencode'
-                  ? (preferences?.selected_opencode_model ??
-                    'opencode/gpt-5.5')
+                  ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.5')
                   : resolvedBackend === 'cursor'
                     ? (preferences?.selected_cursor_model ?? 'cursor/auto')
                     : (preferences?.selected_model ?? 'sonnet'))

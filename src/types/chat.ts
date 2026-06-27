@@ -822,7 +822,6 @@ export function buildCodexUserInputAnswerMap(
   )
 }
 
-
 export function getAskUserQuestions(input: unknown): Question[] | null {
   if (typeof input !== 'object' || input === null || !('questions' in input)) {
     return null

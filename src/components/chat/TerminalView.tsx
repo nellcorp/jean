@@ -365,7 +365,9 @@ export function TerminalView({
                 onDrop={e => handleTerminalDrop(e, terminal.id)}
                 onDragEnd={() => setDraggedTerminalId(null)}
                 onClick={() => handleSelectTerminal(terminal.id)}
-                {...middleClickClose(e => void handleCloseTerminal(e, terminal.id))}
+                {...middleClickClose(
+                  e => void handleCloseTerminal(e, terminal.id)
+                )}
                 className={cn(
                   'group flex shrink-0 items-center gap-1.5 border-r border-border px-3 py-1.5 text-xs transition-colors',
                   isActive

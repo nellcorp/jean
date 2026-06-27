@@ -460,8 +460,6 @@ describe('useMessageSending Codex auto-steer', () => {
     expect(sendMessage.mutate).not.toHaveBeenCalled()
   })
 
-
-
   it('steers codex attachments instead of queueing when auto-steer is enabled', async () => {
     vi.mocked(steerCodexTurn).mockResolvedValue(undefined)
     const { result } = renderUseMessageSending({
@@ -488,9 +486,7 @@ describe('useMessageSending Codex auto-steer', () => {
 
 [Image attached: /tmp/img.png - Use the Read tool to view this image]`,
       expect.objectContaining({
-        pendingImages: [
-          expect.objectContaining({ path: '/tmp/img.png' }),
-        ],
+        pendingImages: [expect.objectContaining({ path: '/tmp/img.png' })],
       })
     )
     expect(persistEnqueue).not.toHaveBeenCalled()

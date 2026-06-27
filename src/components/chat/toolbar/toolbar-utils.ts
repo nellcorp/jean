@@ -252,7 +252,6 @@ export function formatCommandCodeModelLabel(raw: string): string {
   return `Command Code · ${formatModelIdTailLabel(value)}`
 }
 
-
 export function formatGrokPromptModelLabel(raw: string): string {
   const value = raw.startsWith('grok/') ? raw.slice('grok/'.length) : raw
   const label = formatModelIdTailLabel(value)

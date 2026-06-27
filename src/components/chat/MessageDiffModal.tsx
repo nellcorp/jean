@@ -325,7 +325,10 @@ export function MessageDiffModal({
             </div>
           ) : currentChangeFile ? (
             <DiffBlock fileName={relativePath}>
-              <FileDiff fileDiff={currentChangeFile} options={fileDiffOptions} />
+              <FileDiff
+                fileDiff={currentChangeFile}
+                options={fileDiffOptions}
+              />
             </DiffBlock>
           ) : (
             <div className="flex items-center justify-center h-full text-muted-foreground text-sm">

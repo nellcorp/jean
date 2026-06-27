@@ -272,7 +272,6 @@ describe('buildTimeline with fragmented text deltas', () => {
     })
   })
 
-
   it('renders Claude AskUserQuestion when questions are encoded as JSON string', () => {
     const tools: ToolCall[] = [
       {

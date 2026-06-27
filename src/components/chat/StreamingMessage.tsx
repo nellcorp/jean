@@ -34,7 +34,6 @@ import { SteeredPromptGroup } from './SteeredPromptGroup'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
 import { logger } from '@/lib/logger'
 
-
 function WorkingVisualRow() {
   return (
     <div className="rounded-md border border-border/50 bg-muted/30 min-w-0">

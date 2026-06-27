@@ -1,4 +1,10 @@
-import type { ToolCall, ContentBlock, Todo, PlanToolInput, Question } from '@/types/chat'
+import type {
+  ToolCall,
+  ContentBlock,
+  Todo,
+  PlanToolInput,
+  Question,
+} from '@/types/chat'
 import {
   isTodoWrite,
   isCollabToolCall,

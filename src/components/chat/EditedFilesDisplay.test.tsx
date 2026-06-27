@@ -76,8 +76,6 @@ describe('EditedFilesDisplay', () => {
         ),
       })
     )
-    expect(diffModalMock.mock.lastCall?.[0].patch).toContain(
-      '+another line'
-    )
+    expect(diffModalMock.mock.lastCall?.[0].patch).toContain('+another line')
   })
 })

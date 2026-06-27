@@ -549,64 +549,64 @@ export function DesktopToolbarControls({
       )}
 
       {customCliProfiles.length > 0 && selectedBackend === 'claude' && (
-          <>
-            <div className="hidden @xl:block h-4 w-px bg-border/50" />
-            <DropdownMenu
-              open={providerDropdownOpen}
-              onOpenChange={setProviderDropdownOpen}
+        <>
+          <div className="hidden @xl:block h-4 w-px bg-border/50" />
+          <DropdownMenu
+            open={providerDropdownOpen}
+            onOpenChange={setProviderDropdownOpen}
+          >
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="hidden @xl:flex h-8 items-center gap-1.5 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    <span>{providerDisplayName}</span>
+                  </button>
+                </DropdownMenuTrigger>
+              </TooltipTrigger>
+              <TooltipContent>Provider (⌘⇧P)</TooltipContent>
+            </Tooltip>
+            <DropdownMenuContent
+              align="start"
+              className="min-w-40"
+              onEscapeKeyDown={e => e.stopPropagation()}
+              onCloseAutoFocus={focusChatInput}
             >
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      className="hidden @xl:flex h-8 items-center gap-1.5 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-                    >
-                      <span>{providerDisplayName}</span>
-                    </button>
-                  </DropdownMenuTrigger>
-                </TooltipTrigger>
-                <TooltipContent>Provider (⌘⇧P)</TooltipContent>
-              </Tooltip>
-              <DropdownMenuContent
-                align="start"
-                className="min-w-40"
-                onEscapeKeyDown={e => e.stopPropagation()}
-                onCloseAutoFocus={focusChatInput}
+              <DropdownMenuRadioGroup
+                value={selectedProvider ?? '__anthropic__'}
+                onValueChange={handleProviderChange}
               >
-                <DropdownMenuRadioGroup
-                  value={selectedProvider ?? '__anthropic__'}
-                  onValueChange={handleProviderChange}
-                >
-                  <DropdownMenuRadioItem value="__anthropic__">
-                    Anthropic
-                    <Kbd className="ml-auto text-[10px]">1</Kbd>
-                  </DropdownMenuRadioItem>
-                  {customCliProfiles.length > 0 && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuLabel className="text-xs text-muted-foreground flex items-center gap-1.5">
-                        Custom Providers
-                        <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium leading-none">
-                          cc
-                        </span>
-                      </DropdownMenuLabel>
-                      {customCliProfiles.map((profile, i) => (
-                        <DropdownMenuRadioItem
-                          key={profile.name}
-                          value={profile.name}
-                        >
-                          {profile.name}
-                          <Kbd className="ml-auto text-[10px]">{i + 2}</Kbd>
-                        </DropdownMenuRadioItem>
-                      ))}
-                    </>
-                  )}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </>
-        )}
+                <DropdownMenuRadioItem value="__anthropic__">
+                  Anthropic
+                  <Kbd className="ml-auto text-[10px]">1</Kbd>
+                </DropdownMenuRadioItem>
+                {customCliProfiles.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel className="text-xs text-muted-foreground flex items-center gap-1.5">
+                      Custom Providers
+                      <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium leading-none">
+                        cc
+                      </span>
+                    </DropdownMenuLabel>
+                    {customCliProfiles.map((profile, i) => (
+                      <DropdownMenuRadioItem
+                        key={profile.name}
+                        value={profile.name}
+                      >
+                        {profile.name}
+                        <Kbd className="ml-auto text-[10px]">{i + 2}</Kbd>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </>
+                )}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </>
+      )}
 
       <div className="hidden @xl:block h-4 w-px bg-border/50" />
 

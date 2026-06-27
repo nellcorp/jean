@@ -3524,8 +3524,6 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
         />
       ) : null}
 
-
-
       {/* Worktree Label Modal */}
       <LabelModal
         key={worktreeLabelTarget?.worktreeId ?? 'wt-label'}

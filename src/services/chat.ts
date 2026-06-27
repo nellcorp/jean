@@ -131,7 +131,11 @@ export async function reconnectNativeCliSession(
   worktreeId: string,
   options?: { openModal?: boolean; showToast?: boolean; markOpened?: boolean }
 ): Promise<void> {
-  const { openModal = true, showToast = true, markOpened = true } = options ?? {}
+  const {
+    openModal = true,
+    showToast = true,
+    markOpened = true,
+  } = options ?? {}
   const resume = getResumeArgs(session)
   const launch = resume ?? {
     command: session.terminal_command ?? '',

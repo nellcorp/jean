@@ -80,7 +80,6 @@ jobs:
       - name: Lint
         run: bun run lint
 
-
       - name: Rust clippy
         run: bun run rust:clippy
 

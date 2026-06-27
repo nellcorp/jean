@@ -3357,7 +3357,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 description="Override where 'Open Editor' sends you. Blank = same-origin /code (default)."
               >
                 <Input
-                  className="w-full sm:min-w-96"
+                  className="w-full sm:w-80"
                   placeholder="/code or https://host/code"
                   value={preferences?.web_editor_url ?? ''}
                   onChange={e => {
@@ -3383,7 +3383,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     patchPreferences.mutate({ default_execution_mode: value })
                   }}
                 >
-                  <SelectTrigger className="w-full sm:min-w-96">
+                  <SelectTrigger className="w-full sm:w-80">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
