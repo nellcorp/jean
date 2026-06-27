@@ -347,6 +347,20 @@ RUN set -eux; \
  && chmod +x /usr/local/bin/terraform \
  && ln -sf /usr/local/bin/terraform /usr/local/bin/tf
 
+# --- AWS CLI v2 (official zip installer) ---
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) aws_arch=x86_64 ;; \
+      arm64) aws_arch=aarch64 ;; \
+      *) echo "aws-cli: unsupported arch $arch, skipping" >&2; exit 0 ;; \
+    esac; \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" \
+      -o /tmp/awscliv2.zip; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install; \
+    rm -rf /tmp/awscliv2.zip /tmp/aws
+
 # --- Atlas (ariga.io) — DB schema migration CLI ---
 ARG ATLAS_VERSION=v0.38.0
 RUN set -eux; \
