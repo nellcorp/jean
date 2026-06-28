@@ -4,6 +4,7 @@ import { logger } from '@/lib/logger'
 import type {
   LinearIssue,
   LinearIssueListResult,
+  LinearProject,
   LinearTeam,
   LoadedLinearIssueContext,
 } from '@/types/linear'
@@ -52,6 +53,8 @@ export const linearQueryKeys = {
     [...linearQueryKeys.all, 'loaded-contexts', sessionId] as const,
   teams: (projectId: string) =>
     [...linearQueryKeys.all, 'teams', projectId] as const,
+  projects: (projectId: string) =>
+    [...linearQueryKeys.all, 'projects', projectId] as const,
 }
 
 /**
@@ -91,6 +94,41 @@ export function useLinearTeams(
         return result
       } catch (error) {
         logger.error('Failed to load Linear teams', { error, projectId })
+        throw error
+      }
+    },
+    enabled: (options?.enabled ?? true) && !!projectId && hasLinearAccess,
+    staleTime: 1000 * 60 * 5,
+    gcTime: 1000 * 60 * 30,
+    retry: 1,
+  })
+}
+
+/**
+ * Hook to list Linear projects for a project (scoped to the configured team)
+ */
+export function useLinearProjects(
+  projectId: string | null,
+  options?: { enabled?: boolean }
+) {
+  const hasLinearAccess = useHasLinearAccess(projectId)
+
+  return useQuery({
+    queryKey: linearQueryKeys.projects(projectId ?? ''),
+    queryFn: async (): Promise<LinearProject[]> => {
+      if (!isTauri() || !projectId || !hasLinearAccess) {
+        return []
+      }
+
+      try {
+        logger.debug('Fetching Linear projects', { projectId })
+        const result = await invoke<LinearProject[]>('list_linear_projects', {
+          projectId,
+        })
+        logger.info('Linear projects loaded', { count: result.length })
+        return result
+      } catch (error) {
+        logger.error('Failed to load Linear projects', { error, projectId })
         throw error
       }
     },

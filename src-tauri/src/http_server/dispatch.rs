@@ -239,6 +239,8 @@ pub async fn dispatch_command(
                 field_opt(&args, "linearApiKey", "linear_api_key")?;
             let linear_team_id: Option<String> =
                 field_opt(&args, "linearTeamId", "linear_team_id")?;
+            let linear_project_id: Option<String> =
+                field_opt(&args, "linearProjectId", "linear_project_id")?;
             let linked_project_ids: Option<Vec<String>> =
                 field_opt(&args, "linkedProjectIds", "linked_project_ids")?;
             let auto_fix_settings: Option<Option<crate::projects::types::ProjectAutoFixSettings>> =
@@ -256,6 +258,7 @@ pub async fn dispatch_command(
                 worktrees_dir,
                 linear_api_key,
                 linear_team_id,
+                linear_project_id,
                 linked_project_ids,
                 auto_fix_settings,
             )
@@ -2915,6 +2918,11 @@ pub async fn dispatch_command(
         "list_linear_teams" => {
             let project_id: String = field(&args, "projectId", "project_id")?;
             let result = crate::projects::list_linear_teams(app.clone(), project_id).await?;
+            to_value(result)
+        }
+        "list_linear_projects" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let result = crate::projects::list_linear_projects(app.clone(), project_id).await?;
             to_value(result)
         }
         "list_linear_issues" => {

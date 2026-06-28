@@ -4354,6 +4354,7 @@ pub fn run() {
             projects::remove_issue_context,
             // Linear issues commands
             projects::list_linear_teams,
+            projects::list_linear_projects,
             projects::list_linear_issues,
             projects::search_linear_issues,
             projects::get_linear_issue,
