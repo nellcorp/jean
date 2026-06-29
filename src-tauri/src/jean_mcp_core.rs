@@ -71,8 +71,25 @@ pub fn initialize_result() -> Value {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "jean", "version": env!("CARGO_PKG_VERSION") },
+        "instructions": SERVER_INSTRUCTIONS,
     })
 }
+
+/// Server-level usage guidance surfaced to the model by MCP clients. Covers
+/// cross-tool workflows that individual tool descriptions can't express.
+const SERVER_INSTRUCTIONS: &str = r#"Jean MCP exposes a Jean project's worktrees, sessions, GitHub/Linear data, and Linear project-management.
+
+General:
+- Every tool takes the Jean `projectId` (from list_projects / get_current_context). This is the JEAN project, not a Linear project.
+- Call get_current_context first when the user says "this project" so you act on the right one.
+
+Linear project management:
+- Linear config (API key, team, project) is resolved from the Jean project's settings; you do not pass an API key. `teamId`/`linearProjectId` default to the project's configured Linear team/project, so usually omit them. Pass them only to act on a different team/project.
+- Distinguish the two project ids: `projectId` is always the Jean project; `linearProjectId` is the Linear project (read it via list_linear_projects or get_linear_project).
+- Resolve ids BEFORE create/update writes: get state ids from list_linear_workflow_states (issue `stateId`), user ids from list_linear_users (`assigneeId`, `leadId`), label ids from list_linear_labels (`labelIds`), milestone ids from list_linear_milestones (`projectMilestoneId`).
+- Create/update tools take an `input` object mapping directly to Linear's fields. Dates are "YYYY-MM-DD". Issue `priority` is 0=none,1=urgent,2=high,3=medium,4=low. Project-update `health` is onTrack|atRisk|offTrack. Documents use markdown `content`.
+- To remove an issue use archive_linear_issue (Linear cannot trash issues directly); to remove a document use delete_linear_document.
+- Prefer reading (get_linear_project, list_linear_milestones, etc.) to confirm current state before mutating, and echo back the returned id/identifier/url after a write."#;
 
 pub fn tools_list_result() -> Value {
     json!({ "tools": tool_registry() })
