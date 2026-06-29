@@ -1,3 +1,6 @@
+// The Jean MCP `tool_registry()` builds a large array via the `json!` macro,
+// which expands recursively; the default limit of 128 is not enough.
+#![recursion_limit = "512"]
 #![allow(
     dead_code,
     clippy::cmp_owned,
@@ -4363,6 +4366,29 @@ pub fn run() {
             projects::list_loaded_linear_issue_contexts,
             projects::get_linear_issue_context_contents,
             projects::remove_linear_issue_context,
+            // Linear project-management commands
+            projects::get_linear_project,
+            projects::list_linear_milestones,
+            projects::list_linear_documents,
+            projects::get_linear_document,
+            projects::list_linear_project_updates,
+            projects::list_linear_workflow_states,
+            projects::list_linear_users,
+            projects::list_linear_labels,
+            projects::list_linear_cycles,
+            projects::create_linear_issue,
+            projects::update_linear_issue,
+            projects::archive_linear_issue,
+            projects::create_linear_comment,
+            projects::create_linear_project,
+            projects::update_linear_project,
+            projects::create_linear_milestone,
+            projects::update_linear_milestone,
+            projects::delete_linear_milestone,
+            projects::create_linear_document,
+            projects::update_linear_document,
+            projects::delete_linear_document,
+            projects::create_linear_project_update,
             // GitHub PR commands
             projects::list_github_prs,
             projects::search_github_prs,

@@ -125,7 +125,7 @@ pub struct LinearProject {
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 
-async fn linear_graphql(
+pub(crate) async fn linear_graphql(
     api_key: &str,
     query: &str,
     variables: Option<serde_json::Value>,
@@ -271,15 +271,15 @@ pub fn format_linear_issue_context_markdown(detail: &LinearIssueDetail) -> Strin
 }
 
 /// Linear config resolved from project + global preferences.
-struct LinearConfig {
-    api_key: String,
-    project_name: String,
-    team_id: Option<String>,
-    project_filter_id: Option<String>,
+pub(crate) struct LinearConfig {
+    pub(crate) api_key: String,
+    pub(crate) project_name: String,
+    pub(crate) team_id: Option<String>,
+    pub(crate) project_filter_id: Option<String>,
 }
 
 /// Get the Linear config for a project, falling back to global preferences for the API key.
-fn get_linear_config(app: &AppHandle, project_id: &str) -> Result<LinearConfig, String> {
+pub(crate) fn get_linear_config(app: &AppHandle, project_id: &str) -> Result<LinearConfig, String> {
     let data = load_projects_data(app)?;
     let project = data
         .find_project(project_id)

@@ -148,7 +148,29 @@ pub fn tool_registry() -> Value {
         {"name":"read_session_messages","description":"Read recent messages from a session (most recent first). Use limit to cap returned messages.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}},"required":["sessionId"],"additionalProperties":false}},
         {"name":"get_worktree_changes","description":"Get a bounded summary of a worktree's git changes: porcelain status, ahead/behind counts, diff stats, and changed files. Does not return full diffs.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"maxFiles":{"type":"integer","minimum":1,"maximum":500,"default":100}},"required":["worktreeId"],"additionalProperties":false}},
         {"name":"get_worktree_diff","description":"Get a bounded unified git diff for a worktree. diffType is uncommitted (HEAD vs working tree) or branch (origin/base...HEAD). Optional path limits to one pathspec; maxBytes is capped.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"diffType":{"type":"string","enum":["uncommitted","branch"],"default":"uncommitted"},"path":{"type":"string"},"maxBytes":{"type":"integer","minimum":1,"maximum":200000,"default":60000}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"get_current_context","description":"Return the calling session's context: sessionId, worktreeId, projectId, projectPath, projectName. Use this so the agent knows what 'this project' refers to without guessing.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
+        {"name":"get_current_context","description":"Return the calling session's context: sessionId, worktreeId, projectId, projectPath, projectName. Use this so the agent knows what 'this project' refers to without guessing.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+        {"name":"get_linear_project","description":"Get a single Linear project (status, progress, lead, members, teams, milestones). Defaults to the project's configured Linear project; pass linearProjectId to override.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_linear_milestones","description":"List milestones of a Linear project. Defaults to the configured Linear project; pass linearProjectId to override.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_linear_documents","description":"List Linear documents, scoped to the configured Linear project by default; pass linearProjectId to override.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"get_linear_document","description":"Get a Linear document with its markdown content.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"}},"required":["projectId","documentId"],"additionalProperties":false}},
+        {"name":"list_linear_project_updates","description":"List a Linear project's status updates (project-update posts).","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_linear_workflow_states","description":"List a Linear team's workflow states (issue statuses). Defaults to the configured team; pass teamId to override. Use the returned state ids for create/update issue stateId.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"teamId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_linear_users","description":"List Linear workspace users. Use the returned ids for issue assigneeId / project leadId.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_linear_labels","description":"List Linear issue labels. Use the returned ids for issue labelIds.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_linear_cycles","description":"List a Linear team's cycles. Defaults to the configured team; pass teamId to override.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"teamId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"create_linear_issue","description":"Create a Linear issue. input fields: title (required), description, stateId, assigneeId, priority (0=none,1=urgent,2=high,3=medium,4=low), labelIds, projectId, projectMilestoneId, estimate, parentId, dueDate (YYYY-MM-DD), cycleId, teamId. teamId and projectId default to the Jean project's configured Linear team/project.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","input"],"additionalProperties":false}},
+        {"name":"update_linear_issue","description":"Update a Linear issue by id. input accepts any of: title, description, stateId, assigneeId, priority (0-4), labelIds, addedLabelIds, removedLabelIds, projectId, projectMilestoneId, estimate, parentId, dueDate (YYYY-MM-DD), cycleId.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"issueId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","issueId","input"],"additionalProperties":false}},
+        {"name":"archive_linear_issue","description":"Archive a Linear issue (the idiomatic soft-delete; issues cannot be trashed directly).","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"issueId":{"type":"string"}},"required":["projectId","issueId"],"additionalProperties":false}},
+        {"name":"create_linear_comment","description":"Add a comment to a Linear issue.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"issueId":{"type":"string"},"body":{"type":"string"}},"required":["projectId","issueId","body"],"additionalProperties":false}},
+        {"name":"create_linear_project","description":"Create a Linear project. input fields: name (required), teamIds (defaults to configured team), description, content, leadId, memberIds, targetDate (YYYY-MM-DD), startDate, statusId, priority.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","input"],"additionalProperties":false}},
+        {"name":"update_linear_project","description":"Update a Linear project. Defaults to the configured Linear project; pass linearProjectId to override. input fields: name, description, content, leadId, memberIds, targetDate, startDate, statusId, priority, teamIds.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","input"],"additionalProperties":false}},
+        {"name":"create_linear_milestone","description":"Create a milestone in a Linear project (defaults to configured project). input fields: name (required), targetDate (YYYY-MM-DD), description, sortOrder.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","input"],"additionalProperties":false}},
+        {"name":"update_linear_milestone","description":"Update a Linear milestone by id. input fields: name, description, targetDate, sortOrder, projectId (to move).","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"milestoneId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","milestoneId","input"],"additionalProperties":false}},
+        {"name":"delete_linear_milestone","description":"Delete a Linear milestone by id.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"milestoneId":{"type":"string"}},"required":["projectId","milestoneId"],"additionalProperties":false}},
+        {"name":"create_linear_document","description":"Create a Linear document. input fields: title (required), content (markdown), projectId (defaults to configured Linear project), icon, color.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","input"],"additionalProperties":false}},
+        {"name":"update_linear_document","description":"Update a Linear document by id. input fields: title, content, projectId, icon, color.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","documentId","input"],"additionalProperties":false}},
+        {"name":"delete_linear_document","description":"Delete a Linear document by id.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"}},"required":["projectId","documentId"],"additionalProperties":false}},
+        {"name":"create_linear_project_update","description":"Post a Linear project status update. body is markdown; health is onTrack|atRisk|offTrack. Defaults to the configured Linear project.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"},"body":{"type":"string"},"health":{"type":"string","enum":["onTrack","atRisk","offTrack"]}},"required":["projectId"],"additionalProperties":false}}
     ])
 }
 
@@ -286,6 +308,35 @@ async fn run_tool(
             )
             .await
             .map_err(ToolError::internal)
+        }
+        // Linear project-management tools: the MCP tool name matches the backend
+        // command name and arguments are already camelCase, so forward verbatim.
+        "get_linear_project"
+        | "list_linear_milestones"
+        | "list_linear_documents"
+        | "get_linear_document"
+        | "list_linear_project_updates"
+        | "list_linear_workflow_states"
+        | "list_linear_users"
+        | "list_linear_labels"
+        | "list_linear_cycles"
+        | "create_linear_issue"
+        | "update_linear_issue"
+        | "archive_linear_issue"
+        | "create_linear_comment"
+        | "create_linear_project"
+        | "update_linear_project"
+        | "create_linear_milestone"
+        | "update_linear_milestone"
+        | "delete_linear_milestone"
+        | "create_linear_document"
+        | "update_linear_document"
+        | "delete_linear_document"
+        | "create_linear_project_update" => {
+            require_str(&args, "projectId")?;
+            dispatch_command(app, name, args)
+                .await
+                .map_err(ToolError::internal)
         }
         "create_worktree" => {
             let project_id = require_str(&args, "projectId")?;
