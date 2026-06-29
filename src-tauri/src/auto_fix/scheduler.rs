@@ -597,6 +597,7 @@ fn project_from_pending_auto_yolo(entry: &PendingAutoYolo) -> Project {
         worktrees_dir: None,
         linear_api_key: None,
         linear_team_id: None,
+        linear_project_id: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
     }

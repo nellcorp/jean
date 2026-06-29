@@ -67,3 +67,11 @@ export interface LinearTeam {
   name: string
   key: string
 }
+
+/**
+ * Linear project info
+ */
+export interface LinearProject {
+  id: string
+  name: string
+}

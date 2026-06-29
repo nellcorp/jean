@@ -2585,6 +2585,7 @@ export function useUpdateProjectSettings() {
       worktreesDir,
       linearApiKey,
       linearTeamId,
+      linearProjectId,
       autoFixSettings,
     }: {
       projectId: string
@@ -2598,6 +2599,7 @@ export function useUpdateProjectSettings() {
       worktreesDir?: string
       linearApiKey?: string
       linearTeamId?: string
+      linearProjectId?: string
       autoFixSettings?: Project['auto_fix_settings']
       linkedProjectIds?: string[]
     }): Promise<Project> => {
@@ -2622,6 +2624,7 @@ export function useUpdateProjectSettings() {
         worktreesDir,
         linearApiKey,
         linearTeamId,
+        linearProjectId,
         autoFixSettings,
         linkedProjectIds,
       })

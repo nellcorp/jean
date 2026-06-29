@@ -39,7 +39,11 @@ import {
   useRemoveProjectAvatar,
 } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
-import { useLinearTeams, linearQueryKeys } from '@/services/linear'
+import {
+  useLinearTeams,
+  useLinearProjects,
+  linearQueryKeys,
+} from '@/services/linear'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   Select,
@@ -122,10 +126,18 @@ export function GeneralPane({
     projectId,
     { enabled: hasLinearAccess }
   )
+  const { data: linearProjects = [], isLoading: projectsLoading } =
+    useLinearProjects(projectId, { enabled: hasLinearAccess })
 
   const handleRefreshTeams = useCallback(() => {
     queryClient.invalidateQueries({
       queryKey: linearQueryKeys.teams(projectId),
+    })
+  }, [projectId, queryClient])
+
+  const handleRefreshProjects = useCallback(() => {
+    queryClient.invalidateQueries({
+      queryKey: linearQueryKeys.projects(projectId),
     })
   }, [projectId, queryClient])
 
@@ -245,8 +257,35 @@ export function GeneralPane({
 
   const handleTeamChange = useCallback(
     (value: string) => {
+      // Switching team clears the project filter, since projects are team-scoped.
       updateSettings.mutate(
-        { projectId, linearTeamId: value === 'all' ? '' : value },
+        {
+          projectId,
+          linearTeamId: value === 'all' ? '' : value,
+          linearProjectId: '',
+        },
+        {
+          onSuccess: () => {
+            queryClient.invalidateQueries({
+              queryKey: linearQueryKeys.issues(projectId),
+            })
+            queryClient.invalidateQueries({
+              queryKey: ['linear', 'issue-search', projectId],
+            })
+            queryClient.invalidateQueries({
+              queryKey: linearQueryKeys.projects(projectId),
+            })
+          },
+        }
+      )
+    },
+    [projectId, updateSettings, queryClient]
+  )
+
+  const handleProjectChange = useCallback(
+    (value: string) => {
+      updateSettings.mutate(
+        { projectId, linearProjectId: value === 'all' ? '' : value },
         {
           onSuccess: () => {
             queryClient.invalidateQueries({
@@ -617,6 +656,46 @@ export function GeneralPane({
               >
                 <RefreshCw
                   className={cn('h-4 w-4', teamsLoading && 'animate-spin')}
+                />
+              </Button>
+            </div>
+          </InlineField>
+        )}
+        {hasLinearAccess && (
+          <InlineField
+            label="Project Filter"
+            description="Restrict Linear issues to a specific project. Leave as 'All projects' to see everything in the team."
+          >
+            <div className="flex items-center gap-2">
+              <Select
+                value={project?.linear_project_id ?? 'all'}
+                onValueChange={handleProjectChange}
+                disabled={projectsLoading}
+              >
+                <SelectTrigger className="flex-1">
+                  <SelectValue
+                    placeholder={
+                      projectsLoading ? 'Loading projects...' : 'All projects'
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All projects</SelectItem>
+                  {linearProjects.map(linearProject => (
+                    <SelectItem key={linearProject.id} value={linearProject.id}>
+                      {linearProject.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRefreshProjects}
+                disabled={projectsLoading}
+              >
+                <RefreshCw
+                  className={cn('h-4 w-4', projectsLoading && 'animate-spin')}
                 />
               </Button>
             </div>
