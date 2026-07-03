@@ -419,6 +419,7 @@ const ISSUE_FIELDS: &str = r#"
 fn build_team_project_filter(
     team_id: Option<&str>,
     project_id: Option<&str>,
+    milestone_id: Option<&str>,
 ) -> (String, Vec<&'static str>) {
     let mut filter = String::new();
     let mut vars: Vec<&'static str> = Vec::new();
@@ -429,6 +430,10 @@ fn build_team_project_filter(
     if project_id.is_some() {
         filter.push_str(r#", project: { id: { eq: $projectId } }"#);
         vars.push("$projectId: ID!");
+    }
+    if milestone_id.is_some() {
+        filter.push_str(r#", projectMilestone: { id: { eq: $milestoneId } }"#);
+        vars.push("$milestoneId: ID!");
     }
     (filter, vars)
 }
@@ -442,10 +447,15 @@ fn join_vars(extra: &[&str], vars: &[&str]) -> String {
     }
 }
 
-/// Build list issues query, optionally filtering by team and/or project.
-fn build_list_issues_query(team_id: Option<&str>, project_id: Option<&str>) -> String {
-    let (filter, var_decls) = build_team_project_filter(team_id, project_id);
-    let vars = join_vars(&[], &var_decls);
+/// Build list issues query with cursor pagination, optionally filtering by team,
+/// project, and/or milestone. `$first`/`$after` drive pagination.
+fn build_list_issues_query(
+    team_id: Option<&str>,
+    project_id: Option<&str>,
+    milestone_id: Option<&str>,
+) -> String {
+    let (filter, var_decls) = build_team_project_filter(team_id, project_id, milestone_id);
+    let vars = join_vars(&["$first: Int!", "$after: String"], &var_decls);
     format!(
         r#"query ListIssues{vars} {{
     issues(
@@ -453,10 +463,12 @@ fn build_list_issues_query(team_id: Option<&str>, project_id: Option<&str>) -> S
             state: {{ type: {{ in: ["started", "unstarted", "backlog", "triage"] }} }}{filter}
         }}
         orderBy: updatedAt
-        first: 100
+        first: $first
+        after: $after
     ) {{
         nodes {{{ISSUE_FIELDS}
         }}
+        pageInfo {{ hasNextPage endCursor }}
     }}
 }}"#
     )
@@ -464,7 +476,7 @@ fn build_list_issues_query(team_id: Option<&str>, project_id: Option<&str>) -> S
 
 /// Build search issues query, optionally filtering by team and/or project.
 fn build_search_issues_query(team_id: Option<&str>, project_id: Option<&str>) -> String {
-    let (filter, var_decls) = build_team_project_filter(team_id, project_id);
+    let (filter, var_decls) = build_team_project_filter(team_id, project_id, None);
     let vars = join_vars(&["$query: String!"], &var_decls);
     format!(
         r#"query SearchIssues{vars} {{
@@ -492,7 +504,7 @@ query ListTeams {
 
 /// Build get-issue-by-number query, optionally filtering by team and/or project.
 fn build_issue_by_number_query(team_id: Option<&str>, project_id: Option<&str>) -> String {
-    let (filter, var_decls) = build_team_project_filter(team_id, project_id);
+    let (filter, var_decls) = build_team_project_filter(team_id, project_id, None);
     let vars = join_vars(&["$number: Float!"], &var_decls);
     format!(
         r#"query GetIssueByNumber{vars} {{
@@ -641,29 +653,95 @@ pub async fn list_linear_projects(
     Ok(projects)
 }
 
-/// List Linear issues for a project (active states only)
+/// List Linear issues for a project (active states only).
+///
+/// - `milestone_id`: restrict to issues in a given project milestone.
+/// - `all`: when true, paginate through every matching issue (ignores `limit`).
+/// - `limit`: max issues to return when not fetching all (default 100). Pages of
+///   250 (Linear's per-request cap) are fetched until the limit is reached.
 #[tauri::command]
 pub async fn list_linear_issues(
     app: AppHandle,
     project_id: String,
+    milestone_id: Option<String>,
+    all: Option<bool>,
+    limit: Option<u32>,
 ) -> Result<LinearIssueListResult, String> {
     log::trace!("Listing Linear issues for project {project_id}");
 
     let config = get_linear_config(&app, &project_id)?;
-    let query =
-        build_list_issues_query(config.team_id.as_deref(), config.project_filter_id.as_deref());
-    let variables = build_filter_variables(&config, None);
+    let milestone = milestone_id.filter(|m| !m.is_empty());
+    let query = build_list_issues_query(
+        config.team_id.as_deref(),
+        config.project_filter_id.as_deref(),
+        milestone.as_deref(),
+    );
 
-    let response = linear_graphql(&config.api_key, &query, variables).await?;
+    let fetch_all = all.unwrap_or(false);
+    let target = limit.unwrap_or(100);
+    // Linear caps `first` at 250 per request; larger requests are paginated.
+    const MAX_PAGE: u32 = 250;
 
-    let nodes = response
-        .get("data")
-        .and_then(|d| d.get("issues"))
-        .and_then(|i| i.get("nodes"))
-        .and_then(|n| n.as_array())
-        .ok_or("Unexpected Linear API response format")?;
+    let mut issues: Vec<LinearIssue> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page_size = if fetch_all {
+            MAX_PAGE
+        } else {
+            (target.saturating_sub(issues.len() as u32)).min(MAX_PAGE)
+        };
+        if page_size == 0 {
+            break;
+        }
 
-    let issues: Vec<LinearIssue> = nodes.iter().filter_map(parse_issue_node).collect();
+        let mut vars = serde_json::Map::new();
+        vars.insert("first".into(), serde_json::json!(page_size));
+        vars.insert(
+            "after".into(),
+            after
+                .as_ref()
+                .map_or(serde_json::Value::Null, |c| serde_json::json!(c)),
+        );
+        if let Some(team) = &config.team_id {
+            vars.insert("teamId".into(), serde_json::json!(team));
+        }
+        if let Some(proj) = &config.project_filter_id {
+            vars.insert("projectId".into(), serde_json::json!(proj));
+        }
+        if let Some(m) = &milestone {
+            vars.insert("milestoneId".into(), serde_json::json!(m));
+        }
+
+        let response =
+            linear_graphql(&config.api_key, &query, Some(serde_json::Value::Object(vars))).await?;
+        let issues_obj = response
+            .get("data")
+            .and_then(|d| d.get("issues"))
+            .ok_or("Unexpected Linear API response format")?;
+        let nodes = issues_obj
+            .get("nodes")
+            .and_then(|n| n.as_array())
+            .ok_or("Unexpected Linear API response format")?;
+        issues.extend(nodes.iter().filter_map(parse_issue_node));
+
+        let page_info = issues_obj.get("pageInfo");
+        let has_next = page_info
+            .and_then(|p| p.get("hasNextPage"))
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+        let end_cursor = page_info
+            .and_then(|p| p.get("endCursor"))
+            .and_then(|c| c.as_str())
+            .map(String::from);
+
+        if !has_next || end_cursor.is_none() {
+            break;
+        }
+        if !fetch_all && issues.len() as u32 >= target {
+            break;
+        }
+        after = end_cursor;
+    }
 
     log::trace!("Found {} Linear issues", issues.len());
     Ok(LinearIssueListResult { issues })

@@ -3134,7 +3134,17 @@ pub async fn dispatch_command(
         }
         "list_linear_issues" => {
             let project_id: String = field(&args, "projectId", "project_id")?;
-            let result = crate::projects::list_linear_issues(app.clone(), project_id).await?;
+            let milestone_id: Option<String> = field_opt(&args, "milestoneId", "milestone_id")?;
+            let all: Option<bool> = from_field_opt(&args, "all")?;
+            let limit: Option<u32> = from_field_opt(&args, "limit")?;
+            let result = crate::projects::list_linear_issues(
+                app.clone(),
+                project_id,
+                milestone_id,
+                all,
+                limit,
+            )
+            .await?;
             to_value(result)
         }
         "search_linear_issues" => {
