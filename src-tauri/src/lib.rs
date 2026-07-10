@@ -4402,6 +4402,7 @@ pub fn run() {
             projects::search_outline_documents,
             projects::create_outline_document,
             projects::update_outline_document,
+            projects::replace_outline_document_text,
             projects::archive_outline_document,
             projects::delete_outline_document,
             projects::move_outline_document,

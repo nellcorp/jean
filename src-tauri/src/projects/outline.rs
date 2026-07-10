@@ -262,6 +262,48 @@ pub async fn update_outline_document(
     outline_api(&config, "documents.update", input).await
 }
 
+/// Targeted find-and-replace within a document's body, so callers can make small
+/// edits without resending the whole document. Fetches the current markdown,
+/// replaces `find` with `replace` (first occurrence, or all when `all=true`),
+/// and writes the result back. Errors if `find` is empty or not present.
+#[tauri::command]
+pub async fn replace_outline_document_text(
+    app: AppHandle,
+    project_id: String,
+    document_id: String,
+    find: String,
+    replace: String,
+    all: Option<bool>,
+) -> Result<Value, String> {
+    let config = get_outline_config(&app, &project_id)?;
+    if find.is_empty() {
+        return Err("replace_outline_document_text: `find` must not be empty".to_string());
+    }
+
+    let doc = outline_api(&config, "documents.info", json!({ "id": document_id })).await?;
+    let text = doc.get("text").and_then(|t| t.as_str()).unwrap_or("");
+
+    let occurrences = text.matches(&find).count();
+    if occurrences == 0 {
+        return Err(format!(
+            "replace_outline_document_text: `find` text not found in document {document_id}"
+        ));
+    }
+
+    let new_text = if all.unwrap_or(false) {
+        text.replace(&find, &replace)
+    } else {
+        text.replacen(&find, &replace, 1)
+    };
+
+    outline_api(
+        &config,
+        "documents.update",
+        json!({ "id": document_id, "text": new_text }),
+    )
+    .await
+}
+
 /// Archive a document.
 #[tauri::command]
 pub async fn archive_outline_document(

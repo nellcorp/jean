@@ -3201,6 +3201,23 @@ pub async fn dispatch_command(
             .await?;
             to_value(result)
         }
+        "replace_outline_document_text" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let find: String = from_field(&args, "find")?;
+            let replace: String = from_field(&args, "replace")?;
+            let all: Option<bool> = from_field_opt(&args, "all")?;
+            let result = crate::projects::replace_outline_document_text(
+                app.clone(),
+                project_id,
+                document_id,
+                find,
+                replace,
+                all,
+            )
+            .await?;
+            to_value(result)
+        }
         "archive_outline_document" => {
             let project_id: String = field(&args, "projectId", "project_id")?;
             let document_id: String = field(&args, "documentId", "document_id")?;
