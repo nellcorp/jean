@@ -96,9 +96,12 @@ async fn outline_api(config: &OutlineConfig, path: &str, body: Value) -> Result<
         return Err(format!("Outline API error ({status}): {message}"));
     }
 
-    json.get("data")
+    // Most endpoints return a `data` object; a few (e.g. documents.delete) return
+    // only `{ ok: true }`. Treat a missing `data` on an ok response as success.
+    Ok(json
+        .get("data")
         .cloned()
-        .ok_or_else(|| "Missing data in Outline response".to_string())
+        .unwrap_or_else(|| json!({ "success": true })))
 }
 
 /// Strip null entries so unspecified fields are omitted from the request body.
