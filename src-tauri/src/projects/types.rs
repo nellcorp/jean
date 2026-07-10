@@ -163,6 +163,12 @@ pub struct Project {
     /// Linear project ID to filter issues (None = show all projects)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_project_id: Option<String>,
+    /// Outline API token for this project (overrides the global token)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_api_key: Option<String>,
+    /// Outline collection ID to scope documents (None = all collections)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_collection_id: Option<String>,
     /// IDs of linked projects for cross-project context sharing
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked_project_ids: Vec<String>,

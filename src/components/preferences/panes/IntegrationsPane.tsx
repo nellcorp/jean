@@ -51,6 +51,51 @@ export const IntegrationsPane: React.FC = () => {
     )
   }
 
+  const [localOutlineApiKey, setLocalOutlineApiKey] = useState<string | null>(
+    null
+  )
+  const [showOutlineApiKey, setShowOutlineApiKey] = useState(false)
+  const [localOutlineUrl, setLocalOutlineUrl] = useState<string | null>(null)
+
+  const currentOutlineKey = preferences?.outline_api_key ?? ''
+  const displayedOutlineApiKey = localOutlineApiKey ?? currentOutlineKey
+  const outlineApiKeyChanged =
+    localOutlineApiKey !== null && localOutlineApiKey !== currentOutlineKey
+
+  const currentOutlineUrl = preferences?.outline_url ?? ''
+  const displayedOutlineUrl = localOutlineUrl ?? currentOutlineUrl
+  const outlineUrlChanged =
+    localOutlineUrl !== null && localOutlineUrl !== currentOutlineUrl
+
+  const handleSaveOutline = () => {
+    const patch: {
+      outline_api_key?: string | null
+      outline_url?: string | null
+    } = {}
+    if (outlineApiKeyChanged) {
+      patch.outline_api_key = (localOutlineApiKey ?? '').trim() || null
+    }
+    if (outlineUrlChanged) {
+      patch.outline_url = (localOutlineUrl ?? '').trim().replace(/\/+$/, '') || null
+    }
+    if (Object.keys(patch).length === 0) return
+    patchPreferences.mutate(patch, {
+      onSuccess: () => {
+        setLocalOutlineApiKey(null)
+        setLocalOutlineUrl(null)
+      },
+    })
+  }
+
+  const handleClearOutlineKey = () => {
+    patchPreferences.mutate(
+      { outline_api_key: null },
+      { onSuccess: () => setLocalOutlineApiKey(null) }
+    )
+  }
+
+  const outlineDirty = outlineApiKeyChanged || outlineUrlChanged
+
   return (
     <div className="space-y-6">
       <SettingsSection
@@ -106,6 +151,73 @@ export const IntegrationsPane: React.FC = () => {
                 variant="ghost"
                 size="sm"
                 onClick={handleClearLinearApiKey}
+                disabled={patchPreferences.isPending}
+              >
+                Remove
+              </Button>
+            )}
+          </div>
+        </InlineField>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Outline"
+        anchorId="pref-integrations-section-outline"
+      >
+        <InlineField
+          label="Instance URL"
+          description="Your Outline instance base URL, e.g. https://docs.example.com (cloud: https://app.getoutline.com)."
+        >
+          <Input
+            type="text"
+            placeholder="https://docs.example.com"
+            value={displayedOutlineUrl}
+            onChange={e => setLocalOutlineUrl(e.target.value)}
+            className="flex-1 text-base md:text-sm font-mono"
+          />
+        </InlineField>
+        <InlineField
+          label="API Token"
+          description={
+            <>
+              Your Outline API token, used by all projects unless overridden in
+              project settings. Create one in Outline under{' '}
+              <span className="font-medium">Settings → API Keys</span>.
+            </>
+          }
+        >
+          <div className="flex items-center gap-2">
+            <Input
+              type={showOutlineApiKey ? 'text' : 'password'}
+              placeholder="ol_api_..."
+              value={displayedOutlineApiKey}
+              onChange={e => setLocalOutlineApiKey(e.target.value)}
+              className="flex-1 text-base md:text-sm font-mono"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowOutlineApiKey(!showOutlineApiKey)}
+            >
+              {showOutlineApiKey ? 'Hide' : 'Show'}
+            </Button>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={handleSaveOutline}
+              disabled={!outlineDirty || patchPreferences.isPending}
+            >
+              {patchPreferences.isPending && (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              )}
+              Save
+            </Button>
+            {currentOutlineKey && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleClearOutlineKey}
                 disabled={patchPreferences.isPending}
               >
                 Remove

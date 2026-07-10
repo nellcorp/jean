@@ -90,7 +90,12 @@ Linear project management:
 - To view an entire project: get_linear_project (status, lead, milestones), list_linear_milestones, list_linear_documents, and list_linear_project_updates. list_linear_issues returns only up to 100 issues by default — pass all=true to get every issue, or milestoneId (from list_linear_milestones) to see just one milestone's issues.
 - Create/update tools take an `input` object mapping directly to Linear's fields. Dates are "YYYY-MM-DD". Issue `priority` is 0=none,1=urgent,2=high,3=medium,4=low. Project-update `health` is onTrack|atRisk|offTrack. Documents use markdown `content`.
 - To remove an issue use archive_linear_issue (Linear cannot trash issues directly); to remove a document use delete_linear_document.
-- Prefer reading (get_linear_project, list_linear_milestones, etc.) to confirm current state before mutating, and echo back the returned id/identifier/url after a write."#;
+- Prefer reading (get_linear_project, list_linear_milestones, etc.) to confirm current state before mutating, and echo back the returned id/identifier/url after a write.
+
+Outline (knowledge base / docs):
+- Outline config (API token, instance URL) is resolved from the Jean project's settings then global preferences; you do not pass a token or URL. Document operations default to the project's configured Outline collection, so usually omit collectionId; pass it only to target a different collection (get ids from list_outline_collections).
+- Read docs with list_outline_documents (all=true to paginate everything), get_outline_document (returns markdown `text`), and search_outline_documents. Write with create_outline_document (publish defaults to true; needs a collection or parent), update_outline_document (editMode replace|append|prepend), archive_outline_document, delete_outline_document, move_outline_document.
+- Document bodies are markdown in the `text` field. Confirm the target collection/document by reading before creating or updating, and echo back the returned document id/url after a write."#;
 
 pub fn tools_list_result() -> Value {
     json!({ "tools": tool_registry() })
@@ -188,7 +193,16 @@ pub fn tool_registry() -> Value {
         {"name":"create_linear_document","description":"Create a Linear document. input fields: title (required), content (markdown), projectId (defaults to configured Linear project), icon, color.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","input"],"additionalProperties":false}},
         {"name":"update_linear_document","description":"Update a Linear document by id. input fields: title, content, projectId, icon, color.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","documentId","input"],"additionalProperties":false}},
         {"name":"delete_linear_document","description":"Delete a Linear document by id.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"}},"required":["projectId","documentId"],"additionalProperties":false}},
-        {"name":"create_linear_project_update","description":"Post a Linear project status update. body is markdown; health is onTrack|atRisk|offTrack. Defaults to the configured Linear project.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"},"body":{"type":"string"},"health":{"type":"string","enum":["onTrack","atRisk","offTrack"]}},"required":["projectId"],"additionalProperties":false}}
+        {"name":"create_linear_project_update","description":"Post a Linear project status update. body is markdown; health is onTrack|atRisk|offTrack. Defaults to the configured Linear project.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"},"body":{"type":"string"},"health":{"type":"string","enum":["onTrack","atRisk","offTrack"]}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_outline_collections","description":"List Outline (knowledge base) collections. Use a returned collection id as collectionId for document operations.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_outline_documents","description":"List Outline documents, scoped to the project's configured collection by default. Pass collectionId to override, all=true to paginate every document, or limit for a custom cap (default 25).","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"collectionId":{"type":"string"},"all":{"type":"boolean"},"limit":{"type":"integer","minimum":1}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"get_outline_document","description":"Get an Outline document including its markdown text.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"}},"required":["projectId","documentId"],"additionalProperties":false}},
+        {"name":"search_outline_documents","description":"Full-text search Outline documents, scoped to the configured collection by default (pass collectionId to override).","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"query":{"type":"string"},"collectionId":{"type":"string"}},"required":["projectId","query"],"additionalProperties":false}},
+        {"name":"create_outline_document","description":"Create an Outline document. input fields: title, text (markdown), collectionId (defaults to configured collection), parentDocumentId, publish (default true), icon. A published document needs a collection or parent.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","input"],"additionalProperties":false}},
+        {"name":"update_outline_document","description":"Update an Outline document by id. input fields: title, text (markdown), publish, collectionId, icon, editMode (replace|append|prepend). editMode append/prepend requires text.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","documentId","input"],"additionalProperties":false}},
+        {"name":"archive_outline_document","description":"Archive an Outline document by id.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"}},"required":["projectId","documentId"],"additionalProperties":false}},
+        {"name":"delete_outline_document","description":"Delete an Outline document by id. permanent=true skips the trash.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"},"permanent":{"type":"boolean"}},"required":["projectId","documentId"],"additionalProperties":false}},
+        {"name":"move_outline_document","description":"Move an Outline document to another collection and/or parent. input fields: collectionId, parentDocumentId, index.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","documentId","input"],"additionalProperties":false}}
     ])
 }
 
@@ -346,7 +360,16 @@ async fn run_tool(
         | "create_linear_document"
         | "update_linear_document"
         | "delete_linear_document"
-        | "create_linear_project_update" => {
+        | "create_linear_project_update"
+        | "list_outline_collections"
+        | "list_outline_documents"
+        | "get_outline_document"
+        | "search_outline_documents"
+        | "create_outline_document"
+        | "update_outline_document"
+        | "archive_outline_document"
+        | "delete_outline_document"
+        | "move_outline_document" => {
             require_str(&args, "projectId")?;
             dispatch_command(app, name, args)
                 .await

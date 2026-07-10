@@ -326,6 +326,10 @@ pub struct AppPreferences {
     pub yolo_effort_level: Option<String>, // Effort level override for yolo mode (Claude adaptive / Codex), None = use session effort
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_api_key: Option<String>, // Global Linear personal API key (inherited by all projects)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_api_key: Option<String>, // Global Outline API token (inherited by all projects)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_url: Option<String>, // Outline instance base URL, e.g. https://docs.example.com
     #[serde(default = "default_cli_source")]
     pub claude_cli_source: String, // Claude CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default = "default_cli_source")]
@@ -1987,6 +1991,8 @@ impl Default for AppPreferences {
             build_effort_level: None,
             yolo_effort_level: None,
             linear_api_key: None,
+            outline_api_key: None,
+            outline_url: None,
             claude_cli_source: default_cli_source(),
             codex_cli_source: default_cli_source(),
             opencode_cli_source: default_cli_source(),
@@ -4389,6 +4395,16 @@ pub fn run() {
             projects::update_linear_document,
             projects::delete_linear_document,
             projects::create_linear_project_update,
+            // Outline commands
+            projects::list_outline_collections,
+            projects::list_outline_documents,
+            projects::get_outline_document,
+            projects::search_outline_documents,
+            projects::create_outline_document,
+            projects::update_outline_document,
+            projects::archive_outline_document,
+            projects::delete_outline_document,
+            projects::move_outline_document,
             // GitHub PR commands
             projects::list_github_prs,
             projects::search_github_prs,

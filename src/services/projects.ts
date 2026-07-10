@@ -2586,6 +2586,8 @@ export function useUpdateProjectSettings() {
       linearApiKey,
       linearTeamId,
       linearProjectId,
+      outlineApiKey,
+      outlineCollectionId,
       autoFixSettings,
     }: {
       projectId: string
@@ -2600,6 +2602,8 @@ export function useUpdateProjectSettings() {
       linearApiKey?: string
       linearTeamId?: string
       linearProjectId?: string
+      outlineApiKey?: string
+      outlineCollectionId?: string
       autoFixSettings?: Project['auto_fix_settings']
       linkedProjectIds?: string[]
     }): Promise<Project> => {
@@ -2625,6 +2629,8 @@ export function useUpdateProjectSettings() {
         linearApiKey,
         linearTeamId,
         linearProjectId,
+        outlineApiKey,
+        outlineCollectionId,
         autoFixSettings,
         linkedProjectIds,
       })
