@@ -79,6 +79,12 @@ export interface Project {
   linear_api_key?: string | null
   /** Linear team ID to filter issues (undefined/null = show all teams) */
   linear_team_id?: string | null
+  /** Linear project ID to filter issues (undefined/null = show all projects) */
+  linear_project_id?: string | null
+  /** Outline API token for this project (overrides the global token) */
+  outline_api_key?: string | null
+  /** Outline collection ID to scope documents (undefined/null = all collections) */
+  outline_collection_id?: string | null
   /** IDs of linked projects for cross-project context sharing */
   linked_project_ids?: string[]
   /** Per-project automated issue fixing settings */

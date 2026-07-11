@@ -239,6 +239,12 @@ pub async fn dispatch_command(
                 field_opt(&args, "linearApiKey", "linear_api_key")?;
             let linear_team_id: Option<String> =
                 field_opt(&args, "linearTeamId", "linear_team_id")?;
+            let linear_project_id: Option<String> =
+                field_opt(&args, "linearProjectId", "linear_project_id")?;
+            let outline_api_key: Option<String> =
+                field_opt(&args, "outlineApiKey", "outline_api_key")?;
+            let outline_collection_id: Option<String> =
+                field_opt(&args, "outlineCollectionId", "outline_collection_id")?;
             let linked_project_ids: Option<Vec<String>> =
                 field_opt(&args, "linkedProjectIds", "linked_project_ids")?;
             let auto_fix_settings: Option<Option<crate::projects::types::ProjectAutoFixSettings>> =
@@ -256,6 +262,9 @@ pub async fn dispatch_command(
                 worktrees_dir,
                 linear_api_key,
                 linear_team_id,
+                linear_project_id,
+                outline_api_key,
+                outline_collection_id,
                 linked_project_ids,
                 auto_fix_settings,
             )
@@ -2917,9 +2926,341 @@ pub async fn dispatch_command(
             let result = crate::projects::list_linear_teams(app.clone(), project_id).await?;
             to_value(result)
         }
+        "list_linear_projects" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let result = crate::projects::list_linear_projects(app.clone(), project_id).await?;
+            to_value(result)
+        }
+        "get_linear_project" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let linear_project_id: Option<String> =
+                field_opt(&args, "linearProjectId", "linear_project_id")?;
+            let result =
+                crate::projects::get_linear_project(app.clone(), project_id, linear_project_id)
+                    .await?;
+            to_value(result)
+        }
+        "list_linear_milestones" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let linear_project_id: Option<String> =
+                field_opt(&args, "linearProjectId", "linear_project_id")?;
+            let result =
+                crate::projects::list_linear_milestones(app.clone(), project_id, linear_project_id)
+                    .await?;
+            to_value(result)
+        }
+        "list_linear_documents" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let linear_project_id: Option<String> =
+                field_opt(&args, "linearProjectId", "linear_project_id")?;
+            let result =
+                crate::projects::list_linear_documents(app.clone(), project_id, linear_project_id)
+                    .await?;
+            to_value(result)
+        }
+        "get_linear_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let result =
+                crate::projects::get_linear_document(app.clone(), project_id, document_id).await?;
+            to_value(result)
+        }
+        "list_linear_project_updates" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let linear_project_id: Option<String> =
+                field_opt(&args, "linearProjectId", "linear_project_id")?;
+            let result = crate::projects::list_linear_project_updates(
+                app.clone(),
+                project_id,
+                linear_project_id,
+            )
+            .await?;
+            to_value(result)
+        }
+        "list_linear_workflow_states" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let team_id: Option<String> = field_opt(&args, "teamId", "team_id")?;
+            let result =
+                crate::projects::list_linear_workflow_states(app.clone(), project_id, team_id)
+                    .await?;
+            to_value(result)
+        }
+        "list_linear_users" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let result = crate::projects::list_linear_users(app.clone(), project_id).await?;
+            to_value(result)
+        }
+        "list_linear_labels" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let result = crate::projects::list_linear_labels(app.clone(), project_id).await?;
+            to_value(result)
+        }
+        "list_linear_cycles" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let team_id: Option<String> = field_opt(&args, "teamId", "team_id")?;
+            let result =
+                crate::projects::list_linear_cycles(app.clone(), project_id, team_id).await?;
+            to_value(result)
+        }
+        "create_linear_issue" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result =
+                crate::projects::create_linear_issue(app.clone(), project_id, input).await?;
+            emit_cache_invalidation(app, &["linear"]);
+            to_value(result)
+        }
+        "update_linear_issue" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let issue_id: String = field(&args, "issueId", "issue_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result =
+                crate::projects::update_linear_issue(app.clone(), project_id, issue_id, input)
+                    .await?;
+            emit_cache_invalidation(app, &["linear"]);
+            to_value(result)
+        }
+        "archive_linear_issue" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let issue_id: String = field(&args, "issueId", "issue_id")?;
+            let result =
+                crate::projects::archive_linear_issue(app.clone(), project_id, issue_id).await?;
+            emit_cache_invalidation(app, &["linear"]);
+            to_value(result)
+        }
+        "create_linear_comment" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let issue_id: String = field(&args, "issueId", "issue_id")?;
+            let body: String = from_field(&args, "body")?;
+            let result =
+                crate::projects::create_linear_comment(app.clone(), project_id, issue_id, body)
+                    .await?;
+            to_value(result)
+        }
+        "create_linear_project" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result =
+                crate::projects::create_linear_project(app.clone(), project_id, input).await?;
+            to_value(result)
+        }
+        "update_linear_project" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let linear_project_id: Option<String> =
+                field_opt(&args, "linearProjectId", "linear_project_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result = crate::projects::update_linear_project(
+                app.clone(),
+                project_id,
+                linear_project_id,
+                input,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["linear"]);
+            to_value(result)
+        }
+        "create_linear_milestone" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let linear_project_id: Option<String> =
+                field_opt(&args, "linearProjectId", "linear_project_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result = crate::projects::create_linear_milestone(
+                app.clone(),
+                project_id,
+                linear_project_id,
+                input,
+            )
+            .await?;
+            to_value(result)
+        }
+        "update_linear_milestone" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let milestone_id: String = field(&args, "milestoneId", "milestone_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result = crate::projects::update_linear_milestone(
+                app.clone(),
+                project_id,
+                milestone_id,
+                input,
+            )
+            .await?;
+            to_value(result)
+        }
+        "delete_linear_milestone" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let milestone_id: String = field(&args, "milestoneId", "milestone_id")?;
+            let result =
+                crate::projects::delete_linear_milestone(app.clone(), project_id, milestone_id)
+                    .await?;
+            to_value(result)
+        }
+        "create_linear_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result =
+                crate::projects::create_linear_document(app.clone(), project_id, input).await?;
+            to_value(result)
+        }
+        "update_linear_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result = crate::projects::update_linear_document(
+                app.clone(),
+                project_id,
+                document_id,
+                input,
+            )
+            .await?;
+            to_value(result)
+        }
+        "delete_linear_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let result =
+                crate::projects::delete_linear_document(app.clone(), project_id, document_id)
+                    .await?;
+            to_value(result)
+        }
+        "create_linear_project_update" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let linear_project_id: Option<String> =
+                field_opt(&args, "linearProjectId", "linear_project_id")?;
+            let body: Option<String> = from_field_opt(&args, "body")?;
+            let health: Option<String> = from_field_opt(&args, "health")?;
+            let result = crate::projects::create_linear_project_update(
+                app.clone(),
+                project_id,
+                linear_project_id,
+                body,
+                health,
+            )
+            .await?;
+            to_value(result)
+        }
+        "list_outline_collections" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let result =
+                crate::projects::list_outline_collections(app.clone(), project_id).await?;
+            to_value(result)
+        }
+        "list_outline_documents" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let collection_id: Option<String> =
+                field_opt(&args, "collectionId", "collection_id")?;
+            let all: Option<bool> = from_field_opt(&args, "all")?;
+            let limit: Option<u32> = from_field_opt(&args, "limit")?;
+            let result = crate::projects::list_outline_documents(
+                app.clone(),
+                project_id,
+                collection_id,
+                all,
+                limit,
+            )
+            .await?;
+            to_value(result)
+        }
+        "get_outline_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let result =
+                crate::projects::get_outline_document(app.clone(), project_id, document_id).await?;
+            to_value(result)
+        }
+        "search_outline_documents" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let query: String = from_field(&args, "query")?;
+            let collection_id: Option<String> =
+                field_opt(&args, "collectionId", "collection_id")?;
+            let result = crate::projects::search_outline_documents(
+                app.clone(),
+                project_id,
+                query,
+                collection_id,
+            )
+            .await?;
+            to_value(result)
+        }
+        "create_outline_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result =
+                crate::projects::create_outline_document(app.clone(), project_id, input).await?;
+            to_value(result)
+        }
+        "update_outline_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result = crate::projects::update_outline_document(
+                app.clone(),
+                project_id,
+                document_id,
+                input,
+            )
+            .await?;
+            to_value(result)
+        }
+        "replace_outline_document_text" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let find: String = from_field(&args, "find")?;
+            let replace: String = from_field(&args, "replace")?;
+            let all: Option<bool> = from_field_opt(&args, "all")?;
+            let result = crate::projects::replace_outline_document_text(
+                app.clone(),
+                project_id,
+                document_id,
+                find,
+                replace,
+                all,
+            )
+            .await?;
+            to_value(result)
+        }
+        "archive_outline_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let result =
+                crate::projects::archive_outline_document(app.clone(), project_id, document_id)
+                    .await?;
+            to_value(result)
+        }
+        "delete_outline_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let permanent: Option<bool> = from_field_opt(&args, "permanent")?;
+            let result = crate::projects::delete_outline_document(
+                app.clone(),
+                project_id,
+                document_id,
+                permanent,
+            )
+            .await?;
+            to_value(result)
+        }
+        "move_outline_document" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let document_id: String = field(&args, "documentId", "document_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result =
+                crate::projects::move_outline_document(app.clone(), project_id, document_id, input)
+                    .await?;
+            to_value(result)
+        }
         "list_linear_issues" => {
             let project_id: String = field(&args, "projectId", "project_id")?;
-            let result = crate::projects::list_linear_issues(app.clone(), project_id).await?;
+            let milestone_id: Option<String> = field_opt(&args, "milestoneId", "milestone_id")?;
+            let all: Option<bool> = from_field_opt(&args, "all")?;
+            let limit: Option<u32> = from_field_opt(&args, "limit")?;
+            let result = crate::projects::list_linear_issues(
+                app.clone(),
+                project_id,
+                milestone_id,
+                all,
+                limit,
+            )
+            .await?;
             to_value(result)
         }
         "search_linear_issues" => {
