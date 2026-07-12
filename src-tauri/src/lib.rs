@@ -330,6 +330,8 @@ pub struct AppPreferences {
     pub outline_api_key: Option<String>, // Global Outline API token (inherited by all projects)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline_url: Option<String>, // Outline instance base URL, e.g. https://docs.example.com
+    #[serde(default)]
+    pub reference_picker_extra_prune_dirs: Vec<String>, // Extra dir names to exclude from the @-reference picker (merged with built-in defaults)
     #[serde(default = "default_cli_source")]
     pub claude_cli_source: String, // Claude CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default = "default_cli_source")]
@@ -1993,6 +1995,7 @@ impl Default for AppPreferences {
             linear_api_key: None,
             outline_api_key: None,
             outline_url: None,
+            reference_picker_extra_prune_dirs: Vec::new(),
             claude_cli_source: default_cli_source(),
             codex_cli_source: default_cli_source(),
             opencode_cli_source: default_cli_source(),

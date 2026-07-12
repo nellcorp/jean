@@ -4698,12 +4698,26 @@ pub async fn list_worktree_files(
     worktree_path: String,
     max_files: Option<usize>,
     include_ignored: Option<bool>,
+    extra_prune_dirs: Option<Vec<String>>,
 ) -> Result<Vec<WorktreeFile>, String> {
     log::trace!("Listing files in worktree: {worktree_path}");
 
     let max = max_files.unwrap_or(5000);
     let include_ignored = include_ignored.unwrap_or(false);
     let mut files = Vec::new();
+
+    // Built-in prune dirs plus any user-configured extras (trimmed, non-empty).
+    let prune_dirs: std::collections::HashSet<String> = IGNORED_WALK_PRUNE_DIRS
+        .iter()
+        .map(|s| s.to_string())
+        .chain(
+            extra_prune_dirs
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        )
+        .collect();
 
     // Use ignore crate's WalkBuilder. By default it respects .gitignore; when
     // include_ignored is set we disable that and instead prune only heavy dirs.
@@ -4716,9 +4730,9 @@ pub async fn list_worktree_files(
         .require_git(false); // Work even if not a git repo
 
     if include_ignored {
-        builder.filter_entry(|entry| {
+        builder.filter_entry(move |entry| {
             let name = entry.file_name().to_string_lossy();
-            !IGNORED_WALK_PRUNE_DIRS.contains(&name.as_ref())
+            !prune_dirs.contains(name.as_ref())
         });
     }
 

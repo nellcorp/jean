@@ -3,6 +3,7 @@ import { invoke } from '@/lib/transport'
 import { logger } from '@/lib/logger'
 import type { WorktreeFile } from '@/types/chat'
 import { isTauri } from '@/services/projects'
+import { usePreferences } from '@/services/preferences'
 
 // Query keys for files
 export const fileQueryKeys = {
@@ -16,6 +17,9 @@ export const fileQueryKeys = {
  * Results are cached and only refetched when worktree changes
  */
 export function useWorktreeFiles(worktreePath: string | null) {
+  const { data: preferences } = usePreferences()
+  const extraPruneDirs = preferences?.reference_picker_extra_prune_dirs ?? []
+
   return useQuery({
     queryKey: fileQueryKeys.worktreeFiles(worktreePath ?? ''),
     queryFn: async (): Promise<WorktreeFile[]> => {
@@ -31,6 +35,7 @@ export function useWorktreeFiles(worktreePath: string | null) {
           // Include gitignored files (e.g. .env, build outputs) so they can be
           // referenced; heavy dependency/build dirs are pruned server-side.
           includeIgnored: true,
+          extraPruneDirs,
         })
         logger.info('Worktree files loaded', { count: files.length })
         return files
