@@ -142,7 +142,7 @@ RUN install -m 0755 -d /usr/share/keyrings \
 
 
 # Install Claude Code + Yarn globally.
-RUN npm install -g @anthropic-ai/claude-code yarn \
+RUN npm install -g @anthropic-ai/claude-code@2.1.186 yarn \
  && npm cache clean --force
 
 # Install Playwright globally and its browser binaries + system deps.
