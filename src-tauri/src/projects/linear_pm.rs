@@ -427,6 +427,90 @@ pub async fn archive_linear_issue(
     .await
 }
 
+/// Create an issue label. `input` accepts: name (required), color (hex),
+/// description, parentId (label group), isGroup, teamId (defaults to the
+/// configured team; omit/empty for a workspace-wide label).
+#[tauri::command]
+pub async fn create_linear_label(
+    app: AppHandle,
+    project_id: String,
+    input: Value,
+) -> Result<Value, String> {
+    let mut input = clean_input(input);
+    if input.get("name").and_then(|n| n.as_str()).unwrap_or("").is_empty() {
+        return Err("create_linear_label requires a name".to_string());
+    }
+    // Default to the configured team so the label is scoped to it. Callers can
+    // pass an empty teamId to force a workspace-wide label.
+    if input.get("teamId").is_none() {
+        if let Some(team) = resolve_team(&app, &project_id, None)? {
+            input["teamId"] = json!(team);
+        }
+    }
+    let query = r#"mutation LabelCreate($input: IssueLabelCreateInput!) {
+    issueLabelCreate(input: $input) {
+        success
+        issueLabel { id name color }
+    }
+}"#;
+    mutate(
+        &app,
+        &project_id,
+        query,
+        Some(json!({ "input": input })),
+        "issueLabelCreate",
+    )
+    .await
+}
+
+/// Attach a label to an issue.
+#[tauri::command]
+pub async fn add_linear_issue_label(
+    app: AppHandle,
+    project_id: String,
+    issue_id: String,
+    label_id: String,
+) -> Result<Value, String> {
+    let query = r#"mutation IssueAddLabel($id: String!, $labelId: String!) {
+    issueAddLabel(id: $id, labelId: $labelId) {
+        success
+        issue { id identifier labels { nodes { id name } } }
+    }
+}"#;
+    mutate(
+        &app,
+        &project_id,
+        query,
+        Some(json!({ "id": issue_id, "labelId": label_id })),
+        "issueAddLabel",
+    )
+    .await
+}
+
+/// Remove a label from an issue.
+#[tauri::command]
+pub async fn remove_linear_issue_label(
+    app: AppHandle,
+    project_id: String,
+    issue_id: String,
+    label_id: String,
+) -> Result<Value, String> {
+    let query = r#"mutation IssueRemoveLabel($id: String!, $labelId: String!) {
+    issueRemoveLabel(id: $id, labelId: $labelId) {
+        success
+        issue { id identifier labels { nodes { id name } } }
+    }
+}"#;
+    mutate(
+        &app,
+        &project_id,
+        query,
+        Some(json!({ "id": issue_id, "labelId": label_id })),
+        "issueRemoveLabel",
+    )
+    .await
+}
+
 /// Add a comment to an issue.
 #[tauri::command]
 pub async fn create_linear_comment(
