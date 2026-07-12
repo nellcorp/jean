@@ -28,6 +28,9 @@ export function useWorktreeFiles(worktreePath: string | null) {
         const files = await invoke<WorktreeFile[]>('list_worktree_files', {
           worktreePath,
           maxFiles: 5000,
+          // Include gitignored files (e.g. .env, build outputs) so they can be
+          // referenced; heavy dependency/build dirs are pruned server-side.
+          includeIgnored: true,
         })
         logger.info('Worktree files loaded', { count: files.length })
         return files

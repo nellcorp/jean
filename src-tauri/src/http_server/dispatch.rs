@@ -582,7 +582,11 @@ pub async fn dispatch_command(
         "list_worktree_files" => {
             let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
             let max_files: Option<usize> = field_opt(&args, "maxFiles", "max_files")?;
-            let result = crate::projects::list_worktree_files(worktree_path, max_files).await?;
+            let include_ignored: Option<bool> =
+                field_opt(&args, "includeIgnored", "include_ignored")?;
+            let result =
+                crate::projects::list_worktree_files(worktree_path, max_files, include_ignored)
+                    .await?;
             to_value(result)
         }
 

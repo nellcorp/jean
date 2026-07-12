@@ -4662,26 +4662,67 @@ pub struct WorktreeFile {
     pub is_dir: bool,
 }
 
-/// List files in a worktree, respecting .gitignore
-/// Returns files sorted alphabetically, limited to prevent performance issues
+/// Directories pruned when `include_ignored` is set, so surfacing gitignored
+/// files (e.g. .env, build outputs) doesn't flood the list with dependency and
+/// build caches. These are almost always gitignored and rarely referenced.
+const IGNORED_WALK_PRUNE_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".parcel-cache",
+    ".cache",
+    "coverage",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    "vendor",
+    ".gradle",
+    "Pods",
+];
+
+/// List files in a worktree. By default respects .gitignore; pass
+/// `include_ignored = true` to also surface gitignored files (heavy dependency
+/// and build directories are still pruned so the list stays usable).
+/// Returns files sorted alphabetically, limited to prevent performance issues.
 #[tauri::command]
 pub async fn list_worktree_files(
     worktree_path: String,
     max_files: Option<usize>,
+    include_ignored: Option<bool>,
 ) -> Result<Vec<WorktreeFile>, String> {
     log::trace!("Listing files in worktree: {worktree_path}");
 
     let max = max_files.unwrap_or(5000);
+    let include_ignored = include_ignored.unwrap_or(false);
     let mut files = Vec::new();
 
-    // Use ignore crate's WalkBuilder which respects .gitignore by default
-    let walker = WalkBuilder::new(&worktree_path)
+    // Use ignore crate's WalkBuilder. By default it respects .gitignore; when
+    // include_ignored is set we disable that and instead prune only heavy dirs.
+    let mut builder = WalkBuilder::new(&worktree_path);
+    builder
         .hidden(false) // Include hidden files (user may want .env.example etc)
-        .git_ignore(true) // Respect .gitignore
-        .git_global(true) // Respect global gitignore
-        .git_exclude(true) // Respect .git/info/exclude
-        .require_git(false) // Work even if not a git repo
-        .build();
+        .git_ignore(!include_ignored)
+        .git_global(!include_ignored)
+        .git_exclude(!include_ignored)
+        .require_git(false); // Work even if not a git repo
+
+    if include_ignored {
+        builder.filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            !IGNORED_WALK_PRUNE_DIRS.contains(&name.as_ref())
+        });
+    }
+
+    let walker = builder.build();
 
     let worktree_path_ref = Path::new(&worktree_path);
 

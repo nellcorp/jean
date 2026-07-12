@@ -728,6 +728,7 @@ export const ChatInput = memo(function ChatInput({
             fileList = await invoke<WorktreeFile[]>('list_worktree_files', {
               worktreePath: activeWorktreePath,
               maxFiles: 5000,
+              includeIgnored: true,
             })
             queryClient.setQueryData(
               fileQueryKeys.worktreeFiles(activeWorktreePath),
