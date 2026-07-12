@@ -1,3 +1,6 @@
+// The Jean MCP `tool_registry()` builds a large array via the `json!` macro,
+// which expands recursively; the default limit of 128 is not enough.
+#![recursion_limit = "512"]
 #![allow(
     dead_code,
     clippy::cmp_owned,
@@ -323,6 +326,10 @@ pub struct AppPreferences {
     pub yolo_effort_level: Option<String>, // Effort level override for yolo mode (Claude adaptive / Codex), None = use session effort
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_api_key: Option<String>, // Global Linear personal API key (inherited by all projects)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_api_key: Option<String>, // Global Outline API token (inherited by all projects)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline_url: Option<String>, // Outline instance base URL, e.g. https://docs.example.com
     #[serde(default = "default_cli_source")]
     pub claude_cli_source: String, // Claude CLI source: "jean" (managed) or "path" (system PATH)
     #[serde(default = "default_cli_source")]
@@ -1984,6 +1991,8 @@ impl Default for AppPreferences {
             build_effort_level: None,
             yolo_effort_level: None,
             linear_api_key: None,
+            outline_api_key: None,
+            outline_url: None,
             claude_cli_source: default_cli_source(),
             codex_cli_source: default_cli_source(),
             opencode_cli_source: default_cli_source(),
@@ -4354,6 +4363,7 @@ pub fn run() {
             projects::remove_issue_context,
             // Linear issues commands
             projects::list_linear_teams,
+            projects::list_linear_projects,
             projects::list_linear_issues,
             projects::search_linear_issues,
             projects::get_linear_issue,
@@ -4362,6 +4372,43 @@ pub fn run() {
             projects::list_loaded_linear_issue_contexts,
             projects::get_linear_issue_context_contents,
             projects::remove_linear_issue_context,
+            // Linear project-management commands
+            projects::get_linear_project,
+            projects::list_linear_milestones,
+            projects::list_linear_documents,
+            projects::get_linear_document,
+            projects::list_linear_project_updates,
+            projects::list_linear_workflow_states,
+            projects::list_linear_users,
+            projects::list_linear_labels,
+            projects::list_linear_cycles,
+            projects::create_linear_issue,
+            projects::update_linear_issue,
+            projects::archive_linear_issue,
+            projects::create_linear_label,
+            projects::add_linear_issue_label,
+            projects::remove_linear_issue_label,
+            projects::create_linear_comment,
+            projects::create_linear_project,
+            projects::update_linear_project,
+            projects::create_linear_milestone,
+            projects::update_linear_milestone,
+            projects::delete_linear_milestone,
+            projects::create_linear_document,
+            projects::update_linear_document,
+            projects::delete_linear_document,
+            projects::create_linear_project_update,
+            // Outline commands
+            projects::list_outline_collections,
+            projects::list_outline_documents,
+            projects::get_outline_document,
+            projects::search_outline_documents,
+            projects::create_outline_document,
+            projects::update_outline_document,
+            projects::replace_outline_document_text,
+            projects::archive_outline_document,
+            projects::delete_outline_document,
+            projects::move_outline_document,
             // GitHub PR commands
             projects::list_github_prs,
             projects::search_github_prs,

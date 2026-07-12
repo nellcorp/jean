@@ -508,6 +508,9 @@ pub async fn add_project(
         worktrees_dir: None,
         linear_api_key: None,
         linear_team_id: None,
+        linear_project_id: None,
+        outline_api_key: None,
+        outline_collection_id: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
     };
@@ -667,6 +670,9 @@ pub async fn init_project(
         worktrees_dir: None,
         linear_api_key: None,
         linear_team_id: None,
+        linear_project_id: None,
+        outline_api_key: None,
+        outline_collection_id: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
     };
@@ -723,6 +729,9 @@ pub async fn clone_project(
         worktrees_dir: None,
         linear_api_key: None,
         linear_team_id: None,
+        linear_project_id: None,
+        outline_api_key: None,
+        outline_collection_id: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
     };
@@ -4806,6 +4815,9 @@ pub async fn update_project_settings(
     worktrees_dir: Option<String>,
     linear_api_key: Option<String>,
     linear_team_id: Option<String>,
+    linear_project_id: Option<String>,
+    outline_api_key: Option<String>,
+    outline_collection_id: Option<String>,
     linked_project_ids: Option<Vec<String>>,
     auto_fix_settings: Option<Option<ProjectAutoFixSettings>>,
 ) -> Result<Project, String> {
@@ -4884,6 +4896,32 @@ pub async fn update_project_settings(
             None
         } else {
             Some(team_id)
+        };
+    }
+
+    if let Some(project_filter_id) = linear_project_id {
+        let project_filter_id = project_filter_id.trim().to_string();
+        log::trace!("Updating Linear project ID: {project_filter_id:?}");
+        project.linear_project_id = if project_filter_id.is_empty() {
+            None
+        } else {
+            Some(project_filter_id)
+        };
+    }
+
+    if let Some(key) = outline_api_key {
+        let key = key.trim().to_string();
+        log::trace!("Updating Outline API key ({} chars)", key.len());
+        project.outline_api_key = if key.is_empty() { None } else { Some(key) };
+    }
+
+    if let Some(collection_id) = outline_collection_id {
+        let collection_id = collection_id.trim().to_string();
+        log::trace!("Updating Outline collection ID: {collection_id:?}");
+        project.outline_collection_id = if collection_id.is_empty() {
+            None
+        } else {
+            Some(collection_id)
         };
     }
 
@@ -10247,6 +10285,9 @@ pub async fn create_folder(
         worktrees_dir: None,
         linear_api_key: None,
         linear_team_id: None,
+        linear_project_id: None,
+        outline_api_key: None,
+        outline_collection_id: None,
         linked_project_ids: Vec::new(),
         auto_fix_settings: None,
     };
@@ -11604,6 +11645,9 @@ mod tests {
             worktrees_dir: None,
             linear_api_key: None,
             linear_team_id: None,
+        linear_project_id: None,
+        outline_api_key: None,
+        outline_collection_id: None,
             linked_project_ids: Vec::new(),
             auto_fix_settings: None,
         };
