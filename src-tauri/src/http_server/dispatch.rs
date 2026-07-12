@@ -3028,6 +3028,42 @@ pub async fn dispatch_command(
             emit_cache_invalidation(app, &["linear"]);
             to_value(result)
         }
+        "create_linear_label" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let input = args.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let result =
+                crate::projects::create_linear_label(app.clone(), project_id, input).await?;
+            emit_cache_invalidation(app, &["linear"]);
+            to_value(result)
+        }
+        "add_linear_issue_label" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let issue_id: String = field(&args, "issueId", "issue_id")?;
+            let label_id: String = field(&args, "labelId", "label_id")?;
+            let result = crate::projects::add_linear_issue_label(
+                app.clone(),
+                project_id,
+                issue_id,
+                label_id,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["linear"]);
+            to_value(result)
+        }
+        "remove_linear_issue_label" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let issue_id: String = field(&args, "issueId", "issue_id")?;
+            let label_id: String = field(&args, "labelId", "label_id")?;
+            let result = crate::projects::remove_linear_issue_label(
+                app.clone(),
+                project_id,
+                issue_id,
+                label_id,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["linear"]);
+            to_value(result)
+        }
         "create_linear_comment" => {
             let project_id: String = field(&args, "projectId", "project_id")?;
             let issue_id: String = field(&args, "issueId", "issue_id")?;
