@@ -294,6 +294,14 @@ fn stream_event_input_delta(msg: &serde_json::Value) -> Option<(usize, &str)> {
     Some((index, delta.get("partial_json")?.as_str()?))
 }
 
+fn stream_event_content_block_stop(msg: &serde_json::Value) -> Option<usize> {
+    let event = msg.get("event")?;
+    if event.get("type").and_then(|v| v.as_str()) != Some("content_block_stop") {
+        return None;
+    }
+    Some(event.get("index")?.as_u64()? as usize)
+}
+
 // =============================================================================
 // Detached Claude CLI execution
 // =============================================================================
@@ -1346,97 +1354,109 @@ pub fn tail_claude_output(
                 }
 
                 if let Some((index, partial_json)) = stream_event_input_delta(&msg) {
-                    let Some(pending_tool) = pending_stream_tools.get(&index).cloned() else {
+                    // Only accumulate here. Blocking tools are finalized on
+                    // content_block_stop, not on the first parseable buffer:
+                    // newer Claude streams tool input via deltas that begin with
+                    // an empty priming delta (partial_json ""), so firing early
+                    // captured an empty `{}` input and killed Claude before the
+                    // real plan/questions payload streamed (issue #438).
+                    if pending_stream_tools.contains_key(&index) {
+                        pending_stream_tool_inputs
+                            .entry(index)
+                            .or_default()
+                            .push_str(partial_json);
+                    }
+                    continue;
+                }
+
+                if let Some(index) = stream_event_content_block_stop(&msg) {
+                    let Some(pending_tool) = pending_stream_tools.remove(&index) else {
                         continue;
                     };
+                    let input_buf = pending_stream_tool_inputs.remove(&index).unwrap_or_default();
 
+                    if pending_tool.name != "AskUserQuestion"
+                        && pending_tool.name != "ExitPlanMode"
+                    {
+                        continue;
+                    }
                     if seen_tool_use_ids.contains(&pending_tool.id) {
                         continue;
                     }
 
-                    let input_buf = pending_stream_tool_inputs.entry(index).or_default();
-                    input_buf.push_str(partial_json);
-
                     let input = if input_buf.trim().is_empty() {
                         pending_tool.input.clone()
                     } else {
-                        match serde_json::from_str::<serde_json::Value>(input_buf) {
-                            Ok(value) => value,
-                            Err(_) => continue,
-                        }
+                        serde_json::from_str::<serde_json::Value>(&input_buf)
+                            .unwrap_or_else(|_| pending_tool.input.clone())
                     };
 
-                    if pending_tool.name == "AskUserQuestion" || pending_tool.name == "ExitPlanMode"
-                    {
-                        let id = pending_tool.id.clone();
-                        let name = pending_tool.name.clone();
-                        seen_tool_use_ids.insert(id.clone());
-                        tool_calls.push(ToolCall {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                            output: None,
-                            parent_tool_use_id: current_parent_tool_use_id.clone(),
-                        });
-                        content_blocks.push(ContentBlock::ToolUse {
-                            tool_call_id: id.clone(),
-                        });
+                    let id = pending_tool.id.clone();
+                    let name = pending_tool.name.clone();
+                    seen_tool_use_ids.insert(id.clone());
+                    tool_calls.push(ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        output: None,
+                        parent_tool_use_id: current_parent_tool_use_id.clone(),
+                    });
+                    content_blocks.push(ContentBlock::ToolUse {
+                        tool_call_id: id.clone(),
+                    });
 
-                        let event = ToolUseEvent {
-                            session_id: session_id.to_string(),
-                            worktree_id: worktree_id.to_string(),
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                            parent_tool_use_id: current_parent_tool_use_id.clone(),
-                        };
-                        if let Err(e) = app.emit_all("chat:tool_use", &event) {
-                            log::error!("Failed to emit tool_use: {e}");
-                        }
-
-                        let block_event = ToolBlockEvent {
-                            session_id: session_id.to_string(),
-                            worktree_id: worktree_id.to_string(),
-                            tool_call_id: id,
-                        };
-                        if let Err(e) = app.emit_all("chat:tool_block", &block_event) {
-                            log::error!("Failed to emit tool_block: {e}");
-                        }
-
-                        log::trace!(
-                            "Detected blocking tool {name} from stream_event, killing detached process"
-                        );
-                        #[cfg(unix)]
-                        unsafe {
-                            libc::kill(pid as i32, libc::SIGKILL);
-                        }
-                        #[cfg(windows)]
-                        {
-                            let _ = crate::platform::silent_command("taskkill")
-                                .args(["/F", "/PID", &pid.to_string()])
-                                .output();
-                        }
-
-                        let done_event = DoneEvent {
-                            session_id: session_id.to_string(),
-                            worktree_id: worktree_id.to_string(),
-                            waiting_for_plan: false,
-                        };
-                        if let Err(e) = app.emit_all("chat:done", &done_event) {
-                            log::error!("Failed to emit done event: {e}");
-                        }
-
-                        return Ok(ClaudeResponse {
-                            content: full_content,
-                            session_id: claude_session_id,
-                            tool_calls,
-                            content_blocks,
-                            cancelled: false,
-                            usage: None,
-                        });
+                    let event = ToolUseEvent {
+                        session_id: session_id.to_string(),
+                        worktree_id: worktree_id.to_string(),
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        parent_tool_use_id: current_parent_tool_use_id.clone(),
+                    };
+                    if let Err(e) = app.emit_all("chat:tool_use", &event) {
+                        log::error!("Failed to emit tool_use: {e}");
                     }
 
-                    continue;
+                    let block_event = ToolBlockEvent {
+                        session_id: session_id.to_string(),
+                        worktree_id: worktree_id.to_string(),
+                        tool_call_id: id,
+                    };
+                    if let Err(e) = app.emit_all("chat:tool_block", &block_event) {
+                        log::error!("Failed to emit tool_block: {e}");
+                    }
+
+                    log::trace!(
+                        "Detected blocking tool {name} from stream_event, killing detached process"
+                    );
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                    #[cfg(windows)]
+                    {
+                        let _ = crate::platform::silent_command("taskkill")
+                            .args(["/F", "/PID", &pid.to_string()])
+                            .output();
+                    }
+
+                    let done_event = DoneEvent {
+                        session_id: session_id.to_string(),
+                        worktree_id: worktree_id.to_string(),
+                        waiting_for_plan: false,
+                    };
+                    if let Err(e) = app.emit_all("chat:done", &done_event) {
+                        log::error!("Failed to emit done event: {e}");
+                    }
+
+                    return Ok(ClaudeResponse {
+                        content: full_content,
+                        session_id: claude_session_id,
+                        tool_calls,
+                        content_blocks,
+                        cancelled: false,
+                        usage: None,
+                    });
                 }
             }
 
@@ -2487,6 +2507,80 @@ mod tests {
         });
 
         assert_eq!(stream_event_input_delta(&msg), Some((2, "{\"questions\":")));
+    }
+
+    #[test]
+    fn extracts_stream_event_content_block_stop() {
+        let msg = serde_json::json!({
+            "type": "stream_event",
+            "event": { "type": "content_block_stop", "index": 1 }
+        });
+        assert_eq!(stream_event_content_block_stop(&msg), Some(1));
+
+        let not_stop = serde_json::json!({
+            "type": "stream_event",
+            "event": { "type": "content_block_delta", "index": 1 }
+        });
+        assert_eq!(stream_event_content_block_stop(&not_stop), None);
+    }
+
+    // Regression for issue #438: newer Claude streams tool input via deltas that
+    // begin with an empty priming delta. Concatenating every input_json_delta for
+    // a tool's index must reconstruct the full input; the empty priming delta must
+    // not be mistaken for a complete (empty) input.
+    #[test]
+    fn accumulates_blocking_tool_input_across_priming_delta() {
+        let start = serde_json::json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_q",
+                    "name": "AskUserQuestion",
+                    "input": {},
+                    "caller": { "type": "direct" }
+                }
+            }
+        });
+        let tool = stream_event_tool_use(&start).expect("start extracted");
+        assert_eq!(tool.name, "AskUserQuestion");
+        // Inline input is empty on newer CLI — must not be used as the final input.
+        assert_eq!(tool.input, serde_json::json!({}));
+
+        let deltas = [
+            "",
+            "{\"questions\": [{\"question\": \"Pick\",",
+            " \"options\": [{\"label\": \"A\"}]}]}",
+        ];
+        let mut buf = String::new();
+        for chunk in deltas {
+            let msg = serde_json::json!({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": { "type": "input_json_delta", "partial_json": chunk }
+                }
+            });
+            let (index, partial) =
+                stream_event_input_delta(&msg).expect("delta extracted");
+            assert_eq!(index, 1);
+            buf.push_str(partial);
+        }
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&buf).expect("accumulated buffer is valid JSON");
+        let questions = parsed
+            .get("questions")
+            .and_then(|v| v.as_array())
+            .expect("questions array present");
+        assert_eq!(questions.len(), 1);
+        assert_eq!(
+            questions[0].get("question").and_then(|v| v.as_str()),
+            Some("Pick")
+        );
     }
 
     #[test]
