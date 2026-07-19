@@ -977,6 +977,13 @@ fn build_claude_args(
         "1".to_string(),
     ));
 
+    // Disable Claude Code tool-search deferral. When on (default since 2.1.69),
+    // built-in tools are hidden behind the ToolSearch tool — but AskUserQuestion
+    // and ExitPlanMode are not resolvable via ToolSearch, so the model can't call
+    // them and falls back to plain text (issue #438). Preloading every tool keeps
+    // them (and Grep/Glob) directly available.
+    env_vars.push(("ENABLE_TOOL_SEARCH".to_string(), "false".to_string()));
+
     // Debug env vars
     env_vars.push(("JEAN_SESSION_ID".to_string(), session_id.to_string()));
     env_vars.push(("JEAN_WORKTREE_ID".to_string(), worktree_id.to_string()));
