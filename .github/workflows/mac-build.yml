@@ -1,0 +1,49 @@
+name: 'Mac personal build'
+
+# Builds an unsigned (ad-hoc) universal macOS .dmg for local installation and
+# uploads it as a workflow artifact. Does not create a release, tag, or need
+# Apple/updater signing secrets. Trigger manually from the Actions tab or with
+# `gh workflow run mac-build.yml --ref <branch>`.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build universal macOS dmg
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS universal targets
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      # Ad-hoc sign (signingIdentity "-") so the app runs locally without the
+      # coolLabs Developer ID cert, and skip updater artifacts (no signing key).
+      - name: Build universal dmg (unsigned)
+        run: |
+          bun run tauri build \
+            --target universal-apple-darwin \
+            --bundles dmg \
+            --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
+
+      - name: Upload dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jean-macos-universal-dmg
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
