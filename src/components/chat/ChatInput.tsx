@@ -17,7 +17,8 @@ import type {
   ReadTextResponse,
   ExecutionMode,
 } from '@/types/chat'
-import type { CliBackend } from '@/types/preferences'
+import type { AppPreferences, CliBackend } from '@/types/preferences'
+import { preferencesQueryKeys } from '@/services/preferences'
 import {
   FileMentionPopover,
   type FileMentionPopoverHandle,
@@ -728,6 +729,11 @@ export const ChatInput = memo(function ChatInput({
             fileList = await invoke<WorktreeFile[]>('list_worktree_files', {
               worktreePath: activeWorktreePath,
               maxFiles: 5000,
+              includeIgnored: true,
+              extraPruneDirs:
+                queryClient.getQueryData<AppPreferences>(
+                  preferencesQueryKeys.preferences()
+                )?.reference_picker_extra_prune_dirs ?? [],
             })
             queryClient.setQueryData(
               fileQueryKeys.worktreeFiles(activeWorktreePath),

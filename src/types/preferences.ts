@@ -1120,6 +1120,7 @@ export interface AppPreferences {
   linear_api_key: string | null // Global Linear personal API key (inherited by all projects)
   outline_api_key: string | null // Global Outline API token (inherited by all projects)
   outline_url: string | null // Outline instance base URL, e.g. https://docs.example.com
+  reference_picker_extra_prune_dirs: string[] // Extra dir names excluded from the @-reference picker (merged with built-in defaults)
   magic_models_auto_initialized: boolean // Whether magic prompt models were auto-set based on installed backends
   claude_cli_source: 'jean' | 'path' // Claude CLI source: 'jean' (managed) or 'path' (system PATH)
   codex_cli_source: 'jean' | 'path' // Codex CLI source: 'jean' (managed) or 'path' (system PATH)
@@ -1972,6 +1973,7 @@ export const defaultPreferences: AppPreferences = {
   linear_api_key: null, // Default: no global Linear API key
   outline_api_key: null, // Default: no global Outline API token
   outline_url: null, // Default: no Outline instance URL
+  reference_picker_extra_prune_dirs: [], // Default: only built-in prune dirs
   magic_models_auto_initialized: false, // Default: not yet auto-set
   claude_cli_source: 'jean', // Default: Jean-managed
   codex_cli_source: 'jean', // Default: Jean-managed

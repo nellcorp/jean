@@ -16,6 +16,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Button } from '@/components/ui/button'
 import { BackendLabel } from '@/components/ui/backend-label'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Command,
   CommandEmpty,
@@ -3932,6 +3933,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               patchPreferences={patchPreferences}
             />
 
+            <ReferencePickerPruneField
+              preferences={preferences}
+              patchPreferences={patchPreferences}
+            />
+
             <InlineField
               label="Allow web tools in plan mode"
               description="WebFetch/WebSearch for Claude, --search for Codex"
@@ -4594,6 +4600,59 @@ const AiLanguageField: FC<{
           )}
           Save
         </Button>
+      </div>
+    </InlineField>
+  )
+}
+
+const ReferencePickerPruneField: FC<{
+  preferences: AppPreferences | undefined
+  patchPreferences: ReturnType<typeof usePatchPreferences>
+}> = ({ preferences, patchPreferences }) => {
+  const saved = preferences?.reference_picker_extra_prune_dirs ?? []
+  const [localValue, setLocalValue] = useState(saved.join('\n'))
+
+  const parsed = localValue
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean)
+
+  const hasChanges = parsed.join('\n') !== saved.join('\n')
+
+  const handleSave = useCallback(() => {
+    if (!preferences) return
+    const dirs = localValue
+      .split('\n')
+      .map(s => s.trim())
+      .filter(Boolean)
+    patchPreferences.mutate({ reference_picker_extra_prune_dirs: dirs })
+  }, [preferences, patchPreferences, localValue])
+
+  return (
+    <InlineField
+      label="File reference — extra excluded folders"
+      description="Folder names to hide from the @-file picker, one per line. Merged with the built-in defaults (node_modules, target, dist, .next, .venv, vendor, …). Gitignored files elsewhere stay referenceable."
+    >
+      <div className="flex flex-col gap-2">
+        <Textarea
+          className="w-full font-mono text-sm"
+          rows={4}
+          placeholder={'e.g.\nfixtures\ntmp\n.cache'}
+          value={localValue}
+          onChange={e => setLocalValue(e.target.value)}
+        />
+        <div>
+          <Button
+            size="sm"
+            onClick={handleSave}
+            disabled={!hasChanges || patchPreferences.isPending}
+          >
+            {patchPreferences.isPending && (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            )}
+            Save
+          </Button>
+        </div>
       </div>
     </InlineField>
   )
