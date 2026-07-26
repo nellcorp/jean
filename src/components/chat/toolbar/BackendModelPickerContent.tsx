@@ -16,11 +16,15 @@ import { Kbd } from '@/components/ui/kbd'
 import { toast } from 'sonner'
 import type { CliBackend, CustomCliProfile } from '@/types/preferences'
 import { usePatchPreferences, usePreferences } from '@/services/preferences'
-import { useAvailableOpencodeModels } from '@/services/opencode-cli'
+import {
+  useAvailableOpencodeModels,
+  useRefreshOpencodeModels,
+} from '@/services/opencode-cli'
 import { useAvailableCursorModels } from '@/services/cursor-cli'
 import { useAvailablePiModels } from '@/services/pi-cli'
 import { useAvailableCommandCodeModels } from '@/services/commandcode-cli'
 import { useAvailableGrokModels } from '@/services/grok-cli'
+import { useAvailableKimiModels } from '@/services/kimi-cli'
 import {
   getCatalogModelFastInfo,
   useModelCatalog,
@@ -40,6 +44,7 @@ import {
 } from '@/components/chat/toolbar/toolbar-utils'
 import { useToolbarDerivedState } from '@/components/chat/toolbar/useToolbarDerivedState'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { getModifierSymbol } from '@/lib/platform'
 
 interface BackendModelPickerContentProps {
   open: boolean
@@ -82,10 +87,9 @@ export function BackendModelPickerContent({
   const [highlightedValue, setHighlightedValue] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
   const isMobile = useIsMobile()
-  const isApplePlatform =
-    typeof navigator !== 'undefined' &&
-    /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '')
-  const fastShortcutLabel = isApplePlatform ? '⌘F' : 'Ctrl F'
+  const fastModifier = getModifierSymbol()
+  const fastShortcutLabel =
+    fastModifier === 'Ctrl' ? 'Ctrl F' : `${fastModifier}F`
 
   // Sessions with messages can now switch backends because the backend gets a
   // hidden Jean-local handoff prompt on provider changes.
@@ -94,6 +98,7 @@ export function BackendModelPickerContent({
   const { data: prefs } = usePreferences()
   const { data: modelCatalog } = useModelCatalog()
   const refreshModelCatalog = useRefreshModelCatalog()
+  const refreshOpencodeModels = useRefreshOpencodeModels()
   const patchPreferences = usePatchPreferences()
   const favoriteModels = useMemo(
     () => prefs?.favorite_models ?? [],
@@ -151,6 +156,9 @@ export function BackendModelPickerContent({
   const { data: availableGrokModels } = useAvailableGrokModels({
     enabled: installedBackends.includes('grok'),
   })
+  const { data: availableKimiModels } = useAvailableKimiModels({
+    enabled: installedBackends.includes('kimi'),
+  })
 
   const opencodeModelOptions = useMemo(() => {
     if (opencodeModelsError) return []
@@ -161,10 +169,12 @@ export function BackendModelPickerContent({
   }, [availableOpencodeModels, opencodeModelsError])
   const cursorModelOptions = useMemo(
     () =>
-      availableCursorModels?.map(model => ({
-        value: `cursor/${model.id}`,
-        label: model.label || formatCursorModelLabel(model.id),
-      })),
+      availableCursorModels?.length
+        ? availableCursorModels.map(model => ({
+            value: `cursor/${model.id}`,
+            label: model.label || formatCursorModelLabel(model.id),
+          }))
+        : undefined,
     [availableCursorModels]
   )
   const piModelOptions = useMemo(
@@ -192,6 +202,14 @@ export function BackendModelPickerContent({
       })),
     [availableGrokModels]
   )
+  const kimiModelOptions = useMemo(
+    () =>
+      availableKimiModels?.map(model => ({
+        value: `kimi/${model.id}`,
+        label: model.label,
+      })),
+    [availableKimiModels]
+  )
 
   const { backendModelSections: baseBackendModelSections } =
     useToolbarDerivedState({
@@ -203,6 +221,7 @@ export function BackendModelPickerContent({
       piModelOptions,
       commandcodeModelOptions,
       grokModelOptions,
+      kimiModelOptions,
       customCliProfiles,
       installedBackends,
     })
@@ -228,16 +247,19 @@ export function BackendModelPickerContent({
 
   const showSidebar = sidebarBackends.length > 1
 
-  // Sync active backend with locked selection / when picker opens
+  // Sync active backend with locked selection / when picker opens.
+  // Never leave activeBackend on an uninstalled backend (empty model list).
   useEffect(() => {
     if (!open) return
     if (isLocked) {
       setActiveBackend(selectedBackend)
-    } else {
-      setActiveBackend(prev =>
-        sidebarBackends.includes(prev) ? prev : selectedBackend
-      )
+      return
     }
+    setActiveBackend(prev => {
+      if (sidebarBackends.includes(prev)) return prev
+      if (sidebarBackends.includes(selectedBackend)) return selectedBackend
+      return sidebarBackends[0] ?? selectedBackend
+    })
   }, [open, isLocked, selectedBackend, sidebarBackends])
 
   // Reset search whenever active backend changes or picker opens
@@ -364,16 +386,20 @@ export function BackendModelPickerContent({
     [isLocked, selectedBackend]
   )
 
-  const handleRefreshModelCatalog = useCallback(async () => {
+  const handleRefreshModels = useCallback(async () => {
     const toastId = toast.loading('Refreshing model list...')
 
     try {
-      await refreshModelCatalog.mutateAsync()
+      if (activeBackend === 'opencode') {
+        await refreshOpencodeModels.mutateAsync()
+      } else {
+        await refreshModelCatalog.mutateAsync()
+      }
       toast.success('Model list refreshed', { id: toastId })
     } catch (error) {
       toast.error(`Failed to refresh model list: ${error}`, { id: toastId })
     }
-  }, [refreshModelCatalog])
+  }, [activeBackend, refreshModelCatalog, refreshOpencodeModels])
 
   const handleUseHighlightedFastMode = useCallback(() => {
     if (!highlightedOption) return false
@@ -446,8 +472,15 @@ export function BackendModelPickerContent({
     searchPlaceholder ??
     `Search ${getBackendPlainLabel(activeBackend)} models...`
 
-  const canRefreshModelCatalog =
-    activeBackend === 'claude' || activeBackend === 'codex'
+  // Claude/Codex use the CDN model catalog; OpenCode refreshes via CLI.
+  const canRefreshModels =
+    activeBackend === 'claude' ||
+    activeBackend === 'codex' ||
+    activeBackend === 'opencode'
+  const isRefreshingModels =
+    activeBackend === 'opencode'
+      ? refreshOpencodeModels.isPending
+      : refreshModelCatalog.isPending
 
   const sidebar = showSidebar ? (
     <SidebarBackends
@@ -475,6 +508,7 @@ export function BackendModelPickerContent({
             <Input
               ref={searchInputRef}
               value={search}
+              spellCheck={false}
               onChange={event => setSearch(event.target.value)}
               onKeyDown={event => {
                 if (event.key === 'Escape') {
@@ -485,22 +519,22 @@ export function BackendModelPickerContent({
               placeholder={placeholder}
               className="h-9 text-base md:text-sm"
             />
-            {canRefreshModelCatalog && (
+            {canRefreshModels && (
               <button
                 type="button"
                 aria-label="Refresh model list"
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-input text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-                disabled={refreshModelCatalog.isPending}
+                disabled={isRefreshingModels}
                 onClick={event => {
                   event.preventDefault()
                   event.stopPropagation()
-                  void handleRefreshModelCatalog()
+                  void handleRefreshModels()
                 }}
               >
                 <RefreshCw
                   className={cn(
                     'h-4 w-4',
-                    refreshModelCatalog.isPending && 'animate-spin'
+                    isRefreshingModels && 'animate-spin'
                   )}
                 />
               </button>
@@ -694,10 +728,7 @@ function SidebarBackends({
   onSelect: (backend: CliBackend) => void
 }) {
   const isVertical = orientation === 'vertical'
-  const isMac =
-    typeof navigator !== 'undefined' &&
-    /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '')
-  const modKey = isMac ? '⌘' : '⌃'
+  const modKey = getModifierSymbol()
   const showHints = isVertical && backends.length > 1
 
   return (

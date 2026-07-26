@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { usePreferences } from '@/services/preferences'
 import { useChatStore } from '@/store/chat-store'
+import { useVisibilityAwareTicker } from '@/hooks/useVisibilityAwareTicker'
 import {
   FileText,
   Edit,
@@ -41,12 +42,137 @@ import {
 } from '@/components/ui/collapsible'
 import { InlineFileDiff } from './InlineFileDiff'
 
-function shouldRenderRawOutput(toolCall: ToolCall): boolean {
+/** Placeholder outputs that add no value next to already-rendered tool details. */
+function isPlaceholderToolOutput(output: string | undefined | null): boolean {
+  if (!output) return true
+  const trimmed = output.trim().toLowerCase()
   return (
-    Boolean(toolCall.output) &&
-    toolCall.name !== 'FileChange' &&
-    toolCall.name !== 'Monitor'
+    trimmed === '' ||
+    trimmed === 'completed' ||
+    trimmed === 'ok' ||
+    trimmed === 'success' ||
+    trimmed === 'context compacted'
   )
+}
+
+function shouldRenderRawOutput(toolCall: ToolCall): boolean {
+  if (!toolCall.output?.trim()) return false
+  // These tools already surface output (results/path/etc.) in expandedContent.
+  if (
+    toolCall.name === 'FileChange' ||
+    toolCall.name === 'Monitor' ||
+    toolCall.name === 'CodexWebSearch' ||
+    toolCall.name === 'CodexImageView' ||
+    toolCall.name === 'CodexImageGeneration' ||
+    toolCall.name === 'CodexContextCompaction'
+  ) {
+    return false
+  }
+  return true
+}
+
+/** Best-effort one-line detail from common tool input fields. */
+function firstStringField(
+  input: Record<string, unknown>,
+  keys: string[]
+): string | undefined {
+  for (const key of keys) {
+    const value = input[key]
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return undefined
+}
+
+function formatCodexWebSearchDetail(
+  input: Record<string, unknown>
+): string | undefined {
+  const query = firstStringField(input, ['query'])
+  if (query) return query
+
+  const action =
+    input.action && typeof input.action === 'object'
+      ? (input.action as Record<string, unknown>)
+      : undefined
+  if (!action) return undefined
+
+  const actionType = typeof action.type === 'string' ? action.type : undefined
+  const actionQuery = firstStringField(action, ['query'])
+  if (actionQuery) return actionQuery
+
+  if (Array.isArray(action.queries)) {
+    const queries = action.queries.filter(
+      (q): q is string => typeof q === 'string' && q.trim().length > 0
+    )
+    if (queries.length > 0) return queries.join(', ')
+  }
+
+  const url = firstStringField(action, ['url'])
+  if (url) {
+    return actionType === 'findInPage' || actionType === 'find_in_page'
+      ? firstStringField(action, ['pattern'])
+        ? `${firstStringField(action, ['pattern'])} in ${url}`
+        : url
+      : url
+  }
+
+  const pattern = firstStringField(action, ['pattern'])
+  if (pattern) return pattern
+
+  return undefined
+}
+
+function formatCodexWebSearchExpanded(
+  input: Record<string, unknown>,
+  output: string | undefined
+): string {
+  const parts: string[] = []
+  const query = firstStringField(input, ['query'])
+  if (query) parts.push(`Query: ${query}`)
+
+  const action =
+    input.action && typeof input.action === 'object'
+      ? (input.action as Record<string, unknown>)
+      : undefined
+  if (action) {
+    const actionType = typeof action.type === 'string' ? action.type : 'action'
+    const actionBits: string[] = [`Action: ${actionType}`]
+    const actionQuery = firstStringField(action, ['query'])
+    if (actionQuery) actionBits.push(`query=${actionQuery}`)
+    if (Array.isArray(action.queries) && action.queries.length > 0) {
+      actionBits.push(
+        `queries=${action.queries
+          .filter((q): q is string => typeof q === 'string')
+          .join(', ')}`
+      )
+    }
+    const url = firstStringField(action, ['url'])
+    if (url) actionBits.push(`url=${url}`)
+    const pattern = firstStringField(action, ['pattern'])
+    if (pattern) actionBits.push(`pattern=${pattern}`)
+    parts.push(actionBits.join(' · '))
+  }
+
+  if (input.results != null) {
+    const resultsText =
+      typeof input.results === 'string'
+        ? input.results
+        : JSON.stringify(input.results, null, 2)
+    if (resultsText && resultsText !== 'null' && resultsText !== '[]') {
+      parts.push(`Results:\n${resultsText}`)
+    }
+  }
+
+  if (output && !isPlaceholderToolOutput(output)) {
+    // Avoid duplicating results already shown from input.results
+    if (!parts.some(p => p.includes(output))) {
+      parts.push(output)
+    }
+  }
+
+  if (parts.length === 0) {
+    return JSON.stringify(input, null, 2)
+  }
+  return parts.join('\n\n')
 }
 
 // Single source of truth for tool call row layout. Bump min-h-9/px-2.5 here, all rows update.
@@ -203,6 +329,8 @@ export function TaskCallInline({
   const subagentType = input.subagent_type as string | undefined
   const description = input.description as string | undefined
   const prompt = input.prompt as string | undefined
+  const report = taskToolCall.output?.trim() || undefined
+  const toolLabel = taskToolCall.name === 'Agent' ? 'Agent' : 'Task'
 
   return (
     <Collapsible
@@ -219,7 +347,7 @@ export function TaskCallInline({
         <CollapsibleTrigger className={TOOL_CALL_ROW_CLASS}>
           <Bot className="h-3.5 w-3.5 shrink-0" />
           <span className="font-medium shrink-0 whitespace-nowrap">
-            {subagentType ? `Task (${subagentType})` : 'Task'}
+            {subagentType ? `${toolLabel} (${subagentType})` : toolLabel}
           </span>
           {description && (
             <code className={TOOL_CALL_DETAIL_PILL_CLASS}>{description}</code>
@@ -259,7 +387,8 @@ export function TaskCallInline({
             {subToolCalls.length > 0 ? (
               <div className="space-y-1">
                 {subToolCalls.map(subTool =>
-                  subTool.name === 'Task' && allToolCalls ? (
+                  (subTool.name === 'Task' || subTool.name === 'Agent') &&
+                  allToolCalls ? (
                     <TaskCallInline
                       key={subTool.id}
                       taskToolCall={subTool}
@@ -283,6 +412,16 @@ export function TaskCallInline({
               <p className="text-xs text-muted-foreground/60 italic">
                 No sub-tools recorded
               </p>
+            )}
+            {/* Subagent final report returned to the parent agent */}
+            {report && (
+              <div className="space-y-1">
+                <div className="border-t border-border/30" />
+                <div className="text-xs text-muted-foreground/60">Report:</div>
+                <div className="max-h-64 overflow-y-auto text-xs text-foreground/80 bg-muted/50 rounded p-2">
+                  <Markdown variant="tool-call">{report}</Markdown>
+                </div>
+              </div>
             )}
           </div>
         </CollapsibleContent>
@@ -626,33 +765,94 @@ function formatWakeupDelay(seconds: number): string {
   return remMins > 0 ? `${hours}h ${remMins}m` : `${hours}h`
 }
 
-function normalizeCommandCodeToolForDisplay(
+export function normalizeToolCallForDisplay(
   name: string,
   input: Record<string, unknown>
 ): { name: string; input: Record<string, unknown> } {
-  switch (name) {
+  const variant = typeof input.variant === 'string' ? input.variant : undefined
+  const normalizedName = (() => {
+    switch (variant) {
+      case 'ReadFile':
+      case 'CursorRead':
+        return 'Read'
+      case 'Write':
+      case 'CursorWrite':
+        return 'Write'
+      case 'SearchReplace':
+      case 'CursorStrReplace':
+        return 'Edit'
+      case 'Bash':
+      case 'CursorShell':
+        return 'Bash'
+      case 'Grep':
+      case 'CursorGrep':
+        return 'Grep'
+      case 'CursorGlob':
+        return 'Glob'
+      case 'ListDir':
+        return 'List'
+      case 'TodoWrite':
+      case 'CursorTodoWrite':
+        return 'TodoWrite'
+      case 'Task':
+        return 'Task'
+      case 'TaskOutput':
+        return 'WaitForAgents'
+      case 'WebFetch':
+      case 'WebSearch':
+      case 'EnterPlanMode':
+      case 'ExitPlanMode':
+        return variant
+      default:
+        return name
+    }
+  })()
+
+  const withoutVariant = { ...input }
+  delete withoutVariant.variant
+
+  switch (normalizedName) {
     case 'read_file':
+    case 'Read':
       return {
         name: 'Read',
         input: {
-          ...input,
+          ...withoutVariant,
           file_path:
             input.file_path ??
+            input.target_file ??
             input.absolutePath ??
             input.filePath ??
             input.path,
         },
       }
     case 'write_file':
+    case 'Write':
       return {
         name: 'Write',
         input: {
-          ...input,
+          ...withoutVariant,
           file_path:
             input.file_path ??
+            input.target_file ??
             input.filePath ??
             input.absolutePath ??
             input.path,
+          content: input.content ?? input.contents,
+        },
+      }
+    case 'Edit':
+      return {
+        name: 'Edit',
+        input: {
+          ...withoutVariant,
+          file_path:
+            input.file_path ??
+            input.target_file ??
+            input.filePath ??
+            input.path,
+          old_string: input.old_string ?? input.oldText ?? input.old_text,
+          new_string: input.new_string ?? input.newText ?? input.new_text,
         },
       }
     case 'read_multiple_files':
@@ -668,28 +868,67 @@ function normalizeCommandCodeToolForDisplay(
     case 'read_directory':
       return { name: 'List', input }
     case 'glob':
-      return { name: 'Glob', input }
+    case 'Glob':
+      return {
+        name: 'Glob',
+        input: {
+          ...withoutVariant,
+          pattern: input.pattern ?? input.glob_pattern ?? input.glob,
+          path: input.path ?? input.target_directory ?? input.targetDirectory,
+        },
+      }
     case 'grep':
       return { name: 'Grep', input }
+    case 'List':
+      return {
+        name: 'List',
+        input: {
+          ...withoutVariant,
+          path: input.path ?? input.target_directory ?? input.targetDirectory,
+        },
+      }
+    case 'WaitForAgents':
+      return {
+        name: 'WaitForAgents',
+        input: {
+          ...withoutVariant,
+          receiver_thread_ids: input.receiver_thread_ids ?? input.task_ids,
+        },
+      }
     default:
-      return { name, input }
+      return { name: normalizedName, input: withoutVariant }
   }
 }
 
 function getToolSummaryName(name: string): string {
-  return normalizeCommandCodeToolForDisplay(name, {}).name
+  switch (name) {
+    case 'CodexWebSearch':
+      return 'Web Search'
+    case 'CodexImageGeneration':
+      return 'Image Generation'
+    case 'CodexImageView':
+      return 'Image View'
+    case 'CodexContextCompaction':
+      return 'Context Compaction'
+    default:
+      return normalizeToolCallForDisplay(name, {}).name
+  }
 }
 
 /** Live-ticking remaining seconds for a pending ScheduleWakeup. */
 function useWakeupRemaining(fireAtUnix: number | undefined): number | null {
   const [nowUnix, setNowUnix] = useState<number | null>(null)
+  const updateNow = useCallback(
+    () => setNowUnix(Math.floor(Date.now() / 1000)),
+    []
+  )
+
   useEffect(() => {
-    if (!fireAtUnix) return
-    const updateNow = () => setNowUnix(Math.floor(Date.now() / 1000))
-    updateNow()
-    const id = setInterval(updateNow, 1000)
-    return () => clearInterval(id)
+    if (!fireAtUnix) setNowUnix(null)
   }, [fireAtUnix])
+
+  useVisibilityAwareTicker(!!fireAtUnix, updateNow)
+
   if (!fireAtUnix) return null
   if (nowUnix === null) return null
   return Math.max(0, fireAtUnix - nowUnix)
@@ -736,7 +975,7 @@ function ScheduleWakeupCountdown({ toolCallId }: ScheduleWakeupIndicatorProps) {
 }
 
 function getToolDisplay(toolCall: ToolCall): ToolDisplay {
-  const normalized = normalizeCommandCodeToolForDisplay(
+  const normalized = normalizeToolCallForDisplay(
     toolCall.name,
     (toolCall.input ?? {}) as Record<string, unknown>
   )
@@ -926,7 +1165,8 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
     }
 
     case 'WaitForAgents': {
-      const receiverIds = input.receiver_thread_ids as string[] | undefined
+      const receiverIds = (input.receiver_thread_ids ??
+        input.receiverThreadIds) as string[] | undefined
       return {
         icon: <Clock className="h-4 w-4 shrink-0" />,
         label: 'Waiting for Agents',
@@ -944,6 +1184,64 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
         label: 'Close Agent',
         detail: agentId,
         expandedContent: JSON.stringify(input, null, 2),
+      }
+    }
+
+    case 'TodoWrite':
+    case 'todo_write':
+    case 'todowrite': {
+      const todos = (Array.isArray(input.todos) ? input.todos : []) as {
+        content?: string
+        activeForm?: string
+        status?: string
+      }[]
+      const completed = todos.filter(t => t.status === 'completed').length
+      return {
+        icon: <ListTodo className="h-4 w-4 shrink-0" />,
+        label: 'Tasks',
+        detail: todos.length ? `${completed}/${todos.length} done` : undefined,
+        expandedContent: todos.length ? (
+          <div className="space-y-1">
+            {todos.map((todo, index) => {
+              const text =
+                todo.status === 'in_progress'
+                  ? (todo.activeForm ?? todo.content ?? '')
+                  : (todo.content ?? '')
+              const done = todo.status === 'completed'
+              const cancelled = todo.status === 'cancelled'
+              const active = todo.status === 'in_progress'
+              return (
+                <div
+                  key={`${text}-${index}`}
+                  className="flex items-center gap-1.5"
+                >
+                  {done ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-green-500" />
+                  ) : cancelled ? (
+                    <XCircle className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                  ) : active ? (
+                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+                  ) : (
+                    <Circle className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
+                  )}
+                  <span
+                    className={
+                      done
+                        ? 'line-through text-muted-foreground/60'
+                        : cancelled
+                          ? 'text-muted-foreground/60'
+                          : ''
+                    }
+                  >
+                    {text}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          'No items'
+        ),
       }
     }
 
@@ -1158,40 +1456,76 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
     }
 
     case 'CodexWebSearch': {
-      const query = input.query as string | undefined
+      const detail = formatCodexWebSearchDetail(input)
       return {
         icon: <Globe className="h-4 w-4 shrink-0" />,
         label: 'Web Search',
-        detail: query,
-        expandedContent: toolCall.output ?? JSON.stringify(input, null, 2),
+        detail,
+        expandedContent: formatCodexWebSearchExpanded(input, toolCall.output),
       }
     }
 
     case 'CodexImageGeneration': {
-      const prompt = input.prompt as string | undefined
+      const prompt =
+        firstStringField(input, [
+          'prompt',
+          'revised_prompt',
+          'revisedPrompt',
+        ]) ?? undefined
+      const savedPath = firstStringField(input, [
+        'saved_path',
+        'savedPath',
+        'path',
+      ])
+      const status = firstStringField(input, ['status'])
+      const detail = prompt ?? savedPath ?? status
+      const parts: string[] = []
+      if (prompt) parts.push(`Prompt: ${prompt}`)
+      if (savedPath) parts.push(`Saved: ${savedPath}`)
+      if (status) parts.push(`Status: ${status}`)
+      if (
+        toolCall.output &&
+        !isPlaceholderToolOutput(toolCall.output) &&
+        toolCall.output !== savedPath
+      ) {
+        parts.push(toolCall.output)
+      }
       return {
         icon: <ImageIcon className="h-4 w-4 shrink-0" />,
         label: 'Image Generation',
-        detail: prompt,
-        expandedContent: toolCall.output ?? JSON.stringify(input, null, 2),
+        detail,
+        expandedContent:
+          parts.length > 0 ? parts.join('\n') : JSON.stringify(input, null, 2),
       }
     }
 
     case 'CodexImageView': {
+      const path = firstStringField(input, ['path', 'file_path', 'filePath'])
+      const filename = path ? getFilename(path) : undefined
       return {
         icon: <ImageIcon className="h-4 w-4 shrink-0" />,
         label: 'Image View',
-        detail: undefined,
-        expandedContent: toolCall.output ?? JSON.stringify(input, null, 2),
+        detail: filename ?? path,
+        filePath: path,
+        expandedContent:
+          path ??
+          (toolCall.output && !isPlaceholderToolOutput(toolCall.output)
+            ? toolCall.output
+            : JSON.stringify(input, null, 2)),
       }
     }
 
     case 'CodexContextCompaction': {
+      const summary = firstStringField(input, ['summary'])
       return {
         icon: <Layers className="h-4 w-4 shrink-0" />,
         label: 'Context Compaction',
-        detail: undefined,
-        expandedContent: toolCall.output ?? JSON.stringify(input, null, 2),
+        detail: summary ? summary.slice(0, 60) : undefined,
+        expandedContent:
+          summary ??
+          (toolCall.output && !isPlaceholderToolOutput(toolCall.output)
+            ? toolCall.output
+            : 'Context compacted'),
       }
     }
 
@@ -1278,14 +1612,35 @@ function getToolDisplay(toolCall: ToolCall): ToolDisplay {
     }
 
     default: {
-      const isMcpTool = normalized.name.startsWith('mcp__')
+      const isMcpTool =
+        normalized.name.startsWith('mcp__') ||
+        normalized.name.startsWith('mcp:')
+      // Surface something useful even for tools without a dedicated renderer.
+      const detail = firstStringField(input, [
+        'query',
+        'command',
+        'path',
+        'file_path',
+        'filePath',
+        'url',
+        'pattern',
+        'description',
+        'prompt',
+        'title',
+        'name',
+      ])
+      const expanded = toolCall.output?.trim()
+        ? toolCall.output
+        : Object.keys(input).length > 0
+          ? JSON.stringify(input, null, 2)
+          : 'No details available'
       return {
         icon: <Terminal className="h-4 w-4 shrink-0" />,
         label: isMcpTool
           ? normalized.name
           : `${normalized.name} (unhandled tool)`,
-        detail: undefined,
-        expandedContent: JSON.stringify(input, null, 2),
+        detail,
+        expandedContent: expanded,
       }
     }
   }

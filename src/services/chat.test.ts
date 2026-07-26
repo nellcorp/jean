@@ -7,6 +7,7 @@ vi.mock('@/lib/transport', () => ({
 
 vi.mock('@/lib/environment', () => ({
   hasBackend: () => true,
+  hasBackendTransport: () => true,
 }))
 
 vi.mock('@/lib/terminal-instances', () => ({
@@ -17,7 +18,13 @@ vi.mock('sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }))
 
-import { prefetchSessions, reconnectNativeCliSession } from './chat'
+import {
+  canReconnectSession,
+  isSessionRemovalNavigationUnchanged,
+  prefetchSessions,
+  reconnectNativeCliSession,
+} from './chat'
+import { preserveQueryCacheOnError } from '@/lib/query-error'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import { useTerminalStore } from '@/store/terminal-store'
@@ -25,10 +32,58 @@ import { toast } from 'sonner'
 import { disposeTerminal } from '@/lib/terminal-instances'
 import type { Session } from '@/types/chat'
 
+describe('session removal navigation guard', () => {
+  const navigation = {
+    activeWorktreeId: 'wt-1',
+    activeWorktreePath: '/tmp/wt-1',
+    activeSessionId: 'session-1',
+    selectedProjectId: 'project-1',
+    selectedWorktreeId: 'wt-1',
+  }
+
+  it('allows navigation when selection has not changed', () => {
+    expect(
+      isSessionRemovalNavigationUnchanged(navigation, { ...navigation })
+    ).toBe(true)
+  })
+
+  it('blocks delayed navigation after the user selects another session', () => {
+    expect(
+      isSessionRemovalNavigationUnchanged(navigation, {
+        ...navigation,
+        activeSessionId: 'session-2',
+      })
+    ).toBe(false)
+  })
+
+  it('blocks delayed navigation after the user selects another project', () => {
+    expect(
+      isSessionRemovalNavigationUnchanged(navigation, {
+        ...navigation,
+        selectedProjectId: 'project-2',
+      })
+    ).toBe(false)
+  })
+})
+
 const toastMock = toast as unknown as {
   success: ReturnType<typeof vi.fn>
   error: ReturnType<typeof vi.fn>
 }
+
+describe('transient WebSocket query failures', () => {
+  it('rethrows disconnects so TanStack Query preserves cached session data', () => {
+    const error = new Error('WebSocket disconnected')
+
+    expect(() => preserveQueryCacheOnError(error)).toThrow(error)
+  })
+
+  it('does not convert other load failures into empty session data', () => {
+    const error = new Error('session file is invalid')
+
+    expect(() => preserveQueryCacheOnError(error)).toThrow(error)
+  })
+})
 
 describe('prefetchSessions', () => {
   beforeEach(() => {
@@ -135,6 +190,42 @@ describe('reconnectNativeCliSession', () => {
     // Resumes the same Claude conversation via --resume <id>.
     expect(terminal?.command).toBe('/usr/local/bin/claude')
     expect(terminal?.commandArgs).toEqual(['--resume', 'abc123'])
+  })
+
+  it('preserves native CLI global flags when resuming', async () => {
+    await reconnectNativeCliSession(
+      {
+        ...terminalSession,
+        terminal_command_args: [
+          '--permission-mode',
+          'bypassPermissions',
+          '--session-id',
+          'abc123',
+        ],
+      },
+      'wt-1'
+    )
+
+    const terminalId = useUIStore.getState().sessionTerminalIds['session-1']
+    const terminal = useTerminalStore
+      .getState()
+      .terminals['wt-1']?.find(t => t.id === terminalId)
+    expect(terminal?.commandArgs).toEqual([
+      '--permission-mode',
+      'bypassPermissions',
+      '--resume',
+      'abc123',
+    ])
+  })
+
+  it('refuses to reconnect native sessions without a persisted resume ID', () => {
+    expect(
+      canReconnectSession({
+        ...terminalSession,
+        claude_session_id: undefined,
+        terminal_command_args: ['--permission-mode', 'bypassPermissions'],
+      })
+    ).toBe(false)
   })
 
   it('opens the modal drawer and toasts by default (manual reconnect)', async () => {

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
+import type { CliType } from '@/lib/cli-update'
 
 export type PreferencePane =
   | 'general'
@@ -10,6 +11,7 @@ export type PreferencePane =
   | 'pi'
   | 'commandcode'
   | 'grok'
+  | 'kimi'
   | 'github'
   | 'coderabbit'
   | 'appearance'
@@ -46,7 +48,25 @@ export type CliUpdateModalType =
   | 'coderabbit'
   | 'commandcode'
   | 'grok'
+  | 'kimi'
   | null
+
+export interface PendingCliUpdate {
+  type: CliType
+  currentVersion: string
+  latestVersion: string
+  cliSource?: 'jean' | 'path'
+  cliPath?: string | null
+  packageManager?: string | null
+}
+
+/** Sticky jean-server update offer for remote / Web Access clients. */
+export interface PendingServerUpdate {
+  latestVersion: string
+  currentVersion: string
+  canUpdate: boolean
+  reason?: string | null
+}
 
 export type CliLoginModalType =
   | 'claude'
@@ -57,6 +77,7 @@ export type CliLoginModalType =
   | 'pi'
   | 'commandcode'
   | 'grok'
+  | 'kimi'
   | 'coderabbit'
   | null
 
@@ -80,7 +101,15 @@ interface UIState {
   magicModalOpen: boolean
   resolveConflictsDialogOpen: boolean
   newWorktreeModalOpen: boolean
-  newWorktreeModalDefaultTab: 'quick' | 'issues' | 'prs' | 'security' | null
+  newWorktreeModalDefaultTab:
+    | 'quick'
+    | 'issues'
+    | 'prs'
+    | 'security'
+    | 'branches'
+    | 'linear'
+    | 'sentry'
+    | null
   releaseNotesModalOpen: boolean
   updatePrModalOpen: boolean
   reviewCommentsModalOpen: boolean
@@ -104,6 +133,8 @@ interface UIState {
   autoInvestigateAdvisoryWorktreeIds: Set<string>
   /** Worktree IDs that should auto-trigger investigate-linear-issue when created */
   autoInvestigateLinearIssueWorktreeIds: Set<string>
+  /** Worktree IDs that should auto-trigger Sentry issue investigation */
+  autoInvestigateSentryIssueWorktreeIds: Set<string>
   /** Counter for background worktree creations (CMD+Click) — skip auto-navigation */
   pendingBackgroundCreations: number
   /** Worktree IDs that should auto-open first session modal when canvas mounts */
@@ -141,6 +172,20 @@ interface UIState {
   pendingUpdateVersion: string | null
   /** When non-null, shows the update available modal */
   updateModalVersion: string | null
+  /**
+   * App update package installed but not applied yet — title bar shows Restart.
+   * Prevents re-download loops while the old binary is still running (#507).
+   */
+  updateReadyVersion: string | null
+  /** True while downloadAndInstall is in progress */
+  isUpdateInstalling: boolean
+  /**
+   * Pending jean-server update (remote / Web Access) — sticky title-bar
+   * indicator so dismissing the toast does not lose the offer.
+   */
+  pendingServerUpdate: PendingServerUpdate | null
+  /** CLI updates detected — shown as badge+popover in title bar */
+  availableCliUpdates: PendingCliUpdate[]
   toggleLeftSidebar: () => void
   setLeftSidebarVisible: (visible: boolean) => void
   setLeftSidebarSize: (size: number) => void
@@ -167,7 +212,15 @@ interface UIState {
   setResolveConflictsDialogOpen: (open: boolean) => void
   setNewWorktreeModalOpen: (open: boolean) => void
   setNewWorktreeModalDefaultTab: (
-    tab: 'quick' | 'issues' | 'prs' | 'security' | null
+    tab:
+      | 'quick'
+      | 'issues'
+      | 'prs'
+      | 'security'
+      | 'branches'
+      | 'linear'
+      | 'sentry'
+      | null
   ) => void
   setReleaseNotesModalOpen: (open: boolean) => void
   setUpdatePrModalOpen: (open: boolean) => void
@@ -198,6 +251,8 @@ interface UIState {
   consumeAutoInvestigateAdvisory: (worktreeId: string) => boolean
   markWorktreeForAutoInvestigateLinearIssue: (worktreeId: string) => void
   consumeAutoInvestigateLinearIssue: (worktreeId: string) => boolean
+  markWorktreeForAutoInvestigateSentryIssue: (worktreeId: string) => void
+  consumeAutoInvestigateSentryIssue: (worktreeId: string) => boolean
   markWorktreeForAutoOpenSession: (
     worktreeId: string,
     sessionId?: string
@@ -226,6 +281,11 @@ interface UIState {
   setUIStateInitialized: (initialized: boolean) => void
   setPendingUpdateVersion: (version: string | null) => void
   setUpdateModalVersion: (version: string | null) => void
+  setUpdateReadyVersion: (version: string | null) => void
+  setIsUpdateInstalling: (installing: boolean) => void
+  setPendingServerUpdate: (update: PendingServerUpdate | null) => void
+  setAvailableCliUpdates: (updates: PendingCliUpdate[]) => void
+  dismissCliUpdateNotice: (type: PendingCliUpdate['type']) => void
   chatSearchOpen: boolean
   setChatSearchOpen: (open: boolean) => void
   githubDashboardOpen: boolean
@@ -281,6 +341,7 @@ export const useUIStore = create<UIState>()(
       autoInvestigateSecurityAlertWorktreeIds: new Set(),
       autoInvestigateAdvisoryWorktreeIds: new Set(),
       autoInvestigateLinearIssueWorktreeIds: new Set(),
+      autoInvestigateSentryIssueWorktreeIds: new Set(),
       pendingBackgroundCreations: 0,
       autoOpenSessionWorktreeIds: new Set(),
       pendingAutoOpenSessionIds: {},
@@ -299,6 +360,10 @@ export const useUIStore = create<UIState>()(
       uiStateInitialized: false,
       pendingUpdateVersion: null,
       updateModalVersion: null,
+      updateReadyVersion: null,
+      isUpdateInstalling: false,
+      pendingServerUpdate: null,
+      availableCliUpdates: [],
       chatSearchOpen: false,
       githubDashboardOpen: false,
       toggleLeftSidebar: () =>
@@ -751,6 +816,39 @@ export const useUIStore = create<UIState>()(
         return false
       },
 
+      markWorktreeForAutoInvestigateSentryIssue: worktreeId =>
+        set(
+          state => {
+            if (state.autoInvestigateSentryIssueWorktreeIds.has(worktreeId)) {
+              return state
+            }
+            return {
+              autoInvestigateSentryIssueWorktreeIds: new Set([
+                ...state.autoInvestigateSentryIssueWorktreeIds,
+                worktreeId,
+              ]),
+            }
+          },
+          undefined,
+          'markWorktreeForAutoInvestigateSentryIssue'
+        ),
+
+      consumeAutoInvestigateSentryIssue: worktreeId => {
+        if (!get().autoInvestigateSentryIssueWorktreeIds.has(worktreeId)) {
+          return false
+        }
+        set(
+          state => {
+            const next = new Set(state.autoInvestigateSentryIssueWorktreeIds)
+            next.delete(worktreeId)
+            return { autoInvestigateSentryIssueWorktreeIds: next }
+          },
+          undefined,
+          'consumeAutoInvestigateSentryIssue'
+        )
+        return true
+      },
+
       markWorktreeForAutoOpenSession: (worktreeId, sessionId) =>
         set(
           state => {
@@ -1001,6 +1099,66 @@ export const useUIStore = create<UIState>()(
               : { updateModalVersion: version },
           undefined,
           'setUpdateModalVersion'
+        ),
+
+      setUpdateReadyVersion: (version: string | null) =>
+        set(
+          state =>
+            state.updateReadyVersion === version
+              ? state
+              : { updateReadyVersion: version },
+          undefined,
+          'setUpdateReadyVersion'
+        ),
+
+      setIsUpdateInstalling: (installing: boolean) =>
+        set(
+          state =>
+            state.isUpdateInstalling === installing
+              ? state
+              : { isUpdateInstalling: installing },
+          undefined,
+          'setIsUpdateInstalling'
+        ),
+
+      setPendingServerUpdate: (update: PendingServerUpdate | null) =>
+        set(
+          state => {
+            const prev = state.pendingServerUpdate
+            if (prev === update) return state
+            if (
+              prev &&
+              update &&
+              prev.latestVersion === update.latestVersion &&
+              prev.currentVersion === update.currentVersion &&
+              prev.canUpdate === update.canUpdate &&
+              prev.reason === update.reason
+            ) {
+              return state
+            }
+            if (!prev && !update) return state
+            return { pendingServerUpdate: update }
+          },
+          undefined,
+          'setPendingServerUpdate'
+        ),
+
+      setAvailableCliUpdates: (updates: PendingCliUpdate[]) =>
+        set(
+          { availableCliUpdates: updates },
+          undefined,
+          'setAvailableCliUpdates'
+        ),
+
+      dismissCliUpdateNotice: (type: PendingCliUpdate['type']) =>
+        set(
+          state => ({
+            availableCliUpdates: state.availableCliUpdates.filter(
+              u => u.type !== type
+            ),
+          }),
+          undefined,
+          'dismissCliUpdateNotice'
         ),
 
       setChatSearchOpen: (open: boolean) =>

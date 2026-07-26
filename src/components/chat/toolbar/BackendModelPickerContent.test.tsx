@@ -20,15 +20,15 @@ vi.stubGlobal('ResizeObserver', ResizeObserverMock)
 HTMLCanvasElement.prototype.getContext = vi.fn(() => null)
 Element.prototype.scrollIntoView = vi.fn()
 
+const refreshOpencodeModelsMutateAsync = vi.fn()
+
 vi.mock('@/services/opencode-cli', () => ({
   useAvailableOpencodeModels: () => ({
     data: ['openai/gpt-5.4', 'groq/compound-mini'],
   }),
-}))
-
-vi.mock('@/services/cursor-cli', () => ({
-  useAvailableCursorModels: () => ({
-    data: [{ id: 'auto', label: 'Auto' }],
+  useRefreshOpencodeModels: () => ({
+    mutateAsync: refreshOpencodeModelsMutateAsync,
+    isPending: false,
   }),
 }))
 
@@ -41,6 +41,15 @@ vi.mock('@/services/commandcode-cli', () => ({
 const patchPreferencesMutate = vi.fn()
 let mockFavoriteModels: string[] = []
 let mockFastModeModels: string[] = []
+let mockCursorModels: { id: string; label: string }[] = [
+  { id: 'auto', label: 'Auto' },
+]
+
+vi.mock('@/services/cursor-cli', () => ({
+  useAvailableCursorModels: () => ({
+    data: mockCursorModels,
+  }),
+}))
 
 vi.mock('@/services/preferences', () => ({
   usePreferences: () => ({
@@ -55,7 +64,10 @@ vi.mock('@/services/preferences', () => ({
 beforeEach(() => {
   mockFavoriteModels = []
   mockFastModeModels = []
+  mockCursorModels = [{ id: 'auto', label: 'Auto' }]
   patchPreferencesMutate.mockClear()
+  refreshOpencodeModelsMutateAsync.mockReset()
+  refreshOpencodeModelsMutateAsync.mockResolvedValue(['openai/gpt-5.4'])
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation(() => ({
@@ -95,6 +107,52 @@ describe('BackendModelPickerContent', () => {
     expect(
       screen.getByRole('button', { name: /refresh model list/i })
     ).toBeInTheDocument()
+  })
+
+  it('shows a manual refresh button for OpenCode CLI model lists', async () => {
+    const user = userEvent.setup()
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="opencode"
+        selectedModel="openai/gpt-5.4"
+        selectedProvider={null}
+        installedBackends={['claude', 'codex', 'opencode']}
+        customCliProfiles={[]}
+        onModelChange={vi.fn()}
+        onBackendModelChange={vi.fn()}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    const refreshButton = screen.getByRole('button', {
+      name: /refresh model list/i,
+    })
+    expect(refreshButton).toBeInTheDocument()
+
+    await user.click(refreshButton)
+    expect(refreshOpencodeModelsMutateAsync).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not show a refresh button for Cursor model lists', () => {
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="cursor"
+        selectedModel="cursor/auto"
+        selectedProvider={null}
+        installedBackends={['cursor']}
+        customCliProfiles={[]}
+        onModelChange={vi.fn()}
+        onBackendModelChange={vi.fn()}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    expect(
+      screen.queryByRole('button', { name: /refresh model list/i })
+    ).not.toBeInTheDocument()
   })
   it('keeps Claude 1M variants plus standard models', () => {
     render(
@@ -177,6 +235,27 @@ describe('BackendModelPickerContent', () => {
     expect(cursorTab.querySelector('.bg-yellow-500')).toBeNull()
     expect(commandCodeTab.querySelector('.bg-yellow-500')).not.toBeNull()
     expect(grokTab.querySelector('.bg-yellow-500')).not.toBeNull()
+  })
+
+  it('keeps the Cursor fallback model when web access caches an empty model list', () => {
+    mockCursorModels = []
+
+    render(
+      <BackendModelPickerContent
+        open
+        selectedBackend="cursor"
+        selectedModel="cursor/auto"
+        selectedProvider={null}
+        installedBackends={['cursor']}
+        customCliProfiles={[]}
+        onModelChange={vi.fn()}
+        onBackendModelChange={vi.fn()}
+        onRequestClose={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText('Auto')).toBeInTheDocument()
+    expect(screen.queryByText('No Cursor models found.')).toBeNull()
   })
 
   it('does not add an empty custom Command Code model option', async () => {
@@ -532,9 +611,9 @@ describe('BackendModelPickerContent', () => {
     await user.keyboard('{Meta>}f{/Meta}')
 
     expect(patchPreferencesMutate).toHaveBeenCalledWith({
-      fast_mode_models: ['codex:gpt-5.4'],
+      fast_mode_models: ['codex:gpt-5.6-sol'],
     })
-    expect(onModelChange).toHaveBeenCalledWith('gpt-5.4-fast')
+    expect(onModelChange).toHaveBeenCalledWith('gpt-5.6-sol-fast')
     expect(onRequestClose).toHaveBeenCalled()
   })
 

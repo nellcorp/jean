@@ -6,6 +6,16 @@ const readSource = (path: string) =>
   readFileSync(join(process.cwd(), path), 'utf8')
 
 describe('terminal primary surface modal regression', () => {
+  it('preserves model-catalog effort levels selected for Codex', () => {
+    const source = readSource('src/components/chat/ChatWindow.tsx')
+
+    expect(source).toContain(
+      'const selectedEffortLevel: EffortLevel = rawSelectedEffortLevel'
+    )
+    expect(source).not.toContain("rawSelectedEffortLevel === 'max'")
+    expect(source).not.toContain("rawSelectedEffortLevel === 'ultracode'")
+  })
+
   it('keeps ChatWindow global modals mounted when terminal is primary surface', () => {
     const source = readSource('src/components/chat/ChatWindow.tsx')
 
@@ -38,6 +48,7 @@ describe('terminal primary surface modal regression', () => {
     expect(source).toMatch(/openModal:\s*false/)
     expect(source).toMatch(/showToast:\s*false/)
     expect(source).toMatch(/markOpened:\s*false/)
+    expect(source).toContain("session.primary_surface === 'terminal'")
   })
 
   it('guards terminal auto-restore against session switches and duplicate spawns', () => {
@@ -53,5 +64,26 @@ describe('terminal primary surface modal regression', () => {
     expect(source).toMatch(
       /autoReconnectingRef\.current\.delete\s*\(\s*sessionId\s*\)/
     )
+  })
+
+  it('shows a safe recovery state instead of an empty chat for legacy sessions', () => {
+    const source = readSource('src/components/chat/ChatWindow.tsx')
+
+    expect(source).toContain('isTerminalAwaitingReconnect')
+    expect(source).toContain('Terminal session needs to be reconnected')
+    expect(source).toContain('Choose native session')
+  })
+
+  it('starts review fix sessions in the background without switching tabs', () => {
+    const source = readSource('src/components/chat/ChatWindow.tsx')
+    const start = source.indexOf('const handleReviewFix = useCallback')
+    const end = source.indexOf('// Note: Streaming event listeners', start)
+    const handleReviewFixSource = source.slice(start, end)
+
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(handleReviewFixSource).toContain('createSession.mutateAsync')
+    expect(handleReviewFixSource).toContain('sendMessage.mutate')
+    expect(handleReviewFixSource).not.toContain('setActiveSession')
   })
 })

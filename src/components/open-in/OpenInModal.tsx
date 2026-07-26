@@ -41,7 +41,7 @@ import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import { notify } from '@/lib/notifications'
 import { openExternal } from '@/lib/platform'
 import { cn } from '@/lib/utils'
-import { isNativeApp } from '@/lib/environment'
+import { canOpenInEditor, canOpenNativeApps } from '@/lib/environment'
 import { resolvePortUrl } from '@/components/browser/default-tab-url'
 
 interface ModalOption {
@@ -102,7 +102,11 @@ export function OpenInModal() {
     selectedWorktreeId
   )
 
-  const isNative = isNativeApp()
+  // Finder/terminal: backend host can launch apps (local desktop, WSL headless,
+  // or --allow-native-open). Editor also works from the native shell against a
+  // remote Jean via local Zed + ssh://.
+  const canOpenLocally = canOpenNativeApps()
+  const canOpenEditor = canOpenInEditor()
 
   const targetPath = useMemo(() => {
     if (worktree?.path) return worktree.path
@@ -124,7 +128,9 @@ export function OpenInModal() {
     const allOptions: ModalOption[] = [
       {
         id: 'editor',
-        label: isNative ? getEditorLabel(preferences?.editor) : 'Open Editor',
+        label: canOpenEditor
+          ? getEditorLabel(preferences?.editor)
+          : 'Open Editor',
         icon: Code,
         key: 'E',
       },
@@ -158,15 +164,16 @@ export function OpenInModal() {
         : []),
     ]
 
-    if (isNative) return allOptions
-    // Web mode: keep editor (opens the web VS Code), drop Finder/Terminal.
-    return allOptions.filter(
-      opt => opt.id === 'editor' || opt.id === 'github' || opt.id === 'open-pr'
-    )
+    return allOptions.filter(opt => {
+      if (opt.id === 'editor') return canOpenEditor
+      if (opt.id === 'terminal' || opt.id === 'finder') return canOpenLocally
+      return true
+    })
   }, [
     preferences?.editor,
     preferences?.terminal,
-    isNative,
+    canOpenLocally,
+    canOpenEditor,
     worktree?.pr_url,
     worktree?.pr_number,
   ])
@@ -275,12 +282,12 @@ export function OpenInModal() {
   const handleOpenChange = useCallback(
     (open: boolean) => {
       if (open && !hasInitializedRef.current) {
-        setSelectedOption('editor')
+        setSelectedOption(canOpenEditor ? 'editor' : 'github')
         hasInitializedRef.current = true
       }
       setOpenInModalOpen(open)
     },
-    [setOpenInModalOpen, isNative]
+    [setOpenInModalOpen, canOpenEditor]
   )
 
   const portOptions: ModalOption[] = useMemo(() => {

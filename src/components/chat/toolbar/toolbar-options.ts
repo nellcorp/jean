@@ -17,11 +17,13 @@ export const CODEX_MODEL_OPTIONS = codexModelOptions as {
 }[]
 
 export const OPENCODE_MODEL_OPTIONS: { value: string; label: string }[] = [
-  { value: 'opencode/gpt-5.5', label: 'GPT 5.5 (OpenCode)' },
+  { value: 'opencode/gpt-5.6-sol', label: 'GPT 5.6 Sol (OpenCode)' },
 ]
 
 export const COMMANDCODE_MODEL_OPTIONS: { value: string; label: string }[] = [
   { value: 'commandcode/default', label: 'CLI default (no --model)' },
+  { value: 'commandcode/claude-opus-5', label: 'Claude Opus 5' },
+  { value: 'commandcode/claude-sonnet-5', label: 'Claude Sonnet 5' },
   { value: 'commandcode/claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
   { value: 'commandcode/claude-opus-4-8', label: 'Claude Opus 4.8' },
   { value: 'commandcode/claude-opus-4-7', label: 'Claude Opus 4.7' },
@@ -91,8 +93,20 @@ export const PI_MODEL_OPTIONS: { value: string; label: string }[] = [
 ]
 
 export const GROK_MODEL_OPTIONS: { value: string; label: string }[] = [
-  { value: 'grok/grok-composer-2.5-fast', label: 'Grok Composer 2.5 Fast' },
-  { value: 'grok/grok-build', label: 'Grok Build' },
+  { value: 'grok/grok-4.5', label: 'Grok 4.5' },
+]
+
+export const KIMI_MODEL_OPTIONS: { value: string; label: string }[] = [
+  { value: 'kimi/default', label: 'Configured default' },
+]
+
+export const KIMI_EFFORT_LEVEL_OPTIONS: {
+  value: EffortLevel
+  label: string
+  description: string
+}[] = [
+  { value: 'off', label: 'Thinking Off', description: 'Disable thinking' },
+  { value: 'high', label: 'Thinking On', description: 'Enable thinking' },
 ]
 
 export const THINKING_LEVEL_OPTIONS: {

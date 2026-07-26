@@ -49,7 +49,10 @@ WORKDIR /app
 
 # Copy the Cargo manifests + sources. tauri-build reads tauri.conf.json at
 # compile time, so we need the whole src-tauri tree plus tauri.conf.json.
+# src-tauri depends on the jean-core crate (path = "../jean-core"), so it must
+# be present in the build context too.
 COPY src-tauri ./src-tauri
+COPY jean-core ./jean-core
 
 # tauri-build validates `frontendDist` (../dist) exists, so we have to place
 # the frontend artifacts from stage 1 where tauri.conf.json expects them.

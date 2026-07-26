@@ -1,6 +1,7 @@
 import type {
   ClaudeModel,
   CliBackend,
+  CodexProviderProfile,
   CustomCliProfile,
 } from '@/types/preferences'
 import type {
@@ -16,6 +17,7 @@ import type {
   MergeableStatus,
 } from '@/types/pr-status'
 import type { DiffRequest } from '@/types/git-diff'
+import type { PackageScript } from '@/services/projects'
 import type {
   LoadedIssueContext,
   LoadedPullRequestContext,
@@ -52,6 +54,8 @@ export interface ChatToolbarProps {
   providerLocked?: boolean
 
   baseBranch: string
+  /** Remote the base branch lives on when explicitly picked (e.g. "fork") */
+  baseRemote?: string
   uncommittedAdded: number
   uncommittedRemoved: number
   branchDiffAdded: number
@@ -67,6 +71,9 @@ export interface ChatToolbarProps {
   worktreeId: string | null
   activeSessionId: string | null | undefined
   projectId: string | undefined
+  runScripts?: string[]
+  packageScripts?: PackageScript[]
+  favoritePackageScripts?: string[]
 
   loadedIssueContexts: LoadedIssueContext[]
   loadedPRContexts: LoadedPullRequestContext[]
@@ -93,15 +100,22 @@ export interface ChatToolbarProps {
   onBackendModelChange: (backend: CliBackend, model: string) => void
   onProviderChange: (provider: string | null) => void
   customCliProfiles: CustomCliProfile[]
+  /** Codex custom model_provider profiles from Settings → Providers */
+  customCodexProviders?: CodexProviderProfile[]
   onThinkingLevelChange: (level: ThinkingLevel) => void
   onEffortLevelChange: (level: EffortLevel) => void
   onSetExecutionMode: (mode: ExecutionMode) => void
   onAttach: () => void
   onCancel: () => void
+  /** When true while sending, the secondary submit button steers instead of queues. */
+  willSteer?: boolean
   queuedMessageCount?: number
 
   availableMcpServers: McpServerInfo[]
   enabledMcpServers: string[]
   onToggleMcpServer: (serverName: string) => void
   onOpenProjectSettings?: () => void
+  onRunCommand?: (command: string) => void
+  onRunPackageScript?: (script: PackageScript) => void
+  onToggleFavoritePackageScript?: (scriptName: string) => void
 }

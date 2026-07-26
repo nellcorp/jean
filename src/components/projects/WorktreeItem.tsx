@@ -330,16 +330,15 @@ export function WorktreeItem({
 
   const storeState = useCanvasStoreState()
 
-  // Compute card data for all sessions (needed for both summary and expanded list)
-  const allCards = useMemo(() => {
-    const sessions = sessionsData?.sessions ?? []
-    return sessions.map(s => computeSessionCardData(s, storeState))
-  }, [sessionsData?.sessions, storeState])
-
+  // Card data is only rendered by the expanded session list, so skip the
+  // O(sessions × messages) computation entirely for collapsed rows.
   const sessionGroups = useMemo(() => {
     if (!isExpanded) return []
-    return groupCardsByStatus(allCards)
-  }, [isExpanded, allCards])
+    const sessions = sessionsData?.sessions ?? []
+    return groupCardsByStatus(
+      sessions.map(s => computeSessionCardData(s, storeState))
+    )
+  }, [isExpanded, sessionsData?.sessions, storeState])
 
   const handleChevronClick = useCallback(
     (e: React.MouseEvent) => {
@@ -553,8 +552,9 @@ export function WorktreeItem({
       await performGitPull({
         worktreeId: worktree.id,
         worktreePath: worktree.path,
-        baseBranch: defaultBranch,
+        baseBranch: worktree.base_branch ?? defaultBranch,
         projectId,
+        remote: worktree.base_remote,
         onMergeConflict: () => {
           selectWorktree(worktree.id)
           setTimeout(() => {
@@ -567,7 +567,15 @@ export function WorktreeItem({
         },
       })
     },
-    [worktree.id, worktree.path, defaultBranch, projectId, selectWorktree]
+    [
+      worktree.id,
+      worktree.path,
+      worktree.base_branch,
+      worktree.base_remote,
+      defaultBranch,
+      projectId,
+      selectWorktree,
+    ]
   )
 
   const handlePush = useCallback(

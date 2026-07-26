@@ -22,7 +22,7 @@ interface UseChatWindowEventsParams {
   setIsPlanDialogOpen: (open: boolean) => void
   session: Session | null | undefined
   // Git diff
-  gitStatus: { base_branch?: string } | null | undefined
+  gitStatus: { base_branch?: string; base_remote?: string } | null | undefined
   setDiffRequest: (
     req:
       | {
@@ -258,6 +258,7 @@ export function useChatWindowEvents({
     const handler = (e: Event) => {
       if (!activeWorktreePath) return
       const baseBranch = gitStatus?.base_branch ?? 'main'
+      const baseRemote = gitStatus?.base_remote
       const requestedType = (e as CustomEvent).detail?.type as
         | 'uncommitted'
         | 'branch'
@@ -270,6 +271,7 @@ export function useChatWindowEvents({
             type: requestedType,
             worktreePath: activeWorktreePath,
             baseBranch,
+            baseRemote,
           }
         }
         if (prev) {
@@ -283,12 +285,18 @@ export function useChatWindowEvents({
           type: 'uncommitted',
           worktreePath: activeWorktreePath,
           baseBranch,
+          baseRemote,
         }
       })
     }
     window.addEventListener('open-git-diff', handler)
     return () => window.removeEventListener('open-git-diff', handler)
-  }, [activeWorktreePath, gitStatus?.base_branch, setDiffRequest])
+  }, [
+    activeWorktreePath,
+    gitStatus?.base_branch,
+    gitStatus?.base_remote,
+    setDiffRequest,
+  ])
 
   // ESC: Cancel prompt
   const cancelContextRef = useRef({ activeWorktreeId, activeSessionId })
@@ -389,6 +397,62 @@ export function useChatWindowEvents({
     window.addEventListener('set-chat-input', handler as EventListener)
     return () =>
       window.removeEventListener('set-chat-input', handler as EventListener)
+  }, [activeSessionId, inputRef])
+
+  // Append text to chat input from external context providers (browser Grab).
+  useEffect(() => {
+    const handler = (e: CustomEvent<{ text: string }>) => {
+      const { text } = e.detail
+      const sessionId = activeSessionId
+      const textarea = inputRef.current
+      if (!sessionId || !text || !textarea) return
+
+      const start = textarea.selectionStart ?? textarea.value.length
+      const end = textarea.selectionEnd ?? textarea.value.length
+      const current = textarea.value
+      const nextValue = current.slice(0, start) + text + current.slice(end)
+      textarea.value = nextValue
+      textarea.selectionStart = textarea.selectionEnd = start + text.length
+      useChatStore.getState().setInputDraft(sessionId, nextValue)
+      textarea.focus()
+    }
+    window.addEventListener('append-chat-input', handler as EventListener)
+    return () =>
+      window.removeEventListener('append-chat-input', handler as EventListener)
+  }, [activeSessionId, inputRef])
+
+  // Save external context as a pending pasted-text attachment (browser Grab).
+  useEffect(() => {
+    const handler = (
+      e: CustomEvent<{ content: string; filename?: string }>
+    ) => {
+      const { content, filename } = e.detail
+      const sessionId = activeSessionId
+      if (!sessionId || !content) return
+
+      void invoke<{ id: string; path: string; filename: string; size: number }>(
+        'save_pasted_text',
+        { content, filename }
+      )
+        .then(result => {
+          useChatStore.getState().addPendingTextFile(sessionId, {
+            id: result.id,
+            path: result.path,
+            filename: result.filename,
+            size: result.size,
+            content,
+          })
+          inputRef.current?.focus()
+        })
+        .catch(error => {
+          toast.error('Failed to attach DOM context', {
+            description: String(error),
+          })
+        })
+    }
+    window.addEventListener('attach-pasted-text', handler as EventListener)
+    return () =>
+      window.removeEventListener('attach-pasted-text', handler as EventListener)
   }, [activeSessionId, inputRef])
 
   // Approve plan keyboard shortcut

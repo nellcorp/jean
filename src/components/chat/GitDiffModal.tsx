@@ -59,10 +59,9 @@ import {
   revertFile,
   triggerImmediateGitPoll,
 } from '@/services/git-status'
-import { invoke } from '@/lib/transport'
+import { startCommitJob } from '@/services/commit-jobs'
 import { dismissibleToast } from '@/lib/dismissible-toast'
 import { resolveMagicPromptProvider } from '@/types/preferences'
-import type { CreateCommitResponse } from '@/types/projects'
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -324,7 +323,8 @@ export function GitDiffModal({
         const result = await getGitDiff(
           request.worktreePath,
           request.type,
-          request.baseBranch
+          request.baseBranch,
+          request.baseRemote
         )
         setDiff(result)
       } catch (err) {
@@ -353,8 +353,7 @@ export function GitDiffModal({
     )
 
     try {
-      const result = await invoke<CreateCommitResponse>(
-        'create_commit_with_ai',
+      await startCommitJob(
         {
           worktreePath: diffRequest.worktreePath,
           customPrompt: preferences?.magic_prompts?.commit_message,
@@ -368,20 +367,24 @@ export function GitDiffModal({
           reasoningEffort:
             preferences?.magic_prompt_efforts?.commit_message_effort ?? null,
           specificFiles,
+        },
+        job => {
+          setIsCommitting(false)
+          if (job.status === 'failed' || !job.response) {
+            opToast.error(`Failed to commit: ${job.error}`)
+            return
+          }
+
+          clearGitDiffSelectedFiles()
+          triggerImmediateGitPoll()
+          setSelectedFileIndex(0)
+          loadDiff({ ...diffRequest, type: 'uncommitted' }, true)
+          opToast.success(job.response.message.split('\n')[0])
         }
       )
-
-      clearGitDiffSelectedFiles()
-      triggerImmediateGitPoll()
-      // Refresh the diff view to show remaining uncommitted files
-      setSelectedFileIndex(0)
-      loadDiff({ ...diffRequest, type: 'uncommitted' }, true)
-
-      opToast.success(result.message.split('\n')[0])
     } catch (error) {
-      opToast.error(`Failed to commit: ${error}`)
-    } finally {
       setIsCommitting(false)
+      opToast.error(`Failed to commit: ${error}`)
     }
   }, [diffRequest, isCommitting, preferences, loadDiff])
 
@@ -992,7 +995,11 @@ export function GitDiffModal({
   const title =
     activeDiffType === 'uncommitted'
       ? 'Uncommitted Changes'
-      : `Changes vs ${diffRequest?.baseBranch ?? 'main'}`
+      : `Changes vs ${
+          diffRequest?.baseRemote
+            ? `${diffRequest.baseRemote}/${diffRequest.baseBranch}`
+            : (diffRequest?.baseBranch ?? 'main')
+        }`
   const selectedFileCount = gitDiffSelectedFiles.size
   const commitButtonLabel = isCommitting
     ? 'Committing…'
@@ -1700,7 +1707,7 @@ export function GitDiffModal({
             <AlertDialogTitle>Revert file?</AlertDialogTitle>
             <AlertDialogDescription>
               This will discard all changes to{' '}
-              <span className="font-mono font-semibold">
+              <span className="break-all font-mono font-semibold">
                 {revertTarget?.fileName}
               </span>
               . This cannot be undone.

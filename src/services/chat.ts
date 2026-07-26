@@ -30,25 +30,67 @@ import type {
   LabelData,
   QueuedMessage,
 } from '@/types/chat'
-
 import { isTauri, projectsQueryKeys } from '@/services/projects'
+import { hasBackendTransport } from '@/lib/environment'
 import { preferencesQueryKeys } from '@/services/preferences'
 import type { AppPreferences } from '@/types/preferences'
 import { useChatStore } from '@/store/chat-store'
+import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
 import { useTerminalStore } from '@/store/terminal-store'
+import { navigateToProjectPicker } from '@/lib/restore-navigation'
+import { isNativeTerminalBackend } from '@/lib/native-cli-session'
 import { getResumeArgs } from '@/components/chat/session-card-utils'
-import type { ReviewResponse, Worktree } from '@/types/projects'
+import type {
+  StoredReviewResults,
+  Worktree,
+} from '@/types/projects'
+import { preserveQueryCacheOnError } from '@/lib/query-error'
 
 /** Default number of recent runs loaded on initial session fetch. */
 export const INITIAL_RUN_LIMIT = 10
 /** Number of older runs to load per scroll-up batch. */
 export const OLDER_RUN_BATCH = 10
 
-/** Check if an error is from a WebSocket disconnect (suppress toasts during reconnect). */
+/** Check if an error is from a WebSocket disconnect (suppress toasts before reload). */
 function isWsDisconnectError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error)
   return msg.includes('WebSocket disconnected')
+}
+
+export interface SessionRemovalNavigationState {
+  activeWorktreeId: string | null
+  activeWorktreePath: string | null
+  activeSessionId: string | null
+  selectedProjectId: string | null
+  selectedWorktreeId: string | null
+}
+
+function getSessionRemovalNavigationState(
+  worktreeId: string
+): SessionRemovalNavigationState {
+  const chat = useChatStore.getState()
+  const projects = useProjectsStore.getState()
+  return {
+    activeWorktreeId: chat.activeWorktreeId,
+    activeWorktreePath: chat.activeWorktreePath,
+    activeSessionId: chat.activeSessionIds[worktreeId] ?? null,
+    selectedProjectId: projects.selectedProjectId,
+    selectedWorktreeId: projects.selectedWorktreeId,
+  }
+}
+
+export function isSessionRemovalNavigationUnchanged(
+  before: SessionRemovalNavigationState,
+  current: SessionRemovalNavigationState
+): boolean {
+  return (
+    before.activeWorktreeId === current.activeWorktreeId &&
+    before.activeWorktreePath === current.activeWorktreePath &&
+    before.activeSessionId === current.activeSessionId &&
+    before.selectedProjectId === current.selectedProjectId &&
+    before.selectedWorktreeId === current.selectedWorktreeId
+  )
 }
 
 export function cleanupSessionTerminalForRemovedSession(
@@ -93,15 +135,51 @@ export function removeSessionFromAllSessionsCache(
 }
 
 /**
+ * Refresh one worktree's session list and mirror it into the cross-project
+ * ['all-sessions'] cache. This keeps the finished-session bell in sync when a
+ * background operation (like review) completes outside normal session polling.
+ */
+export async function refreshWorktreeSessionsCaches(
+  queryClient: QueryClient,
+  worktreeId: string,
+  worktreePath: string
+): Promise<WorktreeSessions | null> {
+  try {
+    const sessions = await invoke<WorktreeSessions>('get_sessions', {
+      worktreeId,
+      worktreePath,
+    })
+    queryClient.setQueryData(chatQueryKeys.sessions(worktreeId), sessions)
+    queryClient.setQueryData<AllSessionsResponse>(['all-sessions'], old => {
+      if (!old?.entries) return old
+      return {
+        ...old,
+        entries: old.entries.map(entry =>
+          entry.worktree_id === worktreeId
+            ? { ...entry, sessions: sessions.sessions }
+            : entry
+        ),
+      }
+    })
+    return sessions
+  } catch (error) {
+    logger.warn('Failed to refresh worktree sessions caches', {
+      error,
+      worktreeId,
+    })
+    return null
+  }
+}
+
+/**
  * Whether a session can be reconnected — i.e. it's a native CLI terminal
  * session with a known way to relaunch (a backend resume id, or its persisted
  * terminal command). Used to gate the "Reconnect" menu item.
  */
 export function canReconnectSession(session: Session): boolean {
-  return (
-    session.primary_surface === 'terminal' &&
-    (!!getResumeArgs(session) || !!session.terminal_command)
-  )
+  if (session.primary_surface !== 'terminal') return false
+  if (getResumeArgs(session)) return true
+  return !isNativeTerminalBackend(session.backend) && !!session.terminal_command
 }
 
 /**
@@ -137,11 +215,15 @@ export async function reconnectNativeCliSession(
     markOpened = true,
   } = options ?? {}
   const resume = getResumeArgs(session)
-  const launch = resume ?? {
-    command: session.terminal_command ?? '',
-    args: session.terminal_command_args ?? [],
-  }
-  if (!launch.command) {
+  const launch =
+    resume ??
+    (!isNativeTerminalBackend(session.backend)
+      ? {
+          command: session.terminal_command ?? '',
+          args: session.terminal_command_args ?? [],
+        }
+      : null)
+  if (!launch?.command) {
     if (showToast) toast.error('No command available to reconnect this session')
     return
   }
@@ -275,7 +357,7 @@ export function useSessions(
       ? [...chatQueryKeys.sessions(worktreeId ?? ''), 'with-counts']
       : chatQueryKeys.sessions(worktreeId ?? ''),
     queryFn: async (): Promise<WorktreeSessions> => {
-      if (!isTauri() || !worktreeId || !worktreePath) {
+      if (!hasBackendTransport() || !worktreeId || !worktreePath) {
         return {
           worktree_id: '',
           sessions: [],
@@ -295,12 +377,7 @@ export function useSessions(
         return sessions
       } catch (error) {
         logger.error('Failed to load sessions', { error, worktreeId })
-        return {
-          worktree_id: worktreeId,
-          sessions: [],
-          active_session_id: null,
-          version: 2,
-        }
+        return preserveQueryCacheOnError(error)
       }
     },
     enabled: !!worktreeId && !!worktreePath,
@@ -379,7 +456,7 @@ export async function prefetchSessions(
     const executionModeUpdates: Record<string, ExecutionMode> = {}
     const primarySurfaceUpdates: Record<string, 'chat' | 'terminal'> = {}
     const labelUpdates: Record<string, LabelData> = {}
-    const reviewResultsUpdates: Record<string, ReviewResponse> = {}
+    const reviewResultsUpdates: Record<string, StoredReviewResults> = {}
     const answeredQuestionsUpdates: Record<string, Set<string>> = {}
     const submittedAnswersUpdates: Record<
       string,
@@ -566,7 +643,12 @@ export function useSession(
   return useQuery({
     queryKey: chatQueryKeys.session(sessionId ?? ''),
     queryFn: async (): Promise<Session | null> => {
-      if (!isTauri() || !sessionId || !worktreeId || !worktreePath) {
+      if (
+        !hasBackendTransport() ||
+        !sessionId ||
+        !worktreeId ||
+        !worktreePath
+      ) {
         return null
       }
 
@@ -631,7 +713,7 @@ export function useSession(
         return session
       } catch (error) {
         logger.warn('[useSession] FAILED to load session', { error, sessionId })
-        return null
+        return preserveQueryCacheOnError(error)
       }
     },
     enabled: !!sessionId && !!worktreeId && !!worktreePath,
@@ -736,6 +818,7 @@ export function useCreateSession() {
       terminalCommand,
       terminalCommandArgs,
       terminalLabel,
+      nativeSessionId,
     }: {
       worktreeId: string
       worktreePath: string
@@ -745,6 +828,7 @@ export function useCreateSession() {
       terminalCommand?: string | null
       terminalCommandArgs?: string[]
       terminalLabel?: string
+      nativeSessionId?: string
     }): Promise<Session> => {
       if (!isTauri()) {
         throw new Error('Not in Tauri context')
@@ -760,6 +844,7 @@ export function useCreateSession() {
         terminalCommand,
         terminalCommandArgs,
         terminalLabel,
+        nativeSessionId,
       })
       logger.info('Session created', { sessionId: session.id })
       return session
@@ -992,6 +1077,7 @@ export function useCloseSession() {
   const queryClient = useQueryClient()
 
   return useMutation({
+    onMutate: ({ worktreeId }) => getSessionRemovalNavigationState(worktreeId),
     mutationFn: async ({
       worktreeId,
       worktreePath,
@@ -1014,7 +1100,7 @@ export function useCloseSession() {
       logger.info('Session closed', { newActiveId })
       return newActiveId
     },
-    onSuccess: (newActiveId, { worktreeId, sessionId }) => {
+    onSuccess: (newActiveId, { worktreeId, sessionId }, navigationBefore) => {
       queryClient.invalidateQueries({
         queryKey: chatQueryKeys.sessions(worktreeId),
       })
@@ -1039,6 +1125,17 @@ export function useCloseSession() {
         if (!currentActive || currentActive === sessionId) {
           useChatStore.getState().setActiveSession(worktreeId, newActiveId)
         }
+      } else if (
+        isSessionRemovalNavigationUnchanged(
+          navigationBefore,
+          getSessionRemovalNavigationState(worktreeId)
+        )
+      ) {
+        // Last non-archived session closed — show blank project picker (issue #501)
+        logger.debug('Last session closed, navigating to project picker', {
+          worktreeId,
+        })
+        navigateToProjectPicker(worktreeId)
       }
     },
     onError: error => {
@@ -1063,6 +1160,7 @@ export function useArchiveSession() {
   const queryClient = useQueryClient()
 
   return useMutation({
+    onMutate: ({ worktreeId }) => getSessionRemovalNavigationState(worktreeId),
     mutationFn: async ({
       worktreeId,
       worktreePath,
@@ -1085,7 +1183,7 @@ export function useArchiveSession() {
       logger.info('Session archived', { newActiveId })
       return newActiveId
     },
-    onSuccess: (newActiveId, { worktreeId, sessionId }) => {
+    onSuccess: (newActiveId, { worktreeId, sessionId }, navigationBefore) => {
       queryClient.invalidateQueries({
         queryKey: chatQueryKeys.sessions(worktreeId),
       })
@@ -1109,6 +1207,17 @@ export function useArchiveSession() {
         if (!currentActive || currentActive === sessionId) {
           useChatStore.getState().setActiveSession(worktreeId, newActiveId)
         }
+      } else if (
+        isSessionRemovalNavigationUnchanged(
+          navigationBefore,
+          getSessionRemovalNavigationState(worktreeId)
+        )
+      ) {
+        // Last non-archived session archived — show blank project picker (issue #501)
+        logger.debug('Last session archived, navigating to project picker', {
+          worktreeId,
+        })
+        navigateToProjectPicker(worktreeId)
       }
     },
     onError: error => {
@@ -1404,13 +1513,6 @@ export function useCloseSessionOrWorktreeKeybinding(
       })
     }
 
-    // Last session: navigate to project view instead of deleting the worktree
-    if (sessionCount <= 1) {
-      logger.debug('Last session closed, navigating to project view', {
-        worktreeId: activeWorktreeId,
-      })
-      useChatStore.getState().clearActiveWorktree()
-    }
   }, [archiveSession, closeSession, queryClient])
 
   useEffect(() => {
@@ -1845,21 +1947,26 @@ export function useSendMessage() {
       }
 
       // Benign race: another queue consumer (backend drain / another client)
-      // started a run for this session first. A run IS active, so keep the
-      // sending state and skip the error banner/toast. The losing message is
-      // requeued: the queue processor's per-call onError handles queued
-      // messages; for direct submits we restore the input draft so the typed
-      // text isn't lost.
+      // started a run for this session first. Queued messages are requeued by
+      // the queue processor's per-call onError. Direct submits restore the
+      // draft so typed text isn't lost.
+      //
+      // After cancel, a brief residual race can still produce this error while
+      // the cancelled worker tears down (#329). Do NOT leave sending sticky —
+      // that makes the session look unrecoverable until the user cancels again.
       if (isDuplicateSendError(error)) {
         logger.warn('Duplicate send rejected — another run is active', {
           sessionId,
           fromQueue: variables.fromQueue ?? false,
         })
         if (!variables.fromQueue) {
-          const { inputDrafts, setInputDraft } = useChatStore.getState()
+          const { inputDrafts, setInputDraft, removeSendingSession, clearExecutingMode } =
+            useChatStore.getState()
           if (!inputDrafts[sessionId]?.trim()) {
             setInputDraft(sessionId, variables.message)
           }
+          removeSendingSession(sessionId)
+          clearExecutingMode(sessionId)
         }
         // Drop the optimistic user message by refetching authoritative state
         queryClient.invalidateQueries({
@@ -2658,6 +2765,26 @@ export function persistRemoveQueued(
 }
 
 /**
+ * Persist a queued message text edit.
+ * Returns false when the message is no longer queued.
+ */
+export async function persistUpdateQueued(
+  worktreeId: string,
+  worktreePath: string,
+  sessionId: string,
+  messageId: string,
+  message: string
+): Promise<boolean> {
+  return invoke<boolean>('update_queued_message', {
+    worktreeId,
+    worktreePath,
+    sessionId,
+    messageId,
+    message,
+  })
+}
+
+/**
  * Atomically move a specific queued message to the front of the persisted queue.
  * Returns false when the message is no longer queued (another client dequeued
  * or removed it) — callers must abort their send-now flow in that case.
@@ -2726,6 +2853,19 @@ export async function steerPiTurn(
   message: string
 ): Promise<void> {
   await invoke('steer_pi_turn', { worktreeId, sessionId, message })
+}
+
+/**
+ * Inject a text-only user message into a running Grok ACP turn via
+ * `_x.ai/interject`. Throws when no active Grok turn/connection is available —
+ * callers fall back to queue/cancel+send.
+ */
+export async function steerGrokTurn(
+  worktreeId: string,
+  sessionId: string,
+  message: string
+): Promise<void> {
+  await invoke('steer_grok_turn', { worktreeId, sessionId, message })
 }
 
 /**

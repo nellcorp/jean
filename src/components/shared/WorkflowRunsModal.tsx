@@ -49,6 +49,7 @@ import { usePreferences } from '@/services/preferences'
 import { openExternal } from '@/lib/platform'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { resolveBackend } from '@/lib/model-utils'
+import { applyYoloInvestigationFixDirective } from '@/lib/investigation-prompt'
 import {
   DEFAULT_INVESTIGATE_WORKFLOW_RUN_PROMPT,
   DEFAULT_PARALLEL_EXECUTION_PROMPT,
@@ -57,6 +58,7 @@ import {
 } from '@/types/preferences'
 import type { WorkflowRun } from '@/types/github'
 import type { Project, Worktree } from '@/types/projects'
+import { isReusableWorkflowInvestigationSession } from './workflow-run-utils'
 
 function timeAgo(dateString: string): string {
   const seconds = Math.floor(
@@ -295,12 +297,6 @@ export function WorkflowRunsModal() {
           : DEFAULT_INVESTIGATE_WORKFLOW_RUN_PROMPT
 
       const runId = extractRunId(run.url)
-      const prompt = template
-        .replace(/\{workflowName\}/g, run.workflowName)
-        .replace(/\{runUrl\}/g, run.url)
-        .replace(/\{runId\}/g, runId)
-        .replace(/\{branch\}/g, run.headBranch)
-        .replace(/\{displayTitle\}/g, run.displayTitle)
 
       // Fall back to the user's currently-selected model (like useInvestigateHandlers does)
       const storeState = useChatStore.getState()
@@ -314,12 +310,27 @@ export function WorkflowRunsModal() {
       const investigateMode =
         preferences?.magic_prompt_modes?.investigate_workflow_run_mode ??
         DEFAULT_MAGIC_PROMPT_MODES.investigate_workflow_run_mode
+      const prompt = applyYoloInvestigationFixDirective(
+        template
+          .replace(/\{workflowName\}/g, run.workflowName)
+          .replace(/\{runUrl\}/g, run.url)
+          .replace(/\{runId\}/g, runId)
+          .replace(/\{branch\}/g, run.headBranch)
+          .replace(/\{displayTitle\}/g, run.displayTitle),
+        investigateMode
+      )
       const investigateProvider = resolveMagicPromptProvider(
         preferences?.magic_prompt_providers,
         'investigate_workflow_run_provider',
         preferences?.default_provider
       )
       const investigateBackend = resolveBackend(investigateModel)
+      // Prefer the Magic Prompt effort override (e.g. Medium for Grok). Never hardcode
+      // Claude thinking levels like "think" — that ignores the configured effort and
+      // shows the wrong badge for effort-based backends (Grok/Codex/Pi/OpenCode).
+      const investigateEffort =
+        preferences?.magic_prompt_efforts?.investigate_workflow_run_effort ??
+        undefined
       const investigateCustomProfile =
         investigateProvider && investigateProvider !== '__anthropic__'
           ? preferences?.custom_cli_profiles?.find(
@@ -437,6 +448,7 @@ export function WorkflowRunsModal() {
           setSelectedBackend,
           setExecutionMode,
           setExecutingMode,
+          setEffortLevel,
         } = useChatStore.getState()
 
         setLastSentMessage(sessionId, prompt)
@@ -447,6 +459,9 @@ export function WorkflowRunsModal() {
         setSelectedBackend(sessionId, investigateBackend)
         setExecutionMode(sessionId, investigateMode)
         setExecutingMode(sessionId, investigateMode)
+        if (investigateEffort) {
+          setEffortLevel(sessionId, investigateEffort)
+        }
 
         // Persist model/backend/provider to session on disk
         setSessionBackend.mutate({
@@ -475,7 +490,7 @@ export function WorkflowRunsModal() {
           message: prompt,
           model: investigateModel,
           executionMode: investigateMode,
-          thinkingLevel: 'think',
+          effortLevel: investigateEffort ?? undefined,
           backend: investigateBackend,
           customProfileName: investigateCustomProfile,
           parallelExecutionPrompt:
@@ -520,8 +535,7 @@ export function WorkflowRunsModal() {
       }
 
       const emptySession = existingSessions?.sessions?.find(
-        s =>
-          !s.archived_at && (s.message_count === 0 || s.message_count == null)
+        isReusableWorkflowInvestigationSession
       )
 
       if (emptySession) {

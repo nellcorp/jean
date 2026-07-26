@@ -18,9 +18,16 @@ import { AppearancePane } from '@/components/preferences/panes/AppearancePane'
 import type { AppPreferences } from '@/types/preferences'
 import {
   FONT_SIZE_DEFAULT,
+  ZOOM_LEVEL_DEFAULT,
   codexDefaultModelOptions,
   CODEX_DEFAULT_MAGIC_PROMPT_MODELS,
   CODEX_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_LUNA_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_LUNA_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_SOL_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_SOL_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_TERRA_DEFAULT_MAGIC_PROMPT_MODELS,
+  CODEX_56_TERRA_FAST_DEFAULT_MAGIC_PROMPT_MODELS,
   DEFAULT_GLOBAL_SYSTEM_PROMPT,
   DEFAULT_MAGIC_PROMPTS,
   DEFAULT_MAGIC_PROMPT_MODELS,
@@ -40,9 +47,12 @@ vi.mock('@/lib/transport', () => ({
 }))
 
 vi.mock('@/lib/platform', () => ({
+  isClientMacOS: true,
   isMacOS: true,
   isWindows: false,
   isLinux: false,
+  getServerPlatform: vi.fn(() => 'mac'),
+  isServerWindows: vi.fn(() => false),
   getModifierSymbol: vi.fn(() => '⌘'),
   getFileManagerName: vi.fn(() => 'Finder'),
   openExternal: vi.fn(),
@@ -93,9 +103,17 @@ describe('model option helpers', () => {
     expect(defaultPreferences.compact_chat_view_enabled).toBe(true)
   })
 
+  it('syncs desktop and mobile zoom by default', () => {
+    expect(defaultPreferences.zoom_level).toBe(ZOOM_LEVEL_DEFAULT)
+    expect(defaultPreferences.mobile_zoom_level).toBe(ZOOM_LEVEL_DEFAULT)
+    expect(defaultPreferences.sync_zoom_levels).toBe(true)
+  })
+
   it('offers Claude 1M variants alongside standard context models', () => {
     expect(modelOptions.map(option => option.value)).toEqual([
       'claude-fable-5',
+      'claude-opus-5',
+      'claude-sonnet-5',
       'claude-opus-4-8[1m]',
       'claude-opus-4-8',
       'claude-opus-4-7[1m]',
@@ -107,39 +125,84 @@ describe('model option helpers', () => {
       'claude-sonnet-4-6',
       'haiku',
     ])
-    expect(normalizeClaudeModel('sonnet')).toBe('claude-sonnet-4-6[1m]')
+    expect(normalizeClaudeModel('sonnet')).toBe('claude-sonnet-5')
     expect(normalizeClaudeModel('claude-fable-5')).toBe('claude-fable-5')
+    expect(normalizeClaudeModel('claude-opus-5')).toBe('claude-opus-5')
+    expect(normalizeClaudeModel('claude-sonnet-5')).toBe('claude-sonnet-5')
     expect(normalizeClaudeModel('claude-opus-4-8')).toBe('claude-opus-4-8')
     expect(normalizeClaudeModel('claude-opus-4-7')).toBe('claude-opus-4-7')
     expect(normalizeClaudeModel('claude-opus-4-6')).toBe('claude-opus-4-6')
     expect(normalizeClaudeModel('claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
   })
 
+  it('offers GPT 5.6 preview variants in Codex selectors', () => {
+    const values = codexDefaultModelOptions.map(option => option.value)
+    expect(values.slice(0, 3)).toEqual([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+    ])
+    expect(values).not.toContain('gpt-5.6')
+    expect(normalizeCodexModel('gpt-5.6-sol')).toBe('gpt-5.6-sol')
+    expect(normalizeCodexModel('gpt-5.6-terra')).toBe('gpt-5.6-terra')
+    expect(normalizeCodexModel('gpt-5.6-luna')).toBe('gpt-5.6-luna')
+    expect(normalizeCodexModel('gpt-5.6')).toBe('gpt-5.6-sol')
+    expect(normalizeCodexModel('gpt-5-6-sol')).toBe('gpt-5.6-sol')
+  })
+
   it('offers Codex fast modes for default selectors', () => {
     const values = codexDefaultModelOptions.map(option => option.value)
+    expect(values).toContain('gpt-5.6-sol-fast')
+    expect(values).toContain('gpt-5.6-terra-fast')
+    expect(values).toContain('gpt-5.6-luna-fast')
     expect(values).toContain('gpt-5.5-fast')
     expect(values).toContain('gpt-5.4-fast')
     expect(values).toContain('gpt-5.4-mini-fast')
+    expect(normalizeCodexModel('gpt-5.6-sol-fast')).toBe('gpt-5.6-sol-fast')
+    expect(normalizeCodexModel('gpt-5.6-fast')).toBe('gpt-5.6-sol-fast')
+    expect(normalizeCodexModel('gpt-5-6-sol-fast')).toBe('gpt-5.6-sol-fast')
     expect(normalizeCodexModel('gpt-5.5-fast')).toBe('gpt-5.5-fast')
   })
 
-  it('uses GPT 5.5 for Codex magic presets', () => {
+  it('uses GPT 5.6 Sol for Codex magic presets', () => {
     expect(new Set(Object.values(CODEX_DEFAULT_MAGIC_PROMPT_MODELS))).toEqual(
-      new Set(['gpt-5.5'])
+      new Set(['gpt-5.6-sol'])
     )
     expect(
       new Set(Object.values(CODEX_FAST_DEFAULT_MAGIC_PROMPT_MODELS))
-    ).toEqual(new Set(['gpt-5.5-fast']))
+    ).toEqual(new Set(['gpt-5.6-sol-fast']))
   })
 
-  it('documents Codex questions-tool answers must re-show the plan tool', () => {
+  it('provides standard and fast GPT 5.6 magic presets for every variant', () => {
+    expect(
+      new Set(Object.values(CODEX_56_SOL_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-sol']))
+    expect(
+      new Set(Object.values(CODEX_56_SOL_FAST_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-sol-fast']))
+    expect(
+      new Set(Object.values(CODEX_56_LUNA_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-luna']))
+    expect(
+      new Set(Object.values(CODEX_56_LUNA_FAST_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-luna-fast']))
+    expect(
+      new Set(Object.values(CODEX_56_TERRA_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-terra']))
+    expect(
+      new Set(Object.values(CODEX_56_TERRA_FAST_DEFAULT_MAGIC_PROMPT_MODELS))
+    ).toEqual(new Set(['gpt-5.6-terra-fast']))
+  })
+
+  it('documents Codex plan mode uses proposed_plan and no file writes', () => {
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       'backend-native interactive question UI'
     )
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('Codex request_user_input')
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
-      'when the current execution mode is plan: after the user answers native `request_user_input`'
+      'when the current execution mode is plan: do not write plan files or code'
     )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('<proposed_plan>')
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       'Every Codex response that contains or revises a plan while the current execution mode is plan'
     )
@@ -157,6 +220,18 @@ describe('model option helpers', () => {
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('Clickable References')
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       'include clickable links when available'
+    )
+  })
+
+  it('requires GitHub issue and discussion discovery after changes', () => {
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'GitHub Issue and Discussion Discovery'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      "search the current repository's existing GitHub issues and discussions"
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'Include the results in both the main response and the `## Recap`'
     )
   })
 })
@@ -253,6 +328,9 @@ describe('preferences service', () => {
         zoom_level: 100,
         custom_cli_profiles: [],
         default_provider: null,
+        custom_codex_providers: [],
+        default_codex_provider: null,
+        custom_pi_providers: [],
         favorite_models: [],
         fast_mode_models: [],
 
@@ -266,14 +344,17 @@ describe('preferences service', () => {
         selected_opencode_model: 'opencode/gpt-5.5',
         selected_cursor_model: 'cursor/auto',
         selected_pi_model: 'pi/sonnet',
-        selected_grok_model: 'grok/grok-composer-2.5-fast',
+        selected_grok_model: 'grok/grok-4.5',
         default_codex_reasoning_effort: 'high',
+        default_codex_model_verbosity: 'medium',
+        default_grok_reasoning_effort: 'high',
         codex_goal_execution_mode: 'build',
         codex_multi_agent_enabled: false,
         codex_max_agent_threads: 3,
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        grok_auto_steer_enabled: true,
         restore_last_session: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -336,7 +417,7 @@ describe('preferences service', () => {
       expect(result.current.data?.jean_mcp_enabled).toBe(true)
     })
 
-    it('returns defaults on backend error', async () => {
+    it('reports backend errors instead of overwriting cached preferences', async () => {
       const { invoke } = await import('@/lib/transport')
       vi.mocked(invoke).mockRejectedValueOnce(new Error('File not found'))
 
@@ -344,10 +425,9 @@ describe('preferences service', () => {
         wrapper: createWrapper(queryClient),
       })
 
-      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      await waitFor(() => expect(result.current.isError).toBe(true))
 
-      expect(result.current.data?.theme).toBe('system')
-      expect(result.current.data?.jean_mcp_enabled).toBe(true)
+      expect(result.current.data).toBeUndefined()
     })
 
     it('migrates old keybindings to new defaults', async () => {
@@ -371,8 +451,8 @@ describe('preferences service', () => {
         git_poll_interval: 60,
         remote_poll_interval: 60,
         keybindings: {
-          ...DEFAULT_KEYBINDINGS,
           toggle_left_sidebar: 'mod+1', // Old default
+          restore_last_archived: 'mod+alt+shift+t', // Broken modifier order
         },
         archive_retention_days: 30,
         syntax_theme_dark: 'vitesse-black',
@@ -413,6 +493,9 @@ describe('preferences service', () => {
         zoom_level: 100,
         custom_cli_profiles: [],
         default_provider: null,
+        custom_codex_providers: [],
+        default_codex_provider: null,
+        custom_pi_providers: [],
         favorite_models: [],
         fast_mode_models: [],
 
@@ -426,14 +509,17 @@ describe('preferences service', () => {
         selected_opencode_model: 'opencode/gpt-5.5',
         selected_cursor_model: 'cursor/auto',
         selected_pi_model: 'pi/sonnet',
-        selected_grok_model: 'grok/grok-composer-2.5-fast',
+        selected_grok_model: 'grok/grok-4.5',
         default_codex_reasoning_effort: 'high',
+        default_codex_model_verbosity: 'medium',
+        default_grok_reasoning_effort: 'high',
         codex_goal_execution_mode: 'build',
         codex_multi_agent_enabled: false,
         codex_max_agent_threads: 3,
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        grok_auto_steer_enabled: true,
         restore_last_session: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -479,6 +565,15 @@ describe('preferences service', () => {
       // Should migrate to new default
       expect(result.current.data?.keybindings?.toggle_left_sidebar).toBe(
         'mod+b'
+      )
+      expect(result.current.data?.keybindings?.restore_last_archived).toBe(
+        'mod+shift+alt+t'
+      )
+      expect(result.current.data?.keybindings?.open_quick_menu).toBe(
+        DEFAULT_KEYBINDINGS.open_quick_menu
+      )
+      expect(Object.keys(result.current.data?.keybindings ?? {})).toHaveLength(
+        Object.keys(DEFAULT_KEYBINDINGS).length
       )
     })
 
@@ -542,6 +637,9 @@ describe('preferences service', () => {
         zoom_level: 100,
         custom_cli_profiles: [],
         default_provider: null,
+        custom_codex_providers: [],
+        default_codex_provider: null,
+        custom_pi_providers: [],
         favorite_models: [],
         fast_mode_models: [],
 
@@ -556,14 +654,17 @@ describe('preferences service', () => {
         selected_opencode_model: 'opencode/gpt-5.5',
         selected_cursor_model: 'cursor/auto',
         selected_pi_model: 'pi/sonnet',
-        selected_grok_model: 'grok/grok-composer-2.5-fast',
+        selected_grok_model: 'grok/grok-4.5',
         default_codex_reasoning_effort: 'high',
+        default_codex_model_verbosity: 'medium',
+        default_grok_reasoning_effort: 'high',
         codex_goal_execution_mode: 'build',
         codex_multi_agent_enabled: false,
         codex_max_agent_threads: 3,
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        grok_auto_steer_enabled: true,
         restore_last_session: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -673,6 +774,9 @@ describe('preferences service', () => {
         zoom_level: 100,
         custom_cli_profiles: [],
         default_provider: null,
+        custom_codex_providers: [],
+        default_codex_provider: null,
+        custom_pi_providers: [],
         favorite_models: [],
         fast_mode_models: [],
 
@@ -686,14 +790,17 @@ describe('preferences service', () => {
         selected_opencode_model: 'opencode/gpt-5.5',
         selected_cursor_model: 'cursor/auto',
         selected_pi_model: 'pi/sonnet',
-        selected_grok_model: 'grok/grok-composer-2.5-fast',
+        selected_grok_model: 'grok/grok-4.5',
         default_codex_reasoning_effort: 'high',
+        default_codex_model_verbosity: 'medium',
+        default_grok_reasoning_effort: 'high',
         codex_goal_execution_mode: 'build',
         codex_multi_agent_enabled: false,
         codex_max_agent_threads: 3,
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        grok_auto_steer_enabled: true,
         restore_last_session: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -805,6 +912,9 @@ describe('preferences service', () => {
         zoom_level: 100,
         custom_cli_profiles: [],
         default_provider: null,
+        custom_codex_providers: [],
+        default_codex_provider: null,
+        custom_pi_providers: [],
         favorite_models: [],
         fast_mode_models: [],
 
@@ -818,14 +928,17 @@ describe('preferences service', () => {
         selected_opencode_model: 'opencode/gpt-5.5',
         selected_cursor_model: 'cursor/auto',
         selected_pi_model: 'pi/sonnet',
-        selected_grok_model: 'grok/grok-composer-2.5-fast',
+        selected_grok_model: 'grok/grok-4.5',
         default_codex_reasoning_effort: 'high',
+        default_codex_model_verbosity: 'medium',
+        default_grok_reasoning_effort: 'high',
         codex_goal_execution_mode: 'build',
         codex_multi_agent_enabled: false,
         codex_max_agent_threads: 3,
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        grok_auto_steer_enabled: true,
         restore_last_session: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -979,6 +1092,9 @@ describe('preferences service', () => {
         zoom_level: 100,
         custom_cli_profiles: [],
         default_provider: null,
+        custom_codex_providers: [],
+        default_codex_provider: null,
+        custom_pi_providers: [],
         favorite_models: [],
         fast_mode_models: [],
 
@@ -992,14 +1108,17 @@ describe('preferences service', () => {
         selected_opencode_model: 'opencode/gpt-5.5',
         selected_cursor_model: 'cursor/auto',
         selected_pi_model: 'pi/sonnet',
-        selected_grok_model: 'grok/grok-composer-2.5-fast',
+        selected_grok_model: 'grok/grok-4.5',
         default_codex_reasoning_effort: 'high',
+        default_codex_model_verbosity: 'medium',
+        default_grok_reasoning_effort: 'high',
         codex_goal_execution_mode: 'build',
         codex_multi_agent_enabled: false,
         codex_max_agent_threads: 3,
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        grok_auto_steer_enabled: true,
         restore_last_session: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -1109,6 +1228,9 @@ describe('preferences service', () => {
         zoom_level: 100,
         custom_cli_profiles: [],
         default_provider: null,
+        custom_codex_providers: [],
+        default_codex_provider: null,
+        custom_pi_providers: [],
         favorite_models: [],
         fast_mode_models: [],
 
@@ -1122,14 +1244,17 @@ describe('preferences service', () => {
         selected_opencode_model: 'opencode/gpt-5.5',
         selected_cursor_model: 'cursor/auto',
         selected_pi_model: 'pi/sonnet',
-        selected_grok_model: 'grok/grok-composer-2.5-fast',
+        selected_grok_model: 'grok/grok-4.5',
         default_codex_reasoning_effort: 'high',
+        default_codex_model_verbosity: 'medium',
+        default_grok_reasoning_effort: 'high',
         codex_goal_execution_mode: 'build',
         codex_multi_agent_enabled: false,
         codex_max_agent_threads: 3,
         codex_auto_steer_enabled: true,
         opencode_auto_steer_enabled: true,
         pi_auto_steer_enabled: true,
+        grok_auto_steer_enabled: true,
         restore_last_session: true,
         close_original_on_clear_context: true,
         build_model: null,
@@ -1175,6 +1300,66 @@ describe('preferences service', () => {
 
       expect(toast.error).toHaveBeenCalledWith('Failed to save preferences', {
         description: 'Save failed',
+      })
+    })
+  })
+
+  describe('AppearancePane scaling', () => {
+    it('syncs desktop and mobile scaling by default', async () => {
+      const { invoke } = await import('@/lib/transport')
+      let storedPreferences = { ...defaultPreferences }
+      vi.mocked(invoke).mockImplementation(async (command, args) => {
+        if (command === 'load_preferences') return storedPreferences
+        if (command === 'patch_preferences') {
+          storedPreferences = {
+            ...storedPreferences,
+            ...(args as { patch: Partial<AppPreferences> }).patch,
+          }
+          return undefined
+        }
+        throw new Error(`Unexpected command ${command}`)
+      })
+
+      const user = userEvent.setup()
+      render(
+        createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          createElement(AppearancePane)
+        )
+      )
+
+      const syncCheckbox = await screen.findByRole('checkbox', {
+        name: 'Sync desktop and mobile scaling',
+      })
+      expect(syncCheckbox).toBeChecked()
+      expect(screen.getAllByRole('slider').at(-1)).toHaveAttribute(
+        'data-disabled'
+      )
+
+      await user.click(syncCheckbox)
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('patch_preferences', {
+          patch: {
+            sync_zoom_levels: false,
+            mobile_zoom_level: ZOOM_LEVEL_DEFAULT,
+          },
+        })
+        expect(syncCheckbox).not.toBeChecked()
+        expect(screen.getAllByRole('slider').at(-1)).not.toHaveAttribute(
+          'data-disabled'
+        )
+      })
+
+      const mobileSlider = screen.getAllByRole('slider').at(-1)
+      mobileSlider?.focus()
+      await user.keyboard('{ArrowRight}')
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('patch_preferences', {
+          patch: { mobile_zoom_level: 100 },
+        })
       })
     })
   })

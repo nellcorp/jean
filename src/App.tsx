@@ -5,21 +5,28 @@ import {
   ingestBootstrapEvents,
   invoke,
   useWsConnectionStatus,
-  useWsDataReady,
-  setWsDataReady,
   useWsAuthError,
   preloadInitialData,
-  prefetchReconnectInitialData,
-  consumeReconnectInitialData,
   setAppDataDir,
   hasPreloadedData,
   listen,
+  onEstablishedWsDisconnect,
+  usesWebSocketBackend,
   type InitialData,
 } from '@/lib/transport'
-import { isNativeApp } from '@/lib/environment'
+import {
+  isLocalBackend,
+  isNativeApp,
+  setNativeOpenAllowed,
+} from '@/lib/environment'
+import { useNativeWindowCloseGuard } from '@/hooks/useNativeWindowCloseGuard'
+import { QuitConfirmationDialog } from '@/components/layout/QuitConfirmationDialog'
+import { setServerPlatform } from '@/lib/platform'
 import { projectsQueryKeys } from '@/services/projects'
 import { chatQueryKeys } from '@/services/chat'
+import { mergeWorktreesPreservingOptimistic } from '@/lib/worktree-list-cache'
 import type { Session, WorktreeSessions } from '@/types/chat'
+import type { Worktree } from '@/types/projects'
 import { initializeCommandSystem } from './lib/commands'
 import { logger } from './lib/logger'
 import { toast } from 'sonner'
@@ -40,6 +47,10 @@ import {
   useOpencodeCliAuth,
 } from './services/opencode-cli'
 import { useUIStore } from './store/ui-store'
+import {
+  resolveInstallPendingAction,
+  shouldOfferUpdateCheck,
+} from './lib/app-update'
 import type { AppPreferences } from './types/preferences'
 import { useChatStore } from './store/chat-store'
 import { useProjectsStore } from './store/projects-store'
@@ -49,6 +60,7 @@ import { useLinuxFileDrop } from './hooks/useLinuxFileDrop'
 import { useZoom } from './hooks/use-zoom'
 import { useImmediateSessionStateSave } from './hooks/useImmediateSessionStateSave'
 import { useCliVersionCheck } from './hooks/useCliVersionCheck'
+import { useServerUpdateCheck } from './hooks/useServerUpdateCheck'
 import { useQueueProcessor } from './hooks/useQueueProcessor'
 import { useBackgroundInvestigation } from './hooks/useBackgroundInvestigation'
 import { useAutoArchiveOnMerge } from './hooks/useAutoArchiveOnMerge'
@@ -69,6 +81,15 @@ import {
   collectWorktreePaths,
 } from './lib/initial-data-cache'
 import { useExternalLinkInterceptor } from './hooks/useExternalLinkInterceptor'
+import { WebAccessAuthScreen } from './components/web/WebAccessAuthScreen'
+import { peekWebReloadState, saveWebReloadState } from './lib/web-reload-state'
+import {
+  clearConnectionSwitch,
+  getActiveRemoteConnection,
+  isConnectionSwitchPending,
+} from './lib/remote-connections'
+import { RemoteConnectionRecovery } from './components/remote/RemoteConnectionRecovery'
+import { getStartupOnboardingAction } from './lib/startup-onboarding'
 
 interface AutoFixStoppedEvent {
   projectId: string
@@ -77,26 +98,18 @@ interface AutoFixStoppedEvent {
   error: string
 }
 
-/** Loading screen shown while preloading initial data (browser mode only). */
-function WebLoadingScreen() {
+function WebLoadingScreen({ label }: { label: string }) {
   return (
-    <div className="flex h-screen w-full items-center justify-center bg-background">
-      <div className="flex flex-col items-center gap-3">
-        <div className="size-6 animate-spin rounded-full border-2 border-muted border-t-primary" />
-        <span className="text-sm text-muted-foreground">Loading...</span>
-      </div>
-    </div>
-  )
-}
-
-/** Full-screen overlay shown while the WebSocket reconnects so stale cached data isn't visible. */
-function WsReconnectOverlay() {
-  return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-background/95">
-      <div className="flex flex-col items-center gap-3">
-        <div className="size-6 animate-spin rounded-full border-2 border-muted border-t-primary" />
-        <span className="text-sm text-muted-foreground">Reconnecting…</span>
-      </div>
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-background">
+      <p
+        role="status"
+        className="whitespace-nowrap text-[16px] leading-[26px] text-muted-foreground"
+        style={{
+          fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+        }}
+      >
+        {label}
+      </p>
     </div>
   )
 }
@@ -104,41 +117,65 @@ function WsReconnectOverlay() {
 /** Full-screen auth error overlay for web access mode. */
 function WsAuthErrorOverlay() {
   const authError = useWsAuthError()
+  const remote = getActiveRemoteConnection()
 
   if (!authError) return null
 
+  if (remote) {
+    return <RemoteConnectionRecovery connection={remote} error={authError} />
+  }
+
+  const handleTokenSubmit = (token: string) => {
+    localStorage.setItem('jean-http-token', token)
+    window.location.reload()
+  }
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/90">
-      <div className="mx-4 max-w-md rounded-lg border border-destructive/50 bg-background p-6 shadow-lg">
-        <div className="flex items-center gap-2 text-destructive">
-          <svg
-            className="size-5 shrink-0"
-            viewBox="0 0 20 20"
-            fill="currentColor"
-          >
-            <path
-              fillRule="evenodd"
-              d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
-              clipRule="evenodd"
-            />
-          </svg>
-          <h2 className="text-sm font-semibold">Connection Failed</h2>
-        </div>
-        <p className="mt-2 text-sm text-muted-foreground">{authError}</p>
-      </div>
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-background/90">
+      <WebAccessAuthScreen
+        authError={authError}
+        onTokenSubmit={handleTokenSubmit}
+      />
     </div>
   )
 }
 
 function App() {
+  const webBackend = usesWebSocketBackend()
+  const wsAuthError = useWsAuthError()
   // Track preloading state for web view
-  const [isPreloading, setIsPreloading] = useState(!isNativeApp())
+  const [isPreloading, setIsPreloading] = useState(webBackend)
+  const [platformVersion, setPlatformVersion] = useState(0)
   const queryClient = useQueryClient()
   const { data: preferences } = usePreferences()
   const onboardingOpen = useUIStore(state => state.onboardingOpen)
   const featureTourOpen = useUIStore(state => state.featureTourOpen)
   const jeanMcpIntroOpen = useUIStore(state => state.jeanMcpIntroOpen)
   const hasStartedTransportRef = useRef(false)
+
+  // Keep quit working during preloading and server-switch overlays (MainWindow
+  // may be unmounted). Production-only; uses destroy() so Windows cannot
+  // silently ignore close while an async handler is registered.
+  useNativeWindowCloseGuard()
+
+  const captureWebReloadState = useCallback(() => {
+    const { sessionChatModalOpen, sessionChatModalWorktreeId } =
+      useUIStore.getState()
+    if (!sessionChatModalOpen || !sessionChatModalWorktreeId) return
+
+    const { selectedProjectId } = useProjectsStore.getState()
+    const { activeSessionIds, worktreePaths } = useChatStore.getState()
+    const activeSessionId = activeSessionIds[sessionChatModalWorktreeId]
+    const modalWorktreePath = worktreePaths[sessionChatModalWorktreeId]
+    if (!selectedProjectId || !activeSessionId || !modalWorktreePath) return
+
+    saveWebReloadState({
+      projectId: selectedProjectId,
+      modalWorktreeId: sessionChatModalWorktreeId,
+      modalWorktreePath,
+      activeSessionId,
+    })
+  }, [])
 
   // Prevent a stray file drop from navigating the webview to file:// (which
   // would lock the whole window). Always-on catch-all for views without their
@@ -151,6 +188,17 @@ function App() {
   // Holds the update object so the title bar indicator can trigger install later
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pendingUpdateRef = useRef<any>(null)
+
+  useEffect(() => {
+    invoke<'mac' | 'windows' | 'linux'>('get_server_platform')
+      .then(platform => {
+        setServerPlatform(platform)
+        setPlatformVersion(version => version + 1)
+      })
+      .catch(error => {
+        logger.warn('Failed to load server platform', { error })
+      })
+  }, [webBackend])
 
   useEffect(() => {
     let unlisten: (() => void) | undefined
@@ -167,19 +215,38 @@ function App() {
     return () => unlisten?.()
   }, [])
 
+  const relaunchApp = useCallback(async () => {
+    const { relaunch } = await import('@tauri-apps/plugin-process')
+    await relaunch()
+  }, [])
+
   const installAppUpdate = useCallback(
     async (update: {
       version: string
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       downloadAndInstall: (cb: (event: any) => void) => Promise<void>
     }) => {
+      const ui = useUIStore.getState()
+
+      // Already installed this session — only relaunch is needed (#507).
+      if (ui.updateReadyVersion) {
+        await relaunchApp()
+        return
+      }
+      if (ui.isUpdateInstalling) {
+        return
+      }
+
       let totalBytes = 0
       let downloadedBytes = 0
       const toastId = toast.loading(`Downloading update ${update.version}...`)
 
-      // Clear the pending indicator since we're installing now
-      useUIStore.getState().setPendingUpdateVersion(null)
-      pendingUpdateRef.current = null
+      // Mark in-progress so auto-check cannot re-open the modal mid-download.
+      // Keep pendingUpdateRef + version badge until success so retries work and
+      // the title bar still shows progress (#507).
+      ui.setIsUpdateInstalling(true)
+      ui.setPendingUpdateVersion(update.version)
+      ui.setUpdateModalVersion(null)
 
       try {
         await update.downloadAndInstall(event => {
@@ -204,20 +271,32 @@ function App() {
           }
         })
 
+        // Package is on disk; app must relaunch. Clear the download handle and
+        // record ready state so further UI actions relaunch instead of re-downloading.
+        pendingUpdateRef.current = null
+        const store = useUIStore.getState()
+        store.setIsUpdateInstalling(false)
+        store.setUpdateReadyVersion(update.version)
+        store.setUpdateModalVersion(null)
+        store.setPendingUpdateVersion(null)
+
         toast.success(`Update ${update.version} installed!`, {
           id: toastId,
           duration: Infinity,
           action: {
             label: 'Restart',
-            onClick: async () => {
-              const { relaunch } = await import('@tauri-apps/plugin-process')
-              await relaunch()
+            onClick: () => {
+              void relaunchApp()
             },
           },
         })
       } catch (updateError) {
         const errorStr = String(updateError)
         logger.error(`Update installation failed: ${errorStr}`)
+        const store = useUIStore.getState()
+        store.setIsUpdateInstalling(false)
+        // Restore title-bar badge so the user can retry without waiting for re-check
+        store.setPendingUpdateVersion(update.version)
         if (errorStr.includes('invalid updater binary format')) {
           toast.error(
             `Auto-update not supported for this installation type. Please update manually.`,
@@ -231,11 +310,34 @@ function App() {
         }
       }
     },
-    []
+    [relaunchApp]
   )
 
+  /** Native shell: run Tauri updater when a web client requests desktop install. */
+  const runNativeDesktopUpdateInstall = useCallback(async () => {
+    if (!isNativeApp()) return
+    try {
+      if (pendingUpdateRef.current) {
+        await installAppUpdate(pendingUpdateRef.current)
+        return
+      }
+      const { check } = await import('@tauri-apps/plugin-updater')
+      const update = await check()
+      if (!update) {
+        toast.success('You are running the latest version')
+        useUIStore.getState().setPendingUpdateVersion(null)
+        useUIStore.getState().setUpdateModalVersion(null)
+        return
+      }
+      pendingUpdateRef.current = update
+      await installAppUpdate(update)
+    } catch (error) {
+      logger.error('Host-requested desktop update failed', { error })
+      toast.error(`Update failed: ${String(error)}`, { duration: 8000 })
+    }
+  }, [installAppUpdate])
+
   // Seed TanStack Query cache and Zustand state from bulk initial data.
-  // Used on both initial preload and WebSocket reconnect.
   const seedCache = useCallback(
     (data: InitialData) => {
       const runningSnapshotMessages: {
@@ -243,18 +345,36 @@ function App() {
         message: Session['messages'][number]
       }[] = []
 
+      if (data.serverPlatform) {
+        setServerPlatform(data.serverPlatform)
+      }
+      if (typeof data.nativeOpenAllowed === 'boolean') {
+        setNativeOpenAllowed(data.nativeOpenAllowed)
+      }
+      // Force a re-render so non-reactive environment helpers (platform,
+      // canOpenNativeApps) update UI after /api/init.
+      if (data.serverPlatform || typeof data.nativeOpenAllowed === 'boolean') {
+        setPlatformVersion(version => version + 1)
+      }
+
       // Seed projects into TanStack Query cache
       if (data.projects) {
         queryClient.setQueryData(projectsQueryKeys.list(), data.projects)
       }
-      // Seed worktrees for each project
+      // Seed worktrees for each project (preserve in-flight pending/deleting)
       if (data.worktreesByProject) {
         for (const [projectId, worktrees] of Object.entries(
           data.worktreesByProject
         )) {
+          const previous = queryClient.getQueryData<Worktree[]>(
+            projectsQueryKeys.worktrees(projectId)
+          )
           queryClient.setQueryData(
             projectsQueryKeys.worktrees(projectId),
-            worktrees
+            mergeWorktreesPreservingOptimistic(
+              worktrees as Worktree[],
+              previous
+            )
           )
         }
       }
@@ -368,22 +488,16 @@ function App() {
         }
       }
       // Seed active sessions (with full chat history/messages).
-      // Use function updater to avoid overwriting cache that has MORE messages
-      // (e.g., from chat:done upsert that arrived before this reconnect seed).
+      // Use a function updater to avoid overwriting cache that already has
+      // more messages from an event or query response racing the bootstrap.
       if (data.activeSessions) {
-        const activeSessionWorktreeIds = data.activeSessionWorktreeIds ?? {}
         const activeReviewingUpdates: Record<string, boolean> = {}
         const activeWaitingUpdates: Record<string, boolean> = {}
-        const activeSessionMappings: Record<string, string> = {}
 
         for (const [sessionId, initSession] of Object.entries(
           data.activeSessions
         )) {
           const session = initSession as Session
-          const worktreeId = activeSessionWorktreeIds[sessionId]
-          if (worktreeId) {
-            activeSessionMappings[sessionId] = worktreeId
-          }
           if (session.is_reviewing) {
             activeReviewingUpdates[sessionId] = true
           }
@@ -421,20 +535,12 @@ function App() {
         }
 
         if (
-          Object.keys(activeSessionMappings).length > 0 ||
           Object.keys(activeReviewingUpdates).length > 0 ||
           Object.keys(activeWaitingUpdates).length > 0
         ) {
           beginSessionStateHydration()
           try {
             useChatStore.setState(state => ({
-              sessionWorktreeMap:
-                Object.keys(activeSessionMappings).length > 0
-                  ? {
-                      ...state.sessionWorktreeMap,
-                      ...activeSessionMappings,
-                    }
-                  : state.sessionWorktreeMap,
               reviewingSessions:
                 data.sessionsByWorktree === undefined
                   ? activeReviewingUpdates
@@ -450,7 +556,7 @@ function App() {
         }
       }
       // Replace sendingSessionIds with exactly the server's running sessions.
-      // This clears sessions that finished while disconnected and restores
+      // This clears sessions that finished while the page was closed and restores
       // sessions that are still running — server is source of truth.
       const runningSendingIds: Record<string, boolean> = {}
       const runningSendStartedAt: Record<string, number> = {}
@@ -501,7 +607,10 @@ function App() {
       })
 
       for (const { sessionId, message } of runningSnapshotMessages) {
-        hydrateRunningSnapshot(sessionId, message, { allowWhileSending: true })
+        hydrateRunningSnapshot(sessionId, message, {
+          allowWhileSending: true,
+          dedupeReplayedOutput: true,
+        })
         queryClient.setQueryData<Session>(
           chatQueryKeys.session(sessionId),
           old =>
@@ -522,7 +631,8 @@ function App() {
       if (data.uiState) {
         queryClient.setQueryData(['ui-state'], data.uiState)
         const uiState = data.uiState as { active_project_id?: string | null }
-        const activeProjectId = uiState.active_project_id
+        const activeProjectId =
+          peekWebReloadState()?.projectId ?? uiState.active_project_id
         if (activeProjectId) {
           const { selectedProjectId, expandProject, selectProject } =
             useProjectsStore.getState()
@@ -537,7 +647,7 @@ function App() {
               (!('is_folder' in project) || !project.is_folder)
           )
           if (!selectedProjectId && !activeWorktreePath && projectExists) {
-            logger.info('Restoring active project from reconnect UI state', {
+            logger.info('Restoring active project from initial UI state', {
               activeProjectId,
             })
             selectProject(activeProjectId)
@@ -555,9 +665,10 @@ function App() {
 
   // Preload initial data via HTTP for web view (faster than waiting for WebSocket)
   useEffect(() => {
-    if (isNativeApp()) return
+    if (!webBackend) return
 
     const initialSelectedProjectId =
+      peekWebReloadState()?.projectId ??
       useProjectsStore.getState().selectedProjectId
     preloadInitialData(initialSelectedProjectId)
       .then(data => {
@@ -568,7 +679,6 @@ function App() {
           checkWebClientVersion(data)
           seedCache(data)
           ingestBootstrapEvents(data.replayEvents ?? [])
-          setWsDataReady(true)
         }
       })
       .catch(err => {
@@ -577,7 +687,7 @@ function App() {
       .finally(() => {
         setIsPreloading(false)
       })
-  }, [queryClient, seedCache])
+  }, [queryClient, seedCache, webBackend])
 
   // Global safety net for uncaught async errors / promise rejections.
   // Without this, a thrown invoke() (e.g. auth/network failure) can leave the
@@ -658,6 +768,9 @@ function App() {
   // Check for CLI updates on startup (shows toast notification if updates available)
   useCliVersionCheck()
 
+  // Headless jean-server binary updates (Web Access only)
+  useServerUpdateCheck()
+
   // Global streaming event listeners - must be at App level so they stay active
   // even when ChatWindow is unmounted (e.g., when viewing a different worktree)
   useStreamingEvents({ queryClient })
@@ -668,10 +781,20 @@ function App() {
   // Browser mode: only open WebSocket after preload + listener registration.
   // This lets us replay buffered server events before live events start arriving.
   useEffect(() => {
-    if (isNativeApp() || isPreloading || hasStartedTransportRef.current) return
+    if (!webBackend || isNativeApp()) return
+
+    return onEstablishedWsDisconnect(() => {
+      logger.info('WebSocket disconnected, reloading web app')
+      captureWebReloadState()
+      window.location.reload()
+    })
+  }, [captureWebReloadState, webBackend])
+
+  useEffect(() => {
+    if (!webBackend || isPreloading || hasStartedTransportRef.current) return
     hasStartedTransportRef.current = true
     connectTransport()
-  }, [isPreloading])
+  }, [isPreloading, webBackend])
 
   // Global queue processor - must be at App level so queued messages execute
   // even when the worktree is not focused (ChatWindow unmounted)
@@ -687,85 +810,17 @@ function App() {
   // One-time: detect installed backends and set magic prompt defaults accordingly
   useMagicPromptAutoDefaults()
 
-  // When WebSocket connects (browser mode), reload state.
-  // On first connect: invalidate non-preloaded queries.
-  // On reconnect: re-fetch bulk data via HTTP to restore everything fast.
+  // A fresh page bootstrap is faster and more reliable than repairing stale
+  // in-memory state. The backend keeps long-running jobs and
+  // terminals alive, so reloading behaves like reopening Jean without losing
+  // backend work.
   const wsConnected = useWsConnectionStatus()
-  const wsDataReady = useWsDataReady()
-  const hadWsConnectionRef = useRef(false)
   useEffect(() => {
-    if (isNativeApp()) return
+    if (!webBackend || !wsConnected) return
 
-    if (!wsConnected) {
-      if (hadWsConnectionRef.current) {
-        const activeSessionIds = useChatStore.getState().activeSessionIds
-        const selectedProjectId = useProjectsStore.getState().selectedProjectId
-        void prefetchReconnectInitialData(activeSessionIds, selectedProjectId)
-      }
-      return
-    }
-
-    const reconnected = hadWsConnectionRef.current
-    hadWsConnectionRef.current = true
-
-    if (reconnected) {
-      // Use the prefetch that was started during the backoff wait.
-      // Falls back to a fresh fetch with the browser's active session IDs
-      // so the server loads the correct sessions even when ui_state.json
-      // on disk is stale (debounced save hasn't flushed yet).
-      const activeSessionIds = useChatStore.getState().activeSessionIds
-      const selectedProjectId = useProjectsStore.getState().selectedProjectId
-      const dataPromise = consumeReconnectInitialData(
-        activeSessionIds,
-        selectedProjectId
-      )
-      logger.info('WebSocket reconnected, re-fetching initial data via HTTP')
-      dataPromise
-        .then(data => {
-          if (data) {
-            checkWebClientVersion(data)
-            seedCache(data)
-            ingestBootstrapEvents(data.replayEvents ?? [])
-            logger.info('Reconnect: re-seeded cache from HTTP')
-            setWsDataReady(true)
-            // Invalidate non-preloaded queries after a frame so the seeded
-            // cache renders first (prevents flash of stale → fresh data).
-            requestAnimationFrame(() => {
-              queryClient.invalidateQueries({
-                predicate: query => {
-                  const key = query.queryKey[0]
-                  return (
-                    key !== 'projects' &&
-                    key !== 'preferences' &&
-                    key !== 'ui-state' &&
-                    key !== 'chat'
-                  )
-                },
-              })
-            })
-          } else {
-            // HTTP fetch returned null (server not ready yet) — invalidate
-            // everything so TanStack Query refetches via WebSocket.
-            logger.warn(
-              'Reconnect: HTTP re-fetch returned no data, invalidating all queries'
-            )
-            setWsDataReady(true)
-            queryClient.invalidateQueries()
-          }
-        })
-        .catch(err => {
-          logger.warn(
-            'Reconnect: HTTP re-fetch failed, falling back to query invalidation',
-            { error: err }
-          )
-          setWsDataReady(true)
-          // Fallback: invalidate everything so TanStack Query refetches via WebSocket
-          queryClient.invalidateQueries()
-        })
-    } else {
-      // First connect: mark data ready (preload already seeded the cache)
-      // and invalidate non-preloaded queries only.
-      setWsDataReady(true)
+    // First connect: invalidate non-preloaded queries. If the HTTP preload
+    // failed, invalidate everything so it fetches over the open WebSocket.
+    if (hasPreloadedData()) {
       logger.info('WebSocket connected, invalidating dynamic queries')
       queryClient.invalidateQueries({
         predicate: query => {
@@ -778,8 +833,13 @@ function App() {
           )
         },
       })
+    } else {
+      logger.warn(
+        'WebSocket connected without preloaded data, invalidating all queries'
+      )
+      queryClient.invalidateQueries()
     }
-  }, [wsConnected, queryClient, seedCache])
+  }, [wsConnected, queryClient, webBackend])
 
   // Add native-app class to body for desktop-only CSS (cursor, user-select, etc.)
   useEffect(() => {
@@ -840,56 +900,51 @@ function App() {
     if (!isNativeApp()) return
     if (!cliCheckReady) return
 
-    // Wait until the status queries have actually resolved before deciding.
-    if (!claudeStatus || !codexStatus || !opencodeStatus || !ghStatus) return
-
-    const isLoading =
-      isClaudeStatusLoading ||
-      isCodexStatusLoading ||
-      isOpencodeStatusLoading ||
-      isGhStatusLoading ||
-      (claudeStatus?.installed && isClaudeAuthLoading) ||
-      (codexStatus?.installed && isCodexAuthLoading) ||
-      (opencodeStatus?.installed && isOpencodeAuthLoading) ||
-      (ghStatus?.installed && isGhAuthLoading)
-    if (isLoading) return
-
-    const ghReady = !!ghStatus?.installed && !!ghAuth?.authenticated
-    const claudeReady = !!claudeStatus?.installed && !!claudeAuth?.authenticated
-    const codexReady = !!codexStatus?.installed && !!codexAuth?.authenticated
-    const opencodeReady =
-      !!opencodeStatus?.installed && !!opencodeAuth?.authenticated
-    const hasAiBackendReady = claudeReady || codexReady || opencodeReady
-
-    if (useUIStore.getState().onboardingDismissed) return
-
-    // On Windows, show onboarding if WSL mode hasn't been chosen yet
+    const onboarding = useUIStore.getState()
     const prefs = queryClient.getQueryData<AppPreferences>(['preferences'])
-    if (isWindows && prefs && !prefs.wsl_mode_chosen) {
-      logger.info('Windows WSL mode not chosen, showing onboarding')
-      useUIStore.getState().setOnboardingOpen(true)
+    const action = getStartupOnboardingAction({
+      statuses: [claudeStatus, codexStatus, opencodeStatus, ghStatus],
+      auth: [claudeAuth, codexAuth, opencodeAuth, ghAuth],
+      onboardingOpen: onboarding.onboardingOpen,
+      onboardingDismissed: onboarding.onboardingDismissed,
+      onboardingManuallyTriggered: onboarding.onboardingManuallyTriggered,
+      requiresWslChoice: !!(isWindows && prefs && !prefs.wsl_mode_chosen),
+    })
+
+    if (action === 'wait' || action === 'none') return
+
+    if (action === 'ready') {
+      if (prefs && !prefs.has_seen_feature_tour) {
+        onboarding.setFeatureTourOpen(true)
+      }
       return
     }
 
-    if (!ghReady || !hasAiBackendReady) {
-      logger.info('CLI setup needed, showing onboarding', {
-        claudeInstalled: claudeStatus?.installed,
-        codexInstalled: codexStatus?.installed,
-        opencodeInstalled: opencodeStatus?.installed,
-        ghInstalled: ghStatus?.installed,
-        claudeAuth: claudeAuth?.authenticated,
-        codexAuth: codexAuth?.authenticated,
-        opencodeAuth: opencodeAuth?.authenticated,
-        ghAuth: ghAuth?.authenticated,
-      })
-      useUIStore.getState().setOnboardingOpen(true)
-    } else {
-      // CLIs already set up — show feature tour if not yet seen
-      const prefs = queryClient.getQueryData<AppPreferences>(['preferences'])
+    if (action === 'close') {
+      onboarding.setOnboardingOpen(false)
       if (prefs && !prefs.has_seen_feature_tour) {
-        useUIStore.getState().setFeatureTourOpen(true)
+        onboarding.setFeatureTourOpen(true)
       }
+      return
     }
+
+    if (isWindows && prefs && !prefs.wsl_mode_chosen) {
+      logger.info('Windows WSL mode not chosen, showing onboarding')
+      onboarding.setOnboardingOpen(true)
+      return
+    }
+
+    logger.info('CLI setup needed, showing onboarding', {
+      claudeInstalled: claudeStatus?.installed,
+      codexInstalled: codexStatus?.installed,
+      opencodeInstalled: opencodeStatus?.installed,
+      ghInstalled: ghStatus?.installed,
+      claudeAuth: claudeAuth?.authenticated,
+      codexAuth: codexAuth?.authenticated,
+      opencodeAuth: opencodeAuth?.authenticated,
+      ghAuth: ghAuth?.authenticated,
+    })
+    onboarding.setOnboardingOpen(true)
   }, [
     claudeStatus,
     codexStatus,
@@ -908,6 +963,7 @@ function App() {
     isOpencodeAuthLoading,
     isGhAuthLoading,
     cliCheckReady,
+    platformVersion,
     queryClient,
   ])
 
@@ -1002,9 +1058,10 @@ function App() {
 
   // Kill all terminals on page refresh/close (backup for Rust-side cleanup)
   useEffect(() => {
-    if (!isNativeApp()) return
+    if (!isNativeApp() || webBackend) return
 
     const handleBeforeUnload = () => {
+      if (isConnectionSwitchPending()) return
       // Best-effort sync cleanup for refresh scenarios
       // Note: async operations may not complete, but Rust-side RunEvent::Exit
       // will handle proper cleanup on app quit
@@ -1014,7 +1071,7 @@ function App() {
     }
     window.addEventListener('beforeunload', handleBeforeUnload)
     return () => window.removeEventListener('beforeunload', handleBeforeUnload)
-  }, [])
+  }, [webBackend])
 
   // Initialize command system and cleanup on app startup
   useEffect(() => {
@@ -1029,16 +1086,43 @@ function App() {
     })
 
     // Auto-updater logic - check for updates 5 seconds after app loads
+    // (native shell only; web clients use useServerUpdateCheck → host check)
     const checkForUpdates = async () => {
       if (!isNativeApp()) return
-      // Don't re-show modal if user already dismissed an update
-      if (useUIStore.getState().pendingUpdateVersion) return
+      const ui = useUIStore.getState()
+      // Don't re-offer while deferred, downloading, or already installed (#507)
+      if (
+        !shouldOfferUpdateCheck({
+          pendingUpdateVersion: ui.pendingUpdateVersion,
+          updateReadyVersion: ui.updateReadyVersion,
+          isUpdateInstalling: ui.isUpdateInstalling,
+        })
+      ) {
+        return
+      }
 
       try {
         const { check } = await import('@tauri-apps/plugin-updater')
 
         const update = await check()
         if (update) {
+          // Re-check guards after the async network call — install may have started
+          const after = useUIStore.getState()
+          if (
+            !shouldOfferUpdateCheck({
+              pendingUpdateVersion: after.pendingUpdateVersion,
+              updateReadyVersion: after.updateReadyVersion,
+              isUpdateInstalling: after.isUpdateInstalling,
+            })
+          ) {
+            try {
+              await update.close?.()
+            } catch {
+              // Resource may already be released
+            }
+            return
+          }
+
           logger.info(`Update available: ${update.version}`)
           pendingUpdateRef.current = update
           useUIStore.getState().setUpdateModalVersion(update.version)
@@ -1049,11 +1133,37 @@ function App() {
       }
     }
 
-    // Listen for install trigger from title bar indicator
+    // Listen for install trigger from title bar indicator / modal
     const handleInstallPending = () => {
-      if (pendingUpdateRef.current) {
-        installAppUpdate(pendingUpdateRef.current)
+      const ui = useUIStore.getState()
+      const action = resolveInstallPendingAction({
+        updateReadyVersion: ui.updateReadyVersion,
+        isUpdateInstalling: ui.isUpdateInstalling,
+        hasPendingUpdateObject: Boolean(pendingUpdateRef.current),
+      })
+      if (action === 'relaunch') {
+        void relaunchApp()
+        return
       }
+      if (action === 'install' && pendingUpdateRef.current) {
+        void installAppUpdate(pendingUpdateRef.current)
+        return
+      }
+      // Already downloading — ignore duplicate install triggers (#507)
+      if (ui.isUpdateInstalling) return
+
+      // Web / remote: ask the host to install (desktop event or jean-server binary)
+      const version =
+        ui.pendingUpdateVersion || ui.updateModalVersion
+      if (!version) {
+        logger.warn(
+          'install-pending-update fired with no version or update object'
+        )
+        return
+      }
+      void import('@/hooks/useServerUpdateCheck').then(({ applyServerUpdate }) =>
+        applyServerUpdate(version)
+      )
     }
     window.addEventListener('install-pending-update', handleInstallPending)
 
@@ -1080,7 +1190,7 @@ function App() {
         webAccessSoundsEnabled: prefs?.web_access_sounds_enabled ?? true,
       })
 
-      if (isNativeApp()) {
+      if (isNativeApp() && !webBackend && !isConnectionSwitchPending()) {
         // Kill any orphaned terminals from previous native app session/reload.
         // Web access clients must not kill server-owned terminals when their
         // browser tab reloads, sleeps, or is discarded.
@@ -1112,9 +1222,14 @@ function App() {
           const { sendingSessionIds, removeSendingSession } =
             useChatStore.getState()
           const resumableIds = new Set(resumable.map(r => r.session_id))
-          for (const sessionId of Object.keys(sendingSessionIds)) {
-            if (!resumableIds.has(sessionId)) {
-              removeSendingSession(sessionId)
+          // Web bootstrap already restored the registry's authoritative running
+          // set. Recovery can omit a live run when its metadata snapshot is
+          // temporarily unavailable, so only reconcile stale local state here.
+          if (!webBackend) {
+            for (const sessionId of Object.keys(sendingSessionIds)) {
+              if (!resumableIds.has(sessionId)) {
+                removeSendingSession(sessionId)
+              }
             }
           }
 
@@ -1247,6 +1362,8 @@ function App() {
         .catch(error => {
           logger.error('Failed to check resumable sessions', { error })
         })
+
+      clearConnectionSwitch()
     }, 2500)
 
     // Check for updates 5 seconds after app loads, then every 30 minutes
@@ -1259,21 +1376,46 @@ function App() {
       window.removeEventListener('install-pending-update', handleInstallPending)
       window.removeEventListener('update-available', handleUpdateAvailable)
     }
-  }, [installAppUpdate])
+  }, [installAppUpdate, relaunchApp, webBackend])
 
-  // Show loading screen while preloading initial data (web view only)
+  // Web clients request desktop install via apply_server_update → this event.
+  // Only the *host* native shell should run Tauri's updater (not a remote client
+  // that happens to receive the same event over the WebSocket).
+  useEffect(() => {
+    if (!isNativeApp()) return
+    let unlisten: (() => void) | undefined
+    listen<{ version?: string }>('host:install-desktop-update', () => {
+      if (!isLocalBackend()) return
+      void runNativeDesktopUpdateInstall()
+    }).then(fn => {
+      unlisten = fn
+    })
+    return () => unlisten?.()
+  }, [runNativeDesktopUpdateInstall])
+
+  // Show loading screen while preloading initial data (web view only).
+  // QuitConfirmationDialog stays mounted so X/quit can still confirm or
+  // destroy the native window while the overlay is up.
   if (isPreloading) {
-    return <WebLoadingScreen />
+    return (
+      <>
+        <WebLoadingScreen label="Loading Jean..." />
+        {isNativeApp() && <QuitConfirmationDialog />}
+      </>
+    )
   }
 
   return (
     <ErrorBoundary>
       <ThemeProvider>
         <MainWindow />
-        {!isNativeApp() && !isPreloading && !wsDataReady && (
-          <WsReconnectOverlay />
+        {webBackend && !wsConnected && !wsAuthError && (
+          <WebLoadingScreen label="Loading Jean..." />
         )}
-        {!isNativeApp() && <WsAuthErrorOverlay />}
+        {webBackend && <WsAuthErrorOverlay />}
+        {/* App-level dialog so quit confirmation wins over loading overlay
+            even if MainWindow's copy is covered / not yet mounted. */}
+        {isNativeApp() && <QuitConfirmationDialog />}
       </ThemeProvider>
     </ErrorBoundary>
   )

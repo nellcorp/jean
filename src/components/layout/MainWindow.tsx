@@ -17,9 +17,9 @@ import { DevModeBanner } from './DevModeBanner'
 import { SidebarWidthProvider } from './SidebarWidthContext'
 import { MainWindowContent } from './MainWindowContent'
 import { CommandPalette } from '@/components/command-palette/CommandPalette'
-import { QuitConfirmationDialog } from './QuitConfirmationDialog'
 import { BranchConflictDialog } from '@/components/worktree/BranchConflictDialog'
 import { TeardownOutputDialog } from '@/components/worktree/TeardownOutputDialog'
+import { WindowResizeHandles } from './WindowResizeHandles'
 
 // Lazy-loaded heavy modals (code splitting)
 const LeftSideBar = lazy(() =>
@@ -159,14 +159,17 @@ const CloseWorktreeDialog = lazy(() =>
 )
 import { FloatingDock } from '@/components/ui/floating-dock'
 import { Toaster } from '@/components/ui/sonner'
+import { MobileLeftSidebar } from './MobileLeftSidebar'
 import { BrowserSidePane } from '@/components/browser/BrowserSidePane'
 import { BrowserPanel } from '@/components/browser/BrowserPanel'
 import { useBrowserEvents } from '@/hooks/useBrowserPane'
 import { useToasterOffset } from '@/hooks/useToasterOffset'
 import { useWindowMaximized } from '@/hooks/use-window-maximized'
 import { useTerminalThemeSync } from '@/hooks/useTerminalThemeSync'
+import { useSwipeBack } from '@/hooks/useSwipeBack'
 import { useUIStore } from '@/store/ui-store'
 import { useProjectsStore } from '@/store/projects-store'
+import { useChatStore } from '@/store/chat-store'
 import { useMainWindowEventListeners } from '@/hooks/useMainWindowEventListeners'
 import { useGlobalInputSanitizer } from '@/hooks/useGlobalInputSanitizer'
 import { useCloseSessionOrWorktreeKeybinding } from '@/services/chat'
@@ -189,7 +192,7 @@ import {
   useWorktreeEvents,
 } from '@/services/projects'
 import { isNativeApp } from '@/lib/environment'
-import { isWindows } from '@/lib/platform'
+import { isLinux, isWindows } from '@/lib/platform'
 
 // Left sidebar resize constraints (pixels)
 const MIN_SIDEBAR_WIDTH = 150
@@ -214,6 +217,7 @@ export function MainWindow() {
   const leftSidebarVisible = useUIStore(state => state.leftSidebarVisible)
   const leftSidebarSize = useUIStore(state => state.leftSidebarSize)
   const setLeftSidebarSize = useUIStore(state => state.setLeftSidebarSize)
+  const setLeftSidebarVisible = useUIStore(state => state.setLeftSidebarVisible)
   const preferencesOpen = useUIStore(state => state.preferencesOpen)
   const commitModalOpen = useUIStore(state => state.commitModalOpen)
   const onboardingOpen = useUIStore(state => state.onboardingOpen)
@@ -221,7 +225,6 @@ export function MainWindow() {
   const jeanMcpIntroOpen = useUIStore(state => state.jeanMcpIntroOpen)
   const openInModalOpen = useUIStore(state => state.openInModalOpen)
   const remotePickerOpen = useUIStore(state => state.remotePickerOpen)
-  const magicModalOpen = useUIStore(state => state.magicModalOpen)
   const resolveConflictsDialogOpen = useUIStore(
     state => state.resolveConflictsDialogOpen
   )
@@ -240,6 +243,8 @@ export function MainWindow() {
   const updateModalVersion = useUIStore(state => state.updateModalVersion)
   const githubDashboardOpen = useUIStore(state => state.githubDashboardOpen)
   const newSessionModeTarget = useUIStore(state => state.newSessionModeTarget)
+  const sessionChatModalOpen = useUIStore(state => state.sessionChatModalOpen)
+  const activeWorktreePath = useChatStore(state => state.activeWorktreePath)
   const selectedWorktreeId = useProjectsStore(state => state.selectedWorktreeId)
   const addProjectDialogOpen = useProjectsStore(
     state => state.addProjectDialogOpen
@@ -255,6 +260,17 @@ export function MainWindow() {
 
   const isMobile = useIsMobile()
   const isTouch = useIsTouchDevice()
+  const canSwipeOpenSidebar =
+    isMobile &&
+    !activeWorktreePath &&
+    !leftSidebarVisible &&
+    !sessionChatModalOpen
+  const swipeOpenSidebar = useSwipeBack({
+    onSwipeBack: useCallback(() => {
+      useUIStore.getState().setLeftSidebarVisible(true)
+    }, []),
+    enabled: canSwipeOpenSidebar,
+  })
   const swipeDown = useSwipeDown({
     onSwipeDown: useCallback(() => {
       useUIStore.getState().setCommandPaletteOpen(true)
@@ -280,13 +296,16 @@ export function MainWindow() {
     return `${project.name} › ${worktree.name}${branchSuffix}`
   }, [project, worktree, isMobile])
 
-  // Compute polling info - null if no worktree or data not loaded
+  // Compute polling info - null if no worktree or data not loaded.
+  // Must use the worktree's own base_branch (e.g. v4.x), not the project
+  // default (next/main), or status shows false behind counts and huge diffs.
   const pollingInfo: WorktreePollingInfo | null = useMemo(() => {
     if (!worktree || !project) return null
     return {
       worktreeId: worktree.id,
       worktreePath: worktree.path,
-      baseBranch: project.default_branch ?? 'main',
+      baseBranch:
+        worktree.base_branch ?? project.default_branch ?? 'main',
       prNumber: worktree.pr_number,
       prUrl: worktree.pr_url,
     }
@@ -430,7 +449,9 @@ export function MainWindow() {
     reviewCommentsModalOpen
   )
   const shouldRenderWorkflowRunsModal = useRetainedMount(workflowRunsModalOpen)
-  const shouldRenderMagicModal = useRetainedMount(magicModalOpen)
+  // Always mount MagicModal so automation event listeners (mobile toolbar
+  // magic-command dispatches) work even when the dialog has never been opened.
+  const shouldRenderMagicModal = true
   const shouldRenderResolveConflictsDialog = useRetainedMount(
     resolveConflictsDialogOpen
   )
@@ -460,6 +481,8 @@ export function MainWindow() {
         roundedClass
       )}
     >
+      {isNativeApp() && isLinux && <WindowResizeHandles />}
+
       {/* Touch swipe-down pull indicator */}
       {isTouch && swipeDown.isSwiping && (
         <div
@@ -485,8 +508,8 @@ export function MainWindow() {
 
       {/* Main Content Area */}
       <div className="flex flex-1 overflow-hidden pt-8">
-        {/* Left Sidebar with pixel-based width - only render after UI state is initialized */}
-        {leftSidebarVisible && isInitialized && (
+        {/* Desktop: in-flow left sidebar (shifts layout). Only after UI state init. */}
+        {!isMobile && leftSidebarVisible && isInitialized && (
           <SidebarWidthProvider value={leftSidebarSize}>
             <div
               ref={sidebarRef}
@@ -500,8 +523,8 @@ export function MainWindow() {
           </SidebarWidthProvider>
         )}
 
-        {/* Custom resize handle for left sidebar */}
-        {leftSidebarVisible && isInitialized && (
+        {/* Desktop: custom resize handle for left sidebar */}
+        {!isMobile && leftSidebarVisible && isInitialized && (
           <div
             className="relative h-full w-px bg-border"
             onMouseDown={handleResizeStart}
@@ -511,10 +534,26 @@ export function MainWindow() {
           </div>
         )}
 
+        {/* Mobile: overlay drawer — does not shift main content; backdrop dismisses */}
+        {isMobile && isInitialized && (
+          <MobileLeftSidebar
+            open={leftSidebarVisible}
+            onOpenChange={setLeftSidebarVisible}
+            width={leftSidebarSize}
+            isDragging={swipeOpenSidebar.isSwiping}
+            dragOffset={swipeOpenSidebar.translateX}
+            dragTransition={swipeOpenSidebar.transitionStyle}
+          />
+        )}
+
         {/* Main Content + bottom browser panel stacked vertically */}
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="relative min-w-0 flex-1 overflow-hidden">
-            <MainWindowContent />
+            <MainWindowContent
+              sidebarSwipeContainerRef={
+                canSwipeOpenSidebar ? swipeOpenSidebar.containerRef : undefined
+              }
+            />
             <FloatingDock />
           </div>
           {/* Browser bottom panel - native-only, pinned to bottom */}
@@ -671,7 +710,6 @@ export function MainWindow() {
           />
         </Suspense>
       )}
-      <QuitConfirmationDialog />
       {shouldRenderGitHubDashboardModal && (
         <Suspense fallback={null}>
           <GitHubDashboardModal />

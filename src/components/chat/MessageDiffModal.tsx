@@ -30,7 +30,7 @@ import { useTheme } from '@/hooks/use-theme'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { usePreferences } from '@/services/preferences'
 import { invoke } from '@/lib/transport'
-import { isNativeApp } from '@/lib/environment'
+import { canOpenInEditor } from '@/lib/environment'
 
 function DiffBlock({
   fileName,
@@ -182,6 +182,11 @@ export function MessageDiffModal({
     [currentChangeFile]
   )
 
+  const currentChangeKey = useMemo(() => {
+    if (!patch) return relativePath
+    return `${relativePath}:${patch.length}:${patch.slice(0, 80)}:${patch.slice(-80)}`
+  }, [patch, relativePath])
+
   const fileDiffOptions = useMemo(
     () => ({
       theme: {
@@ -300,7 +305,7 @@ export function MessageDiffModal({
               </Tooltip>
             </div>
 
-            {isNativeApp() && (
+            {canOpenInEditor() && (
               <button
                 type="button"
                 onClick={handleOpenExternal}
@@ -326,6 +331,7 @@ export function MessageDiffModal({
           ) : currentChangeFile ? (
             <DiffBlock fileName={relativePath}>
               <FileDiff
+                key={currentChangeKey}
                 fileDiff={currentChangeFile}
                 options={fileDiffOptions}
               />

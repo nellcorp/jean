@@ -1,6 +1,10 @@
 import { fireEvent, render, screen } from '@/test/test-utils'
 import { describe, expect, it, vi } from 'vitest'
-import { ToolCallInline } from './ToolCallInline'
+import {
+  normalizeToolCallForDisplay,
+  TaskCallInline,
+  ToolCallInline,
+} from './ToolCallInline'
 import type { ComponentProps } from 'react'
 import type * as InlineFileDiffModule from './InlineFileDiff'
 
@@ -140,6 +144,24 @@ describe('ToolCallInline', () => {
     expect(screen.queryByText(/unhandled tool/i)).not.toBeInTheDocument()
   })
 
+  it('renders meaningful success output from a non-Codex tool', () => {
+    render(
+      <ToolCallInline
+        toolCall={{
+          id: 'tool-commandcode-shell-success',
+          name: 'shell_command',
+          input: { command: 'deploy' },
+          output: 'success',
+        }}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(screen.getByText('Output:')).toBeInTheDocument()
+    expect(screen.getByText(/^success$/)).toBeInTheDocument()
+  })
+
   it('renders additional Command Code snake_case tools without the unhandled fallback', () => {
     const tools = [
       {
@@ -254,5 +276,265 @@ describe('ToolCallInline', () => {
     expect(screen.getAllByText('legacy.ts')).toHaveLength(2)
     expect(container.querySelector('diffs-container')).not.toBeNull()
     expect(screen.queryByText('Output:')).not.toBeInTheDocument()
+  })
+})
+
+describe('normalizeToolCallForDisplay', () => {
+  it('normalizes persisted Grok ACP tool variants for the existing renderers', () => {
+    expect(
+      normalizeToolCallForDisplay('search', {
+        variant: 'Grep',
+        pattern: 'needle',
+        path: '/tmp',
+      })
+    ).toMatchObject({
+      name: 'Grep',
+      input: { pattern: 'needle', path: '/tmp' },
+    })
+
+    expect(
+      normalizeToolCallForDisplay('read', {
+        variant: 'CursorRead',
+        path: '/tmp/a.rs',
+      })
+    ).toMatchObject({
+      name: 'Read',
+      input: { file_path: '/tmp/a.rs' },
+    })
+
+    expect(
+      normalizeToolCallForDisplay('edit', {
+        variant: 'CursorWrite',
+        path: '/tmp/a.rs',
+        contents: 'hello',
+      })
+    ).toMatchObject({
+      name: 'Write',
+      input: { file_path: '/tmp/a.rs', content: 'hello' },
+    })
+
+    expect(
+      normalizeToolCallForDisplay('other', {
+        variant: 'TaskOutput',
+        task_ids: ['task-1', 'task-2'],
+      })
+    ).toMatchObject({
+      name: 'WaitForAgents',
+      input: { receiver_thread_ids: ['task-1', 'task-2'] },
+    })
+  })
+
+  it('renders a raw Grok grep update instead of the JSON fallback', () => {
+    render(
+      <ToolCallInline
+        toolCall={{
+          id: 'grok-grep-1',
+          name: 'search',
+          input: {
+            variant: 'Grep',
+            pattern: 'needle',
+            path: '/tmp',
+          },
+        }}
+      />
+    )
+
+    expect(screen.getByText('Grep')).toBeInTheDocument()
+    expect(screen.getByText('"needle" in /tmp')).toBeInTheDocument()
+    expect(screen.queryByText(/unhandled tool/i)).not.toBeInTheDocument()
+  })
+
+  it('renders CodexWebSearch with query detail instead of blank completed', () => {
+    render(
+      <ToolCallInline
+        toolCall={{
+          id: 'ws-1',
+          name: 'CodexWebSearch',
+          input: {
+            query: 'tauri v2 plugins',
+            results: [{ title: 'Tauri docs', url: 'https://v2.tauri.app' }],
+          },
+          output: 'completed',
+        }}
+      />
+    )
+
+    expect(screen.getByText('Web Search')).toBeInTheDocument()
+    expect(screen.getByText('tauri v2 plugins')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(screen.getByText(/Query: tauri v2 plugins/)).toBeInTheDocument()
+    expect(screen.getByText(/Tauri docs/)).toBeInTheDocument()
+    // Placeholder "completed" must not appear as useful content
+    expect(screen.queryByText(/^completed$/)).not.toBeInTheDocument()
+    expect(screen.queryByText('Output:')).not.toBeInTheDocument()
+  })
+
+  it('renders CodexWebSearch openPage action url as detail', () => {
+    render(
+      <ToolCallInline
+        toolCall={{
+          id: 'ws-2',
+          name: 'CodexWebSearch',
+          input: {
+            query: '',
+            action: { type: 'openPage', url: 'https://example.com/docs' },
+          },
+        }}
+      />
+    )
+
+    expect(screen.getByText('Web Search')).toBeInTheDocument()
+    expect(screen.getByText('https://example.com/docs')).toBeInTheDocument()
+  })
+
+  it('renders CodexImageView path instead of blank completed', () => {
+    render(
+      <ToolCallInline
+        toolCall={{
+          id: 'img-1',
+          name: 'CodexImageView',
+          input: { path: '/tmp/screenshots/ui.png' },
+          output: 'completed',
+        }}
+      />
+    )
+
+    expect(screen.getByText('Image View')).toBeInTheDocument()
+    expect(screen.getByText('ui.png')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(screen.getByText('/tmp/screenshots/ui.png')).toBeInTheDocument()
+    expect(screen.queryByText(/^completed$/)).not.toBeInTheDocument()
+  })
+
+  it('surfaces a detail field for unhandled tools when available', () => {
+    render(
+      <ToolCallInline
+        toolCall={{
+          id: 'dyn-1',
+          name: 'DynamicToolCall:lookup',
+          input: { query: 'session recovery' },
+          output: 'completed',
+        }}
+      />
+    )
+
+    expect(
+      screen.getByText('DynamicToolCall:lookup (unhandled tool)')
+    ).toBeInTheDocument()
+    expect(screen.getByText('session recovery')).toBeInTheDocument()
+  })
+})
+
+describe('TaskCallInline', () => {
+  it('shows the subagent final report when expanded', () => {
+    render(
+      <TaskCallInline
+        taskToolCall={{
+          id: 'task-1',
+          name: 'Task',
+          input: {
+            description: 'Explore auth',
+            prompt: 'Find how auth works',
+            subagent_type: 'Explore',
+          },
+          output:
+            'Findings: auth uses JWT middleware.\n\nEntry point is `src/auth.rs`.',
+        }}
+        subToolCalls={[
+          {
+            id: 'sub-read-1',
+            name: 'Read',
+            input: { file_path: 'src/auth.rs' },
+            parent_tool_use_id: 'task-1',
+          },
+        ]}
+      />
+    )
+
+    expect(screen.getByText('Task (Explore)')).toBeInTheDocument()
+    expect(screen.getByText('Explore auth')).toBeInTheDocument()
+    expect(screen.queryByText('Report:')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(screen.getByText('Report:')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Findings: auth uses JWT middleware/)
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Find how auth works/)).toBeInTheDocument()
+  })
+
+  it('does not render a Report section when output is empty', () => {
+    render(
+      <TaskCallInline
+        taskToolCall={{
+          id: 'task-empty',
+          name: 'Task',
+          input: {
+            description: 'Still running',
+            prompt: 'Do research',
+          },
+          output: '   ',
+        }}
+        subToolCalls={[]}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button'))
+
+    expect(screen.getByText('Do research')).toBeInTheDocument()
+    expect(screen.queryByText('Report:')).not.toBeInTheDocument()
+  })
+
+  it('labels Agent tool calls as Agent and nests them', () => {
+    render(
+      <TaskCallInline
+        taskToolCall={{
+          id: 'agent-1',
+          name: 'Agent',
+          input: {
+            description: 'Nested agent',
+            prompt: 'Delegate work',
+            subagent_type: 'general-purpose',
+          },
+          output: 'Nested agent finished.',
+        }}
+        subToolCalls={[
+          {
+            id: 'agent-nested',
+            name: 'Agent',
+            input: {
+              description: 'Child agent',
+              prompt: 'Child work',
+            },
+            parent_tool_use_id: 'agent-1',
+          },
+        ]}
+        allToolCalls={[
+          {
+            id: 'agent-nested',
+            name: 'Agent',
+            input: {
+              description: 'Child agent',
+              prompt: 'Child work',
+            },
+            parent_tool_use_id: 'agent-1',
+          },
+        ]}
+      />
+    )
+
+    expect(screen.getByText('Agent (general-purpose)')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Agent (general-purpose)'))
+
+    expect(screen.getByText('Report:')).toBeInTheDocument()
+    expect(screen.getByText('Nested agent finished.')).toBeInTheDocument()
+    // Nested Agent renders as another TaskCallInline row, not a SubToolItem
+    expect(screen.getByText('Child agent')).toBeInTheDocument()
   })
 })

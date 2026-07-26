@@ -49,7 +49,7 @@ import {
   useRepositoryAdvisories,
   useWorkflowRuns,
 } from '@/services/github'
-import { isNativeApp } from '@/lib/environment'
+import { canOpenInEditor, canOpenNativeApps } from '@/lib/environment'
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -190,13 +190,13 @@ export function WorktreeDropdownMenu({
             New Session
           </DropdownMenuItem>
 
-          {runScripts.length === 1 && (
+          {!isMobile && runScripts.length === 1 && (
             <DropdownMenuItem onClick={handleRun}>
               <Play className="mr-2 h-4 w-4" />
               Run
             </DropdownMenuItem>
           )}
-          {runScripts.length > 1 && (
+          {!isMobile && runScripts.length > 1 && (
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
                 <Play className="mr-4 h-4 w-4" />
@@ -286,23 +286,25 @@ export function WorktreeDropdownMenu({
             </DropdownMenuItem>
           )}
 
-          <DropdownMenuSeparator />
+          {(canOpenInEditor() || canOpenNativeApps()) && (
+            <DropdownMenuSeparator />
+          )}
 
-          <DropdownMenuItem onClick={handleOpenInEditor}>
-            <Code className="mr-2 h-4 w-4" />
-            {isNativeApp()
-              ? `Open in ${getEditorLabel(preferences?.editor)}`
-              : 'Open Editor'}
-          </DropdownMenuItem>
+          {canOpenInEditor() && (
+            <DropdownMenuItem onClick={handleOpenInEditor}>
+              <Code className="mr-2 h-4 w-4" />
+              Open in {getEditorLabel(preferences?.editor)}
+            </DropdownMenuItem>
+          )}
 
-          {isNativeApp() && (
+          {canOpenNativeApps() && (
             <DropdownMenuItem onClick={handleOpenInFinder}>
               <FolderOpen className="mr-2 h-4 w-4" />
               Open in Finder
             </DropdownMenuItem>
           )}
 
-          {isNativeApp() && (
+          {canOpenNativeApps() && (
             <DropdownMenuItem onClick={handleOpenInTerminal}>
               <Terminal className="mr-2 h-4 w-4" />
               Open in {getTerminalLabel(preferences?.terminal)}

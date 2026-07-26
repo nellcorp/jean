@@ -20,6 +20,7 @@ import {
 import { useQueries, useQueryClient } from '@tanstack/react-query'
 import { invoke } from '@/lib/transport'
 import { cn } from '@/lib/utils'
+import { canOpenInEditor, canOpenNativeApps } from '@/lib/environment'
 import { dismissibleToast } from '@/lib/dismissible-toast'
 import {
   Search,
@@ -91,6 +92,7 @@ import {
   useRemoveProject,
   useReorderWorktrees,
   projectsQueryKeys,
+  type PackageScript,
 } from '@/services/projects'
 import { chatQueryKeys, cancelChatMessage } from '@/services/chat'
 import {
@@ -105,6 +107,7 @@ import { useGitStatus } from '@/services/git-status'
 import { useChatStore } from '@/store/chat-store'
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
+import { useTerminalStore } from '@/store/terminal-store'
 import { isBaseSession, type Worktree } from '@/types/projects'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import type { LabelData, Session, WorktreeSessions } from '@/types/chat'
@@ -114,6 +117,11 @@ import { FailedRunsBadge } from '@/components/shared/FailedRunsBadge'
 import { SecurityAlertsBadge } from '@/components/shared/SecurityAlertsBadge'
 import { PlanDialog } from '@/components/chat/PlanDialog'
 import { SessionChatModal } from '@/components/chat/SessionChatModal'
+import {
+  getStackedBaseBranch,
+  resolveStackedOnPr,
+  shouldShowWorktreeBranchBadge,
+} from '@/components/chat/worktree-branch-badge'
 
 import { LabelModal } from '@/components/chat/LabelModal'
 import { getLabelTextColor } from '@/lib/label-colors'
@@ -137,6 +145,7 @@ import {
 } from '@/components/chat/session-card-utils'
 import { WorktreeSetupCard } from '@/components/chat/WorktreeSetupCard'
 import { OpenInButton } from '@/components/open-in/OpenInButton'
+import { ScriptsButton } from '@/components/open-in/ScriptsButton'
 import { useCanvasStoreState } from '@/components/chat/hooks/useCanvasStoreState'
 import {
   type WorktreeSortMode,
@@ -160,6 +169,8 @@ import { usePreferences } from '@/services/preferences'
 import { DEFAULT_KEYBINDINGS, formatShortcutDisplay } from '@/types/keybindings'
 import { CloseWorktreeDialog } from '@/components/chat/CloseWorktreeDialog'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { hasBackendTransport } from '@/lib/environment'
+import { consumeWebReloadState } from '@/lib/web-reload-state'
 import {
   shouldDisableWorktreeTextSelection,
   shouldShowWorktreeLabelContextMenu,
@@ -169,10 +180,12 @@ import {
   getCanvasFilterTabCount,
   isLabelFilterTab,
   matchesCanvasFilterTab,
+  shouldShowCanvasWorktreeSection,
   type CanvasFilterTab,
   type CanvasPredefinedFilterTab,
   type CanvasPredefinedFilterTabItem,
 } from './canvas-worktree-filters'
+import { getCanvasStatusRefreshMs } from './canvas-status-refresh'
 import { getWorktreeLabelContainerClassName } from './worktree-label-layout'
 const GitDiffModal = lazy(() =>
   import('@/components/chat/GitDiffModal').then(mod => ({
@@ -212,6 +225,7 @@ import {
   type WorktreeReorderDragState,
 } from '@/lib/drag-and-drop/worktree-reorder-ux'
 import { openCanvasConflictResolution } from './conflict-resolution-navigation'
+import { getCanvasDiffRequest } from './canvas-diff-request'
 
 interface ProjectCanvasViewProps {
   projectId: string
@@ -451,19 +465,22 @@ function WorktreeSectionHeader({
   isSelected?: boolean
   shortcutNumber?: number
   onRowClick?: () => void
-  onDiffClick?: (
-    worktreePath: string,
-    baseBranch: string,
-    type: 'uncommitted' | 'branch'
-  ) => void
+  onDiffClick?: (request: DiffRequest) => void
   onSetLabels?: () => void
   onResolveConflicts?: (worktree: Worktree) => void
   disableTextSelection?: boolean
 }) {
-  const stackedOnPR =
-    worktree.base_branch && worktree.base_branch !== defaultBranch
-      ? openPRs?.find(pr => pr.headRefName === worktree.base_branch)
-      : undefined
+  const stackedBaseBranch = getStackedBaseBranch(
+    worktree.base_branch,
+    worktree.branch,
+    defaultBranch,
+    worktree.base_remote
+  )
+  const stackedOnPR = resolveStackedOnPr(
+    stackedBaseBranch,
+    openPRs,
+    defaultBranch
+  )
   const isBase = isBaseSession(worktree)
   const { data: gitStatus } = useGitStatus(worktree.id)
 
@@ -496,19 +513,13 @@ function WorktreeSectionHeader({
       await performGitPull({
         worktreeId: worktree.id,
         worktreePath: worktree.path,
-        baseBranch: defaultBranch,
+        baseBranch: worktree.base_branch ?? defaultBranch,
         projectId,
+        remote: worktree.base_remote,
         onMergeConflict: () => onResolveConflicts?.(worktree),
       })
     },
-    [
-      worktree,
-      worktree.id,
-      worktree.path,
-      defaultBranch,
-      projectId,
-      onResolveConflicts,
-    ]
+    [worktree, defaultBranch, projectId, onResolveConflicts]
   )
 
   const handlePush = useCallback(
@@ -548,11 +559,13 @@ function WorktreeSectionHeader({
 
   const handleDiffClick = useCallback(() => {
     onDiffClick?.(
-      worktree.path,
-      defaultBranch,
-      isBase ? 'uncommitted' : 'branch'
+      getCanvasDiffRequest(
+        worktree,
+        defaultBranch,
+        isBase ? 'uncommitted' : 'branch'
+      )
     )
-  }, [onDiffClick, isBase, worktree.path, defaultBranch])
+  }, [onDiffClick, isBase, worktree, defaultBranch])
 
   const sessionMetrics = useMemo(
     () => (cards && cards.length > 0 ? getSessionMetrics(cards) : null),
@@ -574,6 +587,14 @@ function WorktreeSectionHeader({
 
   const lastActivity = formatRelativeTime(sessionMetrics?.latestActivityAt)
   const displayBranch = gitStatus?.current_branch ?? worktree.branch
+  const showBranchBadge = shouldShowWorktreeBranchBadge({
+    displayBranch,
+    worktreeName: worktree.name,
+    stackedBaseBranch,
+    prNumber: worktree.pr_number,
+    securityAlertNumber: worktree.security_alert_number,
+    advisoryGhsaId: worktree.advisory_ghsa_id,
+  })
   const worktreeLabels = getWorktreeLabels(worktree)
 
   const row = (
@@ -627,26 +648,25 @@ function WorktreeSectionHeader({
               <span className="min-w-0 flex-1 truncate">
                 {isBase ? 'Base Session' : worktree.name}
               </span>
-              {displayBranch && (
+              {showBranchBadge && (
                 <span className="hidden items-center gap-1 rounded border border-border/50 px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground sm:inline-flex">
                   <GitBranch className="h-2.5 w-2.5" />
                   <span className="max-w-40 truncate">{displayBranch}</span>
-                  {worktree.base_branch &&
-                    worktree.base_branch !== defaultBranch && (
-                      <>
-                        <span className="text-border">·</span>
-                        <GitBranchPlus className="h-2.5 w-2.5" />
-                        <span className="max-w-32 truncate">
-                          {worktree.base_branch}
-                        </span>
-                        {stackedOnPR && (
-                          <>
-                            <GitPullRequestArrow className="h-2.5 w-2.5" />#
-                            {stackedOnPR.number}
-                          </>
-                        )}
-                      </>
-                    )}
+                  {stackedBaseBranch && (
+                    <>
+                      <span className="text-border">·</span>
+                      <GitBranchPlus className="h-2.5 w-2.5" />
+                      <span className="max-w-32 truncate">
+                        {stackedBaseBranch}
+                      </span>
+                      {stackedOnPR && (
+                        <>
+                          <GitPullRequestArrow className="h-2.5 w-2.5" />#
+                          {stackedOnPR.number}
+                        </>
+                      )}
+                    </>
+                  )}
                   {worktree.pr_number && (
                     <>
                       <span className="text-border">·</span>
@@ -687,26 +707,25 @@ function WorktreeSectionHeader({
                 />
               </span>
             </span>
-            {displayBranch && (
+            {showBranchBadge && (
               <span className="inline-flex max-w-full items-center gap-1 self-start rounded border border-border/50 px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground sm:hidden">
                 <GitBranch className="h-2.5 w-2.5 shrink-0" />
                 <span className="max-w-full truncate">{displayBranch}</span>
-                {worktree.base_branch &&
-                  worktree.base_branch !== defaultBranch && (
-                    <>
-                      <span className="text-border">·</span>
-                      <GitBranchPlus className="h-2.5 w-2.5 shrink-0" />
-                      <span className="max-w-32 truncate">
-                        {worktree.base_branch}
-                      </span>
-                      {stackedOnPR && (
-                        <>
-                          <GitPullRequestArrow className="h-2.5 w-2.5 shrink-0" />
-                          #{stackedOnPR.number}
-                        </>
-                      )}
-                    </>
-                  )}
+                {stackedBaseBranch && (
+                  <>
+                    <span className="text-border">·</span>
+                    <GitBranchPlus className="h-2.5 w-2.5 shrink-0" />
+                    <span className="max-w-32 truncate">
+                      {stackedBaseBranch}
+                    </span>
+                    {stackedOnPR && (
+                      <>
+                        <GitPullRequestArrow className="h-2.5 w-2.5 shrink-0" />
+                        #{stackedOnPR.number}
+                      </>
+                    )}
+                  </>
+                )}
                 {worktree.pr_number && (
                   <>
                     <span className="text-border">·</span>
@@ -854,6 +873,8 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
   const [searchQuery, setSearchQuery] = useState('')
   const [activeFilterTab, setActiveFilterTab] = useState<CanvasFilterTab>('all')
   const isMobile = useIsMobile()
+  const canOpenLocally = canOpenNativeApps()
+  const canOpenEditor = canOpenInEditor()
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false)
   const showWorktreeLabelContextMenu = shouldShowWorktreeLabelContextMenu({
     isMobile,
@@ -990,7 +1011,7 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
     queries: readyWorktrees.map(wt => ({
       queryKey: [...chatQueryKeys.sessions(wt.id), 'with-counts'],
       queryFn: async (): Promise<WorktreeSessions> => {
-        if (!isTauri() || !wt.id || !wt.path) {
+        if (!hasBackendTransport() || !wt.id || !wt.path) {
           return {
             worktree_id: wt.id,
             sessions: [],
@@ -1090,6 +1111,28 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
     [markWorktreeLastUsed]
   )
 
+  const handlePackageScript = useCallback(
+    async (script: PackageScript) => {
+      let baseWorktree = worktrees.find(isBaseSession)
+      if (!baseWorktree) {
+        try {
+          baseWorktree = await createBaseSession.mutateAsync(projectId)
+        } catch {
+          return
+        }
+      }
+
+      useTerminalStore
+        .getState()
+        .addTerminal(baseWorktree.id, script.command, script.name, {
+          commandArgs: script.args,
+        })
+      openWorktreeModal(baseWorktree.id, baseWorktree.path)
+      useTerminalStore.getState().setModalTerminalOpen(baseWorktree.id, true)
+    },
+    [createBaseSession, openWorktreeModal, projectId, worktrees]
+  )
+
   const handleCanvasResolveConflicts = useCallback(
     (worktree: Worktree) => {
       openCanvasConflictResolution(worktree, {
@@ -1174,8 +1217,8 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
 
       latestActivityByWorktreeId.set(worktree.id, latestActivityAt)
 
-      // Only include worktrees that have sessions (after filtering)
-      if (grouped.length > 0) {
+      // Keep the base branch available for starting its first session.
+      if (shouldShowCanvasWorktreeSection(worktree, grouped.length)) {
         readySections.push({ worktree, cards: grouped })
       }
     }
@@ -1505,6 +1548,22 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
     worktreeId: string
     worktreePath: string
   } | null>(null)
+
+  useEffect(() => {
+    const reloadState = consumeWebReloadState(projectId)
+    if (!reloadState) return
+
+    useChatStore
+      .getState()
+      .setActiveSession(
+        reloadState.modalWorktreeId,
+        reloadState.activeSessionId
+      )
+    setSelectedWorktreeModal({
+      worktreeId: reloadState.modalWorktreeId,
+      worktreePath: reloadState.modalWorktreePath,
+    })
+  }, [projectId])
   const searchInputRef = useRef<HTMLInputElement>(null)
   // Track highlighted card to survive reordering
   const highlightedCardRef = useRef<{
@@ -1624,6 +1683,10 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
         !!selectedWorktreeModal,
         selectedWorktreeModal?.worktreeId ?? null
       )
+    return () => {
+      // Clear global modal flag on unmount (e.g. last session → project picker)
+      useUIStore.getState().setSessionChatModalOpen(false)
+    }
   }, [selectedWorktreeModal])
 
   // Close modal when worktree is deleted/archived (e.g. PR merged)
@@ -2293,15 +2356,15 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
       if (!section) return
 
       const isBase = isBaseSession(section.worktree)
-      const baseBranch = project?.default_branch ?? 'main'
+      const defaultBranch = project?.default_branch ?? 'main'
 
       setCanvasDiffRequest(prev => {
         if (requestedType) {
-          return {
-            type: requestedType,
-            worktreePath: section.worktree.path,
-            baseBranch,
-          }
+          return getCanvasDiffRequest(
+            section.worktree,
+            defaultBranch,
+            requestedType
+          )
         }
         if (prev) {
           return {
@@ -2309,11 +2372,11 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
             type: prev.type === 'uncommitted' ? 'branch' : 'uncommitted',
           }
         }
-        return {
-          type: isBase ? 'uncommitted' : 'branch',
-          worktreePath: section.worktree.path,
-          baseBranch,
-        }
+        return getCanvasDiffRequest(
+          section.worktree,
+          defaultBranch,
+          isBase ? 'uncommitted' : 'branch'
+        )
       })
     }
 
@@ -2813,14 +2876,15 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
   useEffect(() => {
     if (!isTauri() || !projectId || readyWorktrees.length === 0) return
 
+    const refreshMs = getCanvasStatusRefreshMs(preferences?.git_poll_interval)
     const interval = setInterval(() => {
       if (document.hasFocus()) {
         fetchWorktreesStatus(projectId)
       }
-    }, 60_000) // 1 minute
+    }, refreshMs)
 
     return () => clearInterval(interval)
-  }, [projectId, readyWorktrees.length])
+  }, [projectId, readyWorktrees.length, preferences?.git_poll_interval])
 
   // Refresh git status when session modal closes (user returns to canvas)
   const prevModalRef = useRef(selectedWorktreeModal)
@@ -2903,17 +2967,14 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="w-64">
                     <DropdownMenuItem
-                      onSelect={() =>
-                        useProjectsStore
-                          .getState()
-                          .openProjectSettings(projectId)
-                      }
+                      onSelect={() => {
+                        useProjectsStore.getState().selectProject(projectId)
+                        useUIStore.getState().setNewWorktreeModalOpen(true)
+                      }}
                     >
-                      <Settings className="h-4 w-4" />
-                      Project Settings
+                      <Plus className="h-4 w-4" />
+                      New Worktree
                     </DropdownMenuItem>
-
-                    <DropdownMenuSeparator />
 
                     <DropdownMenuItem
                       onSelect={() => createBaseSession.mutate(projectId)}
@@ -2925,13 +2986,14 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
                     </DropdownMenuItem>
 
                     <DropdownMenuItem
-                      onSelect={() => {
-                        useProjectsStore.getState().selectProject(projectId)
-                        useUIStore.getState().setNewWorktreeModalOpen(true)
-                      }}
+                      onSelect={() =>
+                        useProjectsStore
+                          .getState()
+                          .openProjectSettings(projectId)
+                      }
                     >
-                      <Plus className="h-4 w-4" />
-                      New Worktree
+                      <Settings className="h-4 w-4" />
+                      Project Settings
                     </DropdownMenuItem>
 
                     {mobileGitHubEnabled && (
@@ -3004,47 +3066,67 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
                       </>
                     )}
 
-                    <DropdownMenuSeparator />
+                    {(canOpenEditor || canOpenLocally) && (
+                      <>
+                        <DropdownMenuSeparator />
 
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        openInEditor.mutate({
-                          worktreePath: project.path,
-                          editor: preferences?.editor,
-                        })
-                      }
-                    >
-                      <Code className="h-4 w-4" />
-                      Open in {getEditorLabel(preferences?.editor)}
-                    </DropdownMenuItem>
+                        {canOpenEditor && (
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              openInEditor.mutate({
+                                worktreePath: project.path,
+                                editor: preferences?.editor,
+                              })
+                            }
+                          >
+                            <Code className="h-4 w-4" />
+                            Open in {getEditorLabel(preferences?.editor)}
+                          </DropdownMenuItem>
+                        )}
 
-                    <DropdownMenuItem
-                      onSelect={() => openInFinder.mutate(project.path)}
-                    >
-                      <FolderOpen className="h-4 w-4" />
-                      Open in Finder
-                    </DropdownMenuItem>
+                        {canOpenLocally && (
+                          <DropdownMenuItem
+                            onSelect={() => openInFinder.mutate(project.path)}
+                          >
+                            <FolderOpen className="h-4 w-4" />
+                            Open in Finder
+                          </DropdownMenuItem>
+                        )}
 
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        openInTerminal.mutate({
-                          worktreePath: project.path,
-                          terminal: preferences?.terminal,
-                        })
-                      }
-                    >
-                      <Terminal className="h-4 w-4" />
-                      Open in {getTerminalLabel(preferences?.terminal)}
-                    </DropdownMenuItem>
+                        {canOpenLocally && (
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              openInTerminal.mutate({
+                                worktreePath: project.path,
+                                terminal: preferences?.terminal,
+                              })
+                            }
+                          >
+                            <Terminal className="h-4 w-4" />
+                            Open in {getTerminalLabel(preferences?.terminal)}
+                          </DropdownMenuItem>
+                        )}
 
-                    <DropdownMenuSeparator />
+                        {canOpenLocally && (
+                          <>
+                            <DropdownMenuSeparator />
 
-                    <DropdownMenuItem
-                      onSelect={() => openWorktreesFolder.mutate(projectId)}
-                    >
-                      <Folder className="h-4 w-4" />
-                      Open Worktrees Folder
-                    </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onSelect={() =>
+                                openWorktreesFolder.mutate(projectId)
+                              }
+                            >
+                              <Folder className="h-4 w-4" />
+                              Open Worktrees Folder
+                            </DropdownMenuItem>
+                          </>
+                        )}
+                      </>
+                    )}
+
+                    {!canOpenEditor && !canOpenLocally && (
+                      <DropdownMenuSeparator />
+                    )}
 
                     <DropdownMenuItem
                       onSelect={() => openOnGitHub.mutate(projectId)}
@@ -3210,6 +3292,11 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
             {!isMobile && (
               <div className="flex items-center gap-2 shrink-0 justify-end col-start-3">
                 <OpenInButton worktreePath={project.path} />
+                <ScriptsButton
+                  projectId={project.id}
+                  worktreePath={project.path}
+                  onRun={handlePackageScript}
+                />
               </div>
             )}
           </div>
@@ -3454,13 +3541,7 @@ export function ProjectCanvasView({ projectId }: ProjectCanvasViewProps) {
                               section.worktree.path
                             )
                           }}
-                          onDiffClick={(worktreePath, baseBranch, type) => {
-                            setCanvasDiffRequest({
-                              type,
-                              worktreePath,
-                              baseBranch,
-                            })
-                          }}
+                          onDiffClick={setCanvasDiffRequest}
                           onSetLabels={
                             showWorktreeLabelContextMenu
                               ? () => openWorktreeLabelModal(section.worktree)
