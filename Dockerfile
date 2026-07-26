@@ -145,6 +145,17 @@ RUN install -m 0755 -d /usr/share/keyrings \
 RUN npm install -g @anthropic-ai/claude-code@2.1.186 yarn \
  && npm cache clean --force
 
+# Install the OpenAI Codex CLI globally (provides the `codex` binary on PATH
+# for Jean's Codex backend).
+RUN npm install -g @openai/codex@0.144.6 \
+ && npm cache clean --force
+
+# Codex's Linux sandbox (bubblewrap) needs unprivileged user namespaces, which
+# are unavailable inside this container, so bwrap fails with "No permissions to
+# create new namespace". The container itself is the isolation boundary, so tell
+# Jean to run Codex without its OS sandbox (danger-full-access) in all modes.
+ENV JEAN_CODEX_DISABLE_SANDBOX=1
+
 # Install Playwright globally and its browser binaries + system deps.
 # Chromium-only — Firefox + WebKit add ~700MB and Jean drives the browser
 # pool with Chromium. Pass extra browsers via PLAYWRIGHT_BROWSERS at build
@@ -211,6 +222,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     less \
     file \
     tree \
+    imagemagick \
+    librsvg2-bin \
     zip \
     bzip2 \
     xz-utils \

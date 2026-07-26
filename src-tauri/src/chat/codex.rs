@@ -416,6 +416,17 @@ pub(crate) fn split_fast_model(model: &str) -> (&str, bool) {
     }
 }
 
+/// Whether to disable Codex's OS sandbox (bubblewrap) and rely on the
+/// surrounding container for isolation. Codex's Linux sandbox needs unprivileged
+/// user namespaces, which are unavailable inside the Jean container (bwrap fails
+/// with "No permissions to create new namespace"). The jean:dev image sets
+/// JEAN_CODEX_DISABLE_SANDBOX=1; native desktop builds leave it unset.
+fn codex_sandbox_disabled() -> bool {
+    std::env::var("JEAN_CODEX_DISABLE_SANDBOX")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
 /// Build JSON-RPC params for `thread/start`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_thread_start_params(
@@ -457,26 +468,32 @@ pub fn build_thread_start_params(
     // Codex reads MCP config from TOML files directly, so we can't detect
     // whether MCP servers are configured — but setting mcp_elicitations=false
     // is a no-op when no MCP servers exist, so it's safe to use in build mode.
-    match execution_mode.unwrap_or("plan") {
-        "build" => {
-            params["approvalPolicy"] = serde_json::json!({
-                "granular": {
-                    "mcp_elicitations": false,
-                    "sandbox_approval": true,
-                    "rules": true,
-                    "request_permissions": true,
-                }
-            });
-            params["sandbox"] = serde_json::json!("workspace-write");
-        }
-        "yolo" => {
-            params["approvalPolicy"] = serde_json::json!("never");
-            params["sandbox"] = serde_json::json!("danger-full-access");
-        }
-        // "plan" or default: read-only sandbox
-        _ => {
-            params["approvalPolicy"] = serde_json::json!("never");
-            params["sandbox"] = serde_json::json!("read-only");
+    if codex_sandbox_disabled() {
+        // Container provides isolation; codex's bwrap sandbox can't start here.
+        params["approvalPolicy"] = serde_json::json!("never");
+        params["sandbox"] = serde_json::json!("danger-full-access");
+    } else {
+        match execution_mode.unwrap_or("plan") {
+            "build" => {
+                params["approvalPolicy"] = serde_json::json!({
+                    "granular": {
+                        "mcp_elicitations": false,
+                        "sandbox_approval": true,
+                        "rules": true,
+                        "request_permissions": true,
+                    }
+                });
+                params["sandbox"] = serde_json::json!("workspace-write");
+            }
+            "yolo" => {
+                params["approvalPolicy"] = serde_json::json!("never");
+                params["sandbox"] = serde_json::json!("danger-full-access");
+            }
+            // "plan" or default: read-only sandbox
+            _ => {
+                params["approvalPolicy"] = serde_json::json!("never");
+                params["sandbox"] = serde_json::json!("read-only");
+            }
         }
     }
 
@@ -547,7 +564,7 @@ pub fn build_turn_start_params(
     // accidentally re-sandbox yolo turns and break tools such as Playwright on
     // macOS.
     let mode = execution_mode.unwrap_or("plan");
-    if mode == "yolo" {
+    if mode == "yolo" || codex_sandbox_disabled() {
         params["sandboxPolicy"] = serde_json::json!({
             "type": "dangerFullAccess",
         });
