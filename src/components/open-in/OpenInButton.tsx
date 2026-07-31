@@ -28,7 +28,11 @@ import {
 } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { getOpenInDefaultLabel } from '@/types/preferences'
-import { canOpenInEditor, canOpenNativeApps } from '@/lib/environment'
+import {
+  canOpenInEditor,
+  canOpenNativeApps,
+  isNativeApp,
+} from '@/lib/environment'
 import { useUIStore } from '@/store/ui-store'
 
 interface OpenInButtonProps {
@@ -51,6 +55,9 @@ export function OpenInButton({
 
   const canNative = canOpenNativeApps()
   const canEditor = canOpenInEditor()
+  // In a browser (web access / remote client), the browser-based editor is
+  // always reachable via a `/code` URL — independent of native-open capability.
+  const canWebEditor = !isNativeApp()
 
   const openAction = useCallback(
     (target: string) => {
@@ -106,13 +113,13 @@ export function OpenInButton({
     preferences?.terminal
   )
 
-  if (!canEditor && !canNative) return null
+  if (!canEditor && !canNative && !canWebEditor) return null
 
   // In web/remote mode (no native app launching), render a simplified
   // single-purpose "Open Editor" button that launches the browser-based
   // editor. The native split-button below shows Finder/Terminal/GitHub
   // options that don't apply.
-  if (!canNative) {
+  if (canWebEditor && !canNative) {
     if (!branch && !worktreePath) return null
     return (
       <Tooltip>

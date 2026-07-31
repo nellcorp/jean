@@ -41,7 +41,11 @@ import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import { notify } from '@/lib/notifications'
 import { openExternal } from '@/lib/platform'
 import { cn } from '@/lib/utils'
-import { canOpenInEditor, canOpenNativeApps } from '@/lib/environment'
+import {
+  canOpenInEditor,
+  canOpenNativeApps,
+  isNativeApp,
+} from '@/lib/environment'
 import { resolvePortUrl } from '@/components/browser/default-tab-url'
 
 interface ModalOption {
@@ -107,6 +111,9 @@ export function OpenInModal() {
   // remote Jean via local Zed + ssh://.
   const canOpenLocally = canOpenNativeApps()
   const canOpenEditor = canOpenInEditor()
+  // Browser (web access): the browser-based editor is always reachable via a
+  // `/code` URL, independent of native-open capability.
+  const editorAvailable = canOpenEditor || !isNativeApp()
 
   const targetPath = useMemo(() => {
     if (worktree?.path) return worktree.path
@@ -165,11 +172,12 @@ export function OpenInModal() {
     ]
 
     return allOptions.filter(opt => {
-      if (opt.id === 'editor') return canOpenEditor
+      if (opt.id === 'editor') return editorAvailable
       if (opt.id === 'terminal' || opt.id === 'finder') return canOpenLocally
       return true
     })
   }, [
+    editorAvailable,
     preferences?.editor,
     preferences?.terminal,
     canOpenLocally,
@@ -282,12 +290,12 @@ export function OpenInModal() {
   const handleOpenChange = useCallback(
     (open: boolean) => {
       if (open && !hasInitializedRef.current) {
-        setSelectedOption(canOpenEditor ? 'editor' : 'github')
+        setSelectedOption(editorAvailable ? 'editor' : 'github')
         hasInitializedRef.current = true
       }
       setOpenInModalOpen(open)
     },
-    [setOpenInModalOpen, canOpenEditor]
+    [setOpenInModalOpen, editorAvailable]
   )
 
   const portOptions: ModalOption[] = useMemo(() => {

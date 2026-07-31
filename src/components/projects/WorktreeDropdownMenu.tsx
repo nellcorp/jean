@@ -49,7 +49,11 @@ import {
   useRepositoryAdvisories,
   useWorkflowRuns,
 } from '@/services/github'
-import { canOpenInEditor, canOpenNativeApps } from '@/lib/environment'
+import {
+  canOpenInEditor,
+  canOpenNativeApps,
+  isNativeApp,
+} from '@/lib/environment'
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -286,14 +290,16 @@ export function WorktreeDropdownMenu({
             </DropdownMenuItem>
           )}
 
-          {(canOpenInEditor() || canOpenNativeApps()) && (
+          {(canOpenInEditor() || canOpenNativeApps() || !isNativeApp()) && (
             <DropdownMenuSeparator />
           )}
 
-          {canOpenInEditor() && (
+          {(canOpenInEditor() || !isNativeApp()) && (
             <DropdownMenuItem onClick={handleOpenInEditor}>
               <Code className="mr-2 h-4 w-4" />
-              Open in {getEditorLabel(preferences?.editor)}
+              {isNativeApp()
+                ? `Open in ${getEditorLabel(preferences?.editor)}`
+                : 'Open Editor'}
             </DropdownMenuItem>
           )}
 
