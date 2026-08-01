@@ -3389,6 +3389,46 @@ pub async fn dispatch_command(
             emit_cache_invalidation(app, &["linear"]);
             to_value(result)
         }
+        "create_linear_issue_relation" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let issue_id: String = field(&args, "issueId", "issue_id")?;
+            let related_issue_id: String =
+                field(&args, "relatedIssueId", "related_issue_id")?;
+            let relation_type: String = field(&args, "type", "relation_type")?;
+            let result = crate::projects::create_linear_issue_relation(
+                app.clone(),
+                project_id,
+                issue_id,
+                related_issue_id,
+                relation_type,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["linear"]);
+            to_value(result)
+        }
+        "delete_linear_issue_relation" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let relation_id: String = field(&args, "relationId", "relation_id")?;
+            let result = crate::projects::delete_linear_issue_relation(
+                app.clone(),
+                project_id,
+                relation_id,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["linear"]);
+            to_value(result)
+        }
+        "list_linear_issue_relations" => {
+            let project_id: String = field(&args, "projectId", "project_id")?;
+            let issue_id: String = field(&args, "issueId", "issue_id")?;
+            let result = crate::projects::list_linear_issue_relations(
+                app.clone(),
+                project_id,
+                issue_id,
+            )
+            .await?;
+            to_value(result)
+        }
         "create_linear_comment" => {
             let project_id: String = field(&args, "projectId", "project_id")?;
             let issue_id: String = field(&args, "issueId", "issue_id")?;

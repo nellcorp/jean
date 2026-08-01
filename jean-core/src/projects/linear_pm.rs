@@ -769,3 +769,89 @@ pub async fn create_linear_project_update(
     )
     .await
 }
+
+/// Create a formal relation between two issues (blocks / duplicate / related).
+///
+/// Semantics: `issue_id` <type> `related_issue_id`. For `blocks`, `issue_id`
+/// blocks `related_issue_id`. So "issue A is blocked by issue B" is created by
+/// passing `issue_id = B`, `related_issue_id = A`, `relation_type = "blocks"`.
+pub async fn create_linear_issue_relation(
+    app: AppHandle,
+    project_id: String,
+    issue_id: String,
+    related_issue_id: String,
+    relation_type: String,
+) -> Result<Value, String> {
+    let query = r#"mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
+    issueRelationCreate(input: $input) {
+        success
+        issueRelation {
+            id
+            type
+            issue { id identifier }
+            relatedIssue { id identifier }
+        }
+    }
+}"#;
+    let input = json!({
+        "issueId": issue_id,
+        "relatedIssueId": related_issue_id,
+        "type": relation_type,
+    });
+    mutate(
+        &app,
+        &project_id,
+        query,
+        Some(json!({ "input": input })),
+        "issueRelationCreate",
+    )
+    .await
+}
+
+/// Delete an issue relation by its relation id (from list_linear_issue_relations).
+pub async fn delete_linear_issue_relation(
+    app: AppHandle,
+    project_id: String,
+    relation_id: String,
+) -> Result<Value, String> {
+    let query = r#"mutation IssueRelationDelete($id: String!) {
+    issueRelationDelete(id: $id) {
+        success
+    }
+}"#;
+    mutate(
+        &app,
+        &project_id,
+        query,
+        Some(json!({ "id": relation_id })),
+        "issueRelationDelete",
+    )
+    .await
+}
+
+/// List an issue's relations in both directions. `relations` are where this
+/// issue is the source (for type `blocks`: this issue blocks `relatedIssue`);
+/// `inverseRelations` are where this issue is the target (for type `blocks`:
+/// `issue` blocks this one — i.e. this issue is blocked by `issue`).
+pub async fn list_linear_issue_relations(
+    app: AppHandle,
+    project_id: String,
+    issue_id: String,
+) -> Result<Value, String> {
+    let query = r#"query IssueRelations($id: String!) {
+    issue(id: $id) {
+        id
+        identifier
+        relations(first: 100) {
+            nodes { id type relatedIssue { id identifier title } }
+        }
+        inverseRelations(first: 100) {
+            nodes { id type issue { id identifier title } }
+        }
+    }
+}"#;
+    let data = query_data(&app, &project_id, query, Some(json!({ "id": issue_id }))).await?;
+    data.get("issue")
+        .cloned()
+        .ok_or_else(|| "Linear issue not found".to_string())
+}
