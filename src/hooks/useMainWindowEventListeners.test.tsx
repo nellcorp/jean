@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { renderHook } from '@testing-library/react'
 import { useChatStore } from '@/store/chat-store'
 import { useTerminalStore } from '@/store/terminal-store'
 import { useUIStore } from '@/store/ui-store'
@@ -12,10 +13,13 @@ import {
   closeActiveTerminalTabForShortcut,
   findKeybindingAction,
   getTerminalShortcutWorktreeId,
+  handleRunEnvironmentStarted,
   isPlainSessionTerminalFocused,
   shouldAllowKeybindingThroughOpenOverlay,
+  shouldLetChatInputHandleAction,
   shouldLetPlanDialogHandleAction,
   switchActiveTerminalTabByIndexForShortcut,
+  useWindowKeyboardFocusRestore,
 } from './useMainWindowEventListeners'
 import { chatQueryKeys } from '@/services/chat'
 import { projectsQueryKeys } from '@/services/projects'
@@ -26,17 +30,52 @@ import type {
   WorktreeSessions,
 } from '@/types/chat'
 
-const { mockInvoke, mockListen, mockDisposeTerminal } = vi.hoisted(() => ({
-  mockInvoke: vi.fn().mockResolvedValue(undefined),
-  mockListen: vi.fn().mockResolvedValue(() => {
-    /* noop cleanup */
-  }),
-  mockDisposeTerminal: vi.fn(),
-}))
+describe('shouldLetChatInputHandleAction', () => {
+  it('lets Cmd/Ctrl+Enter reach the chat input when no plan dialog is open', () => {
+    const input = document.createElement('textarea')
+    input.setAttribute('data-chat-input', '')
+
+    expect(shouldLetChatInputHandleAction('approve_plan', input, false)).toBe(
+      true
+    )
+  })
+
+  it('keeps plan approval handling when the plan dialog is open', () => {
+    const input = document.createElement('textarea')
+    input.setAttribute('data-chat-input', '')
+
+    expect(shouldLetChatInputHandleAction('approve_plan', input, true)).toBe(
+      false
+    )
+  })
+})
+
+const { mockInvoke, mockListen, mockDisposeTerminal, mockEnvironment } =
+  vi.hoisted(() => ({
+    mockInvoke: vi.fn().mockResolvedValue(undefined),
+    mockListen: vi.fn().mockResolvedValue(() => {
+      /* noop cleanup */
+    }),
+    mockDisposeTerminal: vi.fn(),
+    mockEnvironment: {
+      native: true,
+      mobile: false,
+    },
+  }))
 
 vi.mock('@/lib/transport', () => ({
   invoke: mockInvoke,
   listen: mockListen,
+  listenLocal: mockListen,
+}))
+
+vi.mock('@/lib/environment', async importOriginal => ({
+  ...((await importOriginal()) as object),
+  isNativeApp: () => mockEnvironment.native,
+}))
+
+vi.mock('@/hooks/use-mobile', () => ({
+  useIsMobile: () => mockEnvironment.mobile,
 }))
 
 vi.mock('@/lib/terminal-instances', () => ({
@@ -75,6 +114,43 @@ function focusPlainSessionTerminal() {
   input.focus()
   return input
 }
+
+describe('useWindowKeyboardFocusRestore', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mockEnvironment.native = true
+    mockEnvironment.mobile = false
+    document.body.innerHTML = ''
+    document.body.tabIndex = -1
+    document.body.focus()
+  })
+
+  it.each([
+    ['mobile', true, true],
+    ['web', false, false],
+  ])(
+    'does not focus the chat input after %s activation',
+    (_, native, mobile) => {
+      mockEnvironment.native = native
+      mockEnvironment.mobile = mobile
+
+      const input = document.createElement('textarea')
+      document.body.appendChild(input)
+      const focusInput = () => input.focus()
+      window.addEventListener('focus-chat-input', focusInput)
+
+      const { unmount } = renderHook(() => useWindowKeyboardFocusRestore())
+      window.dispatchEvent(new Event('focus'))
+      vi.runAllTimers()
+
+      expect(document.activeElement).toBe(document.body)
+
+      unmount()
+      window.removeEventListener('focus-chat-input', focusInput)
+      vi.useRealTimers()
+    }
+  )
+})
 
 describe('useMainWindowEventListeners terminal shortcuts', () => {
   beforeEach(() => {
@@ -157,6 +233,23 @@ describe('useMainWindowEventListeners terminal shortcuts', () => {
       sessionTerminalIds: {},
       newSessionModeTarget: null,
     })
+  })
+
+  it('shows an MCP-started run in the active worktree modal', () => {
+    useUIStore.setState({
+      sessionChatModalOpen: true,
+      sessionChatModalWorktreeId: 'worktree-1',
+    })
+
+    handleRunEnvironmentStarted({
+      worktreeId: 'worktree-1',
+      terminalId: 'run-from-mcp',
+      command: 'bun run dev',
+    })
+
+    const state = useTerminalStore.getState()
+    expect(state.terminals['worktree-1']?.[0]?.id).toBe('run-from-mcp')
+    expect(state.modalTerminalOpen['worktree-1']).toBe(true)
   })
 
   it('maps Option+Cmd arrow shortcuts to medium chat scroll actions', () => {
@@ -345,9 +438,9 @@ describe('useMainWindowEventListeners terminal shortcuts', () => {
       terminalId: 'term-running',
     })
     expect(mockDisposeTerminal).not.toHaveBeenCalled()
-    expect(useTerminalStore.getState().terminals['modal-worktree']).toHaveLength(
-      1
-    )
+    expect(
+      useTerminalStore.getState().terminals['modal-worktree']
+    ).toHaveLength(1)
 
     window.removeEventListener('confirm-close-terminal', confirmListener)
   })
@@ -496,6 +589,17 @@ describe('dialog overlay keybinding passthrough', () => {
       )
     ).toBe(false)
   })
+
+  it.each(['toggle_zen_mode', 'clear_session_context'] as const)(
+    'allows %s through the open session chat modal',
+    action => {
+      useUIStore.setState({ sessionChatModalOpen: true })
+
+      expect(
+        shouldAllowKeybindingThroughOpenOverlay(action, useUIStore.getState())
+      ).toBe(true)
+    }
+  )
 })
 
 describe('applySessionRenamedToCaches', () => {
@@ -523,7 +627,10 @@ describe('applySessionRenamedToCaches', () => {
       [...chatQueryKeys.sessions(worktreeId), 'with-counts'],
       sessions
     )
-    queryClient.setQueryData(chatQueryKeys.session(sessionId), sessions.sessions[0])
+    queryClient.setQueryData(
+      chatQueryKeys.session(sessionId),
+      sessions.sessions[0]
+    )
     queryClient.setQueryData<AllSessionsResponse>(['all-sessions'], {
       entries: [
         {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getModifierSymbol } from '@/lib/platform'
 import { useIsMobile } from '@/hooks/use-mobile'
 import {
@@ -78,10 +78,17 @@ export function NewWorktreeModal() {
   // Track preview-was-open across the same event cycle (ref survives after state clears)
   const previewOpenRef = useRef(false)
 
+  // Tab changes also reset list selection/search (avoid effect chain on activeTab)
+  const handleTabChange = useCallback((tab: TabId) => {
+    setActiveTab(tab)
+    setSelectedItemIndex(0)
+    setSearchQuery('')
+  }, [])
+
   // Hooks
   const data = useNewWorktreeData(searchQuery, includeClosed)
   const handlers = useNewWorktreeHandlers(data, {
-    setActiveTab,
+    setActiveTab: handleTabChange,
     setSearchQuery,
     setSelectedItemIndex,
     setIncludeClosed,
@@ -119,7 +126,7 @@ export function NewWorktreeModal() {
 
   const { handleKeyDown } = useNewWorktreeKeyboard({
     activeTab,
-    setActiveTab,
+    setActiveTab: handleTabChange,
     filteredIssues: data.filteredIssues,
     filteredPRs: data.filteredPRs,
     filteredSecurityAlerts: data.filteredSecurityAlerts,
@@ -156,18 +163,18 @@ export function NewWorktreeModal() {
       handlers.handleSelectSentryIssueAndInvestigate,
   })
 
-  // Apply store-provided default tab when modal opens
+  // Apply store-provided default tab when modal opens (resets selection via handleTabChange)
   useEffect(() => {
     if (newWorktreeModalOpen) {
       const { newWorktreeModalDefaultTab, setNewWorktreeModalDefaultTab } =
         useUIStore.getState()
       if (newWorktreeModalDefaultTab) {
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setActiveTab(newWorktreeModalDefaultTab)
+        handleTabChange(newWorktreeModalDefaultTab)
         setNewWorktreeModalDefaultTab(null)
       }
     }
-  }, [newWorktreeModalOpen])
+  }, [newWorktreeModalOpen, handleTabChange])
 
   // Focus search input when switching to searchable tabs
   useEffect(() => {
@@ -186,13 +193,6 @@ export function NewWorktreeModal() {
       return () => clearTimeout(timer)
     }
   }, [activeTab, newWorktreeModalOpen])
-
-  // Reset selection when switching tabs
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSelectedItemIndex(0)
-    setSearchQuery('')
-  }, [activeTab])
 
   return (
     <>
@@ -251,7 +251,7 @@ export function NewWorktreeModal() {
           {/* Tabs */}
           <SessionTabBar
             activeTab={activeTab}
-            onTabChange={setActiveTab}
+            onTabChange={handleTabChange}
             tabs={TABS}
           />
 
@@ -292,8 +292,10 @@ export function NewWorktreeModal() {
                 setSelectedIndex={setSelectedItemIndex}
                 onSelectIssue={handlers.handleSelectIssue}
                 onInvestigateIssue={handlers.handleSelectIssueAndInvestigate}
+                onBulkInvestigateIssues={handlers.handleBulkInvestigateIssues}
                 onPreviewIssue={handlePreviewIssue}
                 creatingFromNumber={handlers.creatingFromNumber}
+                isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
                 onGhLogin={triggerGhLogin}
                 isGhInstalled={isGhInstalled}
@@ -316,10 +318,12 @@ export function NewWorktreeModal() {
                 setSelectedIndex={setSelectedItemIndex}
                 onSelectPR={handlers.handleSelectPR}
                 onInvestigatePR={handlers.handleSelectPRAndInvestigate}
+                onBulkInvestigatePRs={handlers.handleBulkInvestigatePRs}
                 onStackPR={handlers.handleStackOnPR}
                 onPreviewPR={handlePreviewPR}
                 creatingFromNumber={handlers.creatingFromNumber}
                 stackingFromPR={handlers.stackingFromPR}
+                isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
                 onGhLogin={triggerGhLogin}
                 isGhInstalled={isGhInstalled}
@@ -360,6 +364,10 @@ export function NewWorktreeModal() {
                 }
                 onPreviewAdvisory={handlePreviewAdvisory}
                 creatingFromGhsaId={handlers.creatingFromGhsaId}
+                onBulkInvestigateSecurity={
+                  handlers.handleBulkInvestigateSecurity
+                }
+                isBulkInvestigating={handlers.isBulkInvestigating}
               />
             )}
 
@@ -379,7 +387,11 @@ export function NewWorktreeModal() {
                 onInvestigateIssue={
                   handlers.handleSelectLinearIssueAndInvestigate
                 }
+                onBulkInvestigateIssues={
+                  handlers.handleBulkInvestigateLinearIssues
+                }
                 creatingFromId={handlers.creatingFromLinearId}
+                isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
               />
             )}
@@ -400,7 +412,11 @@ export function NewWorktreeModal() {
                 onInvestigateIssue={
                   handlers.handleSelectSentryIssueAndInvestigate
                 }
+                onBulkInvestigateIssues={
+                  handlers.handleBulkInvestigateSentryIssues
+                }
                 creatingFromId={handlers.creatingFromSentryId}
+                isBulkInvestigating={handlers.isBulkInvestigating}
                 searchInputRef={searchInputRef}
               />
             )}

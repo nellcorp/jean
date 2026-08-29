@@ -29,6 +29,7 @@ import {
   useProjects,
   useWorktree,
   usePorts,
+  useWebEditorUrl,
 } from '@/services/projects'
 import {
   useLoadedIssueContexts,
@@ -44,7 +45,6 @@ import { cn } from '@/lib/utils'
 import {
   canOpenInEditor,
   canOpenNativeApps,
-  isNativeApp,
 } from '@/lib/environment'
 import { resolvePortUrl } from '@/components/browser/default-tab-url'
 
@@ -113,7 +113,8 @@ export function OpenInModal() {
   const canOpenEditor = canOpenInEditor()
   // Browser (web access): the browser-based editor is always reachable via a
   // `/code` URL, independent of native-open capability.
-  const editorAvailable = canOpenEditor || !isNativeApp()
+  const hasWebEditor = useWebEditorUrl() !== null
+  const editorAvailable = canOpenEditor || hasWebEditor
 
   const targetPath = useMemo(() => {
     if (worktree?.path) return worktree.path
@@ -459,6 +460,7 @@ export function OpenInModal() {
 
     return (
       <button
+        type="button"
         key={option.id}
         onClick={() => executeAction(option.id)}
         onMouseEnter={() => setSelectedOption(option.id)}
@@ -528,6 +530,7 @@ export function OpenInModal() {
 
         <div className="border-t px-4 py-2">
           <button
+            type="button"
             onClick={handleOpenSettings}
             className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >

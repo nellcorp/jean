@@ -167,7 +167,7 @@ const fallbackModelCatalog: ModelCatalog = {
     claude: 'claude-opus-4-8[1m]',
     codex: 'gpt-5.6-sol',
     opencode: 'opencode/gpt-5.6-sol',
-    grok: 'grok/grok-4.5',
+    grok: 'grok/grok-4.6',
   },
   backends: {
     claude: {
@@ -421,9 +421,9 @@ export function getCatalogModelOptions(
       ? []
       : getCatalogModelOptions(fallbackModelCatalog, backend)
   }
-  return models
-    .filter(model => !model.hidden)
-    .map(model => ({ value: model.id, label: model.label }))
+  return models.flatMap(model =>
+    model.hidden ? [] : [{ value: model.id, label: model.label }]
+  )
 }
 
 export function getCatalogDefaultModelOptions(

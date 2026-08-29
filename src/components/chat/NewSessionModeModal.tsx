@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   ArrowLeft,
   MessageSquarePlus,
@@ -25,6 +32,7 @@ import { usePiCliStatus } from '@/services/pi-cli'
 import { useCommandCodeCliStatus } from '@/services/commandcode-cli'
 import { useGrokCliStatus } from '@/services/grok-cli'
 import { useKimiCliStatus } from '@/services/kimi-cli'
+import { useAntigravityCliStatus } from '@/services/antigravity-cli'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import {
@@ -34,6 +42,7 @@ import {
 import type { CliBackend } from '@/types/preferences'
 import { usePreferences } from '@/services/preferences'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { resolveDefaultModelForBackend } from '@/lib/session-defaults'
 import {
   NativeCliSessionsModal,
   type NativeCliSessionKind,
@@ -48,6 +57,7 @@ const BACKEND_ORDER: CliBackend[] = [
   'commandcode',
   'grok',
   'kimi',
+  'antigravity',
 ]
 
 const backendCommands: Record<CliBackend, string> = {
@@ -59,6 +69,7 @@ const backendCommands: Record<CliBackend, string> = {
   commandcode: 'commandcode',
   grok: 'grok',
   kimi: 'kimi',
+  antigravity: 'antigravity',
 }
 
 const YOLO_ARGS_BY_BACKEND: Partial<Record<CliBackend, string[]>> = {
@@ -67,6 +78,7 @@ const YOLO_ARGS_BY_BACKEND: Partial<Record<CliBackend, string[]>> = {
   cursor: ['--yolo', '--sandbox', 'disabled'],
   grok: ['--always-approve', '--sandbox', 'off'],
   kimi: ['--yolo'],
+  antigravity: ['--approval-mode', 'yolo'],
 }
 
 export function NewSessionModeModal() {
@@ -83,6 +95,7 @@ export function NewSessionModeModal() {
   })
   const grokStatus = useGrokCliStatus({ enabled: target !== null })
   const kimiStatus = useKimiCliStatus({ enabled: target !== null })
+  const antigravityStatus = useAntigravityCliStatus({ enabled: target !== null })
   const { data: preferences } = usePreferences()
   const [nativePickerKind, setNativePickerKind] =
     useState<NativeCliSessionKind | null>(null)
@@ -131,6 +144,10 @@ export function NewSessionModeModal() {
         installed: kimiStatus.data?.installed,
         path: kimiStatus.data?.path,
       },
+      antigravity: {
+        installed: antigravityStatus.data?.installed,
+        path: antigravityStatus.data?.path,
+      },
     }
 
     return BACKEND_ORDER.map((backend, index) => {
@@ -155,6 +172,8 @@ export function NewSessionModeModal() {
     grokStatus.data?.path,
     kimiStatus.data?.installed,
     kimiStatus.data?.path,
+    antigravityStatus.data?.installed,
+    antigravityStatus.data?.path,
     opencodeStatus.data?.installed,
     opencodeStatus.data?.path,
     piStatus.data?.installed,
@@ -170,6 +189,7 @@ export function NewSessionModeModal() {
     commandcodeStatus.isLoading ||
     grokStatus.isLoading ||
     kimiStatus.isLoading
+    || antigravityStatus.isLoading
 
   const nativePickerCommand = useMemo(() => {
     if (nativePickerKind === null || nativePickerKind === 'terminal') {
@@ -205,9 +225,17 @@ export function NewSessionModeModal() {
   const chooseChat = useCallback(() => {
     if (!target) return
     const { worktreeId, worktreePath } = target
+    const backend = (preferences?.default_backend ?? 'claude') as CliBackend
+    const model = resolveDefaultModelForBackend(backend, preferences)
+    const effortLevel =
+      backend === 'codex'
+        ? (preferences?.default_codex_reasoning_effort ?? 'high')
+        : backend === 'grok'
+          ? (preferences?.default_grok_reasoning_effort ?? 'high')
+          : (preferences?.default_effort_level ?? 'high')
     close()
     createSession.mutate(
-      { worktreeId, worktreePath },
+      { worktreeId, worktreePath, backend },
       {
         onSuccess: session => {
           const defaultExecutionMode =
@@ -215,11 +243,15 @@ export function NewSessionModeModal() {
           useChatStore
             .getState()
             .setExecutionMode(session.id, defaultExecutionMode)
+          useChatStore.getState().setSelectedModel(session.id, model)
+          useChatStore.getState().setEffortLevel(session.id, effortLevel)
           invoke('update_session_state', {
             worktreeId,
             worktreePath,
             sessionId: session.id,
             selectedExecutionMode: defaultExecutionMode,
+            selectedModel: model,
+            selectedEffortLevel: effortLevel,
           }).catch(() => undefined)
           useChatStore.getState().setActiveSession(worktreeId, session.id)
           useUIStore.getState().setSessionPrimarySurface(session.id, 'chat')
@@ -283,49 +315,42 @@ export function NewSessionModeModal() {
     setNativePickerKind(defaultKind)
   }, [chooseChat, preferences?.default_new_session_kind, target])
 
+  const onNewSessionKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+      return
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      chooseChat()
+      return
+    }
+
+    if (event.key === '1') {
+      event.preventDefault()
+      event.stopPropagation()
+      choosePlainTerminal()
+      return
+    }
+
+    const choice = installedBackendChoices.find(
+      item => item.shortcut === event.key
+    )
+    if (choice) {
+      event.preventDefault()
+      event.stopPropagation()
+      chooseBackendTerminal(choice.backend)
+    }
+  })
+
   useEffect(() => {
     if (!open || nativePickerKind !== null) return
 
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
-        return
-      }
-
-      if (event.key === 'Enter') {
-        event.preventDefault()
-        event.stopPropagation()
-        chooseChat()
-        return
-      }
-
-      if (event.key === '1') {
-        event.preventDefault()
-        event.stopPropagation()
-        choosePlainTerminal()
-        return
-      }
-
-      const choice = installedBackendChoices.find(
-        item => item.shortcut === event.key
-      )
-      if (choice) {
-        event.preventDefault()
-        event.stopPropagation()
-        chooseBackendTerminal(choice.backend)
-      }
-    }
-
+    const handleKeyDown = (event: KeyboardEvent) => onNewSessionKeyDown(event)
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
-  }, [
-    chooseBackendTerminal,
-    chooseBackendTerminalYolo,
-    chooseChat,
-    choosePlainTerminal,
-    installedBackendChoices,
-    nativePickerKind,
-    open,
-  ])
+  }, [nativePickerKind, open])
 
   return (
     <>

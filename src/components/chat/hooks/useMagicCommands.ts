@@ -34,13 +34,14 @@ interface MagicCommandHandlers {
   handleResolveConflicts: (override?: InvestigateOverride) => void
   handleInvestigateWorkflowRun: (detail: WorkflowRunDetail) => void
   handleInvestigate: (
-    type: 'issue' | 'pr' | 'advisory',
+    type: 'issue' | 'pr' | 'advisory' | 'sentry-issue',
     override?: InvestigateOverride
   ) => void
   handleReviewComments: (
     prompt: string | string[],
     options?: { executionMode?: ExecutionMode }
   ) => void
+  handleSmokeTest: () => void
 }
 
 interface UseMagicCommandsOptions extends MagicCommandHandlers {
@@ -77,6 +78,7 @@ export function useMagicCommands({
   handleInvestigateWorkflowRun,
   handleInvestigate,
   handleReviewComments,
+  handleSmokeTest,
   isModal = false,
   sessionModalOpen = false,
 }: UseMagicCommandsOptions): void {
@@ -99,6 +101,7 @@ export function useMagicCommands({
     handleInvestigateWorkflowRun,
     handleInvestigate,
     handleReviewComments,
+    handleSmokeTest,
   })
 
   // Update refs in useLayoutEffect to avoid linter warning about ref updates during render
@@ -122,6 +125,7 @@ export function useMagicCommands({
       handleInvestigateWorkflowRun,
       handleInvestigate,
       handleReviewComments,
+      handleSmokeTest,
     }
   })
 
@@ -150,6 +154,8 @@ export function useMagicCommands({
           handlers.handleSaveContext()
           break
         case 'load-context':
+        case 'inject-session':
+          // Inject Session opens Load Context on the Contexts tab (Sessions list)
           handlers.handleLoadContext()
           break
         case 'linked-projects':
@@ -194,7 +200,7 @@ export function useMagicCommands({
           handlers.handleInvestigate(
             (
               rest as {
-                type: 'issue' | 'pr' | 'advisory'
+                type: 'issue' | 'pr' | 'advisory' | 'sentry-issue'
                 override?: InvestigateOverride
               }
             ).type ?? 'issue',
@@ -215,6 +221,9 @@ export function useMagicCommands({
           })
           break
         }
+        case 'smoke-test':
+          handlers.handleSmokeTest()
+          break
       }
     }
 

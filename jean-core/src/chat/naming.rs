@@ -279,7 +279,8 @@ fn extract_text_from_stream_json(output: &str) -> Result<String, String> {
                                 text_content.push_str(text);
                             }
                         } else if block_type == Some("tool_use")
-                            && block.get("name").and_then(|n| n.as_str()) == Some("StructuredOutput")
+                            && block.get("name").and_then(|n| n.as_str())
+                                == Some("StructuredOutput")
                         {
                             if let Some(input) = block.get("input") {
                                 structured_json = Some(input.to_string());
@@ -386,6 +387,19 @@ fn generate_names(app: &AppHandle, request: &NamingRequest) -> Result<NamingOutp
     }
     if backend == super::types::Backend::Kimi {
         return generate_names_kimi(app, &prompt, &request.model, request);
+    }
+    if backend == super::types::Backend::Antigravity {
+        let text = super::antigravity::execute_one_shot_antigravity(
+            app,
+            &prompt,
+            &request.model,
+            Some(NAMING_SCHEMA),
+            Some(std::path::Path::new(&request.worktree_path)),
+        )?;
+        let json = extract_json_object(&text)
+            .ok_or_else(|| "No JSON object found in Antigravity naming response".to_string())?;
+        return serde_json::from_str(json)
+            .map_err(|error| format!("Failed to parse Antigravity naming JSON: {error}"));
     }
 
     let cli_path = resolve_cli_binary(app);
@@ -997,9 +1011,11 @@ fn validate_branch_name(name: &str) -> Result<String, String> {
 
     let sanitized = sanitized.trim_matches('-').to_string();
 
-    // Enforce length limit
+    // Enforce length limit on a UTF-8 char boundary (byte index 50 may land
+    // inside a multi-byte character for non-ASCII branch names).
     let final_name = if sanitized.len() > 50 {
-        sanitized[..50].to_string()
+        let end = sanitized.floor_char_boundary(50);
+        sanitized[..end].to_string()
     } else {
         sanitized
     };
@@ -1293,5 +1309,25 @@ mod tests {
             .expect("required array");
         assert!(required.iter().any(|v| v.as_str() == Some("session_name")));
         assert!(required.iter().any(|v| v.as_str() == Some("branch_name")));
+    }
+
+    #[test]
+    fn validate_branch_name_truncates_non_ascii_without_panic() {
+        // Multi-byte chars (each "日" is 3 bytes). Byte index 50 lands mid-character
+        // and previously panicked with "byte index 50 is not a char boundary".
+        let long_jp = "日".repeat(30); // 90 bytes
+        let result = validate_branch_name(&long_jp).unwrap();
+        assert!(!result.is_empty());
+        assert!(result.len() <= 50);
+        assert!(result.is_char_boundary(result.len()));
+        assert!(result.chars().all(|c| c == '日'));
+    }
+
+    #[test]
+    fn validate_branch_name_ascii_still_capped_at_50() {
+        let long = "a".repeat(80);
+        let result = validate_branch_name(&long).unwrap();
+        assert_eq!(result.len(), 50);
+        assert_eq!(result, "a".repeat(50));
     }
 }

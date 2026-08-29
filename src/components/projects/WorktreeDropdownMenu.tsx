@@ -16,7 +16,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   AlertDialog,
@@ -42,6 +42,7 @@ import { Button } from '@/components/ui/button'
 import type { Worktree } from '@/types/projects'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import { ghCliQueryKeys, useGhCliAuth } from '@/services/gh-cli'
+import { useWebEditorUrl } from '@/services/projects'
 import {
   useDependabotAlerts,
   useGitHubIssues,
@@ -57,6 +58,7 @@ import {
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { countUnreadFailedWorkflowRuns } from '@/components/shared/workflow-run-utils'
 import type { GhAuthStatus } from '@/types/gh-cli'
 import { useWorktreeMenuActions } from './useWorktreeMenuActions'
 
@@ -126,6 +128,9 @@ export function WorktreeDropdownMenu({
     enabled: isGitHubAuthenticated,
     staleTime: BADGE_STALE_TIME,
   })
+  const seenFailedWorkflowRunIds = useUIStore(
+    state => state.seenFailedWorkflowRunIds
+  )
   const issueCount = issueResult?.totalCount ?? 0
   const prCount = prs?.length ?? 0
   const securityCount =
@@ -133,7 +138,16 @@ export function WorktreeDropdownMenu({
     (advisories?.filter(a => a.state === 'draft' || a.state === 'triage')
       .length ?? 0)
   const workflowRunCount = workflowRuns?.runs?.length ?? 0
-  const failedWorkflowCount = workflowRuns?.failedCount ?? 0
+  const failedWorkflowCount = useMemo(
+    () =>
+      countUnreadFailedWorkflowRuns(
+        workflowRuns?.runs ?? [],
+        seenFailedWorkflowRunIds
+      ),
+    [workflowRuns?.runs, seenFailedWorkflowRunIds]
+  )
+  const hasWebEditor = useWebEditorUrl() !== null
+  const showEditorItem = canOpenInEditor() || hasWebEditor
   const hasDiff = uncommittedAdded > 0 || uncommittedRemoved > 0
   const hasBranchDiff = branchDiffAdded > 0 || branchDiffRemoved > 0
   const showMobileGitHubItems = isMobile
@@ -207,9 +221,9 @@ export function WorktreeDropdownMenu({
                 Run
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
-                {runScripts.map((cmd, i) => (
+                {runScripts.map(cmd => (
                   <DropdownMenuItem
-                    key={i}
+                    key={cmd}
                     onSelect={() => handleRunCommand(cmd)}
                     className="font-mono text-xs"
                   >
@@ -290,11 +304,9 @@ export function WorktreeDropdownMenu({
             </DropdownMenuItem>
           )}
 
-          {(canOpenInEditor() || canOpenNativeApps() || !isNativeApp()) && (
-            <DropdownMenuSeparator />
-          )}
+          {(showEditorItem || canOpenNativeApps()) && <DropdownMenuSeparator />}
 
-          {(canOpenInEditor() || !isNativeApp()) && (
+          {showEditorItem && (
             <DropdownMenuItem onClick={handleOpenInEditor}>
               <Code className="mr-2 h-4 w-4" />
               {isNativeApp()

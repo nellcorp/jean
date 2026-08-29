@@ -925,8 +925,12 @@ pub async fn list_linear_issues(
             vars.insert("milestoneId".into(), serde_json::json!(m));
         }
 
-        let response =
-            linear_graphql(&config.api_key, &query, Some(serde_json::Value::Object(vars))).await?;
+        let response = linear_graphql(
+            &config.api_key,
+            &query,
+            Some(serde_json::Value::Object(vars)),
+        )
+        .await?;
         let issues_obj = response
             .get("data")
             .and_then(|d| d.get("issues"))
@@ -969,8 +973,10 @@ pub async fn search_linear_issues(
     log::trace!("Searching Linear issues for project {project_id}: {query}");
 
     let config = get_linear_config(&app, &project_id)?;
-    let gql_query =
-        build_search_issues_query(config.team_id.as_deref(), config.project_filter_id.as_deref());
+    let gql_query = build_search_issues_query(
+        config.team_id.as_deref(),
+        config.project_filter_id.as_deref(),
+    );
     let variables = build_filter_variables(&config, Some(serde_json::json!({ "query": query })));
     let response = linear_graphql(&config.api_key, &gql_query, variables).await?;
 

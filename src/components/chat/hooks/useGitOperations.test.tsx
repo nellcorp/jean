@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   toastWarning: vi.fn(),
   toastError: vi.fn(),
   toastDismiss: vi.fn(),
+  linkWorktreePr: vi.fn(),
+  saveWorktreePr: vi.fn(),
 }))
 
 vi.mock('@/lib/transport', () => ({
@@ -38,6 +40,15 @@ vi.mock('sonner', () => ({
     dismiss: mocks.toastDismiss,
   },
 }))
+vi.mock('@/services/projects', async () => {
+  const actual = await vi.importActual('@/services/projects')
+  return {
+    ...(actual as object),
+    isTauri: () => true,
+    linkWorktreePr: mocks.linkWorktreePr,
+    saveWorktreePr: mocks.saveWorktreePr,
+  }
+})
 vi.mock('@/services/git-status', () => ({
   gitPush: vi.fn(),
   triggerImmediateGitPoll: vi.fn(),
@@ -77,7 +88,10 @@ const project: Project = {
   order: 0,
 }
 
-function renderGitOperations(preferenceOverrides = {}) {
+function renderGitOperations(
+  preferenceOverrides = {},
+  worktreeOverrides: Partial<Worktree> = {}
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
@@ -85,6 +99,7 @@ function renderGitOperations(preferenceOverrides = {}) {
   const wrapper = ({ children }: { children: React.ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   )
+  const activeWorktree = { ...worktree, ...worktreeOverrides }
 
   const hook = renderHook(
     () =>
@@ -92,7 +107,7 @@ function renderGitOperations(preferenceOverrides = {}) {
         activeWorktreeId: 'wt-1',
         activeSessionId: 'session-current',
         activeWorktreePath: '/repo/worktree',
-        worktree,
+        worktree: activeWorktree,
         project,
         queryClient,
         inputRef: ref({ focus: vi.fn() } as unknown as HTMLTextAreaElement),
@@ -160,7 +175,7 @@ describe('useGitOperations conflict resolution', () => {
   })
 
   it('sends detected conflicts immediately in yolo mode instead of drafting them', async () => {
-    const { result, sendMessage } = renderGitOperations()
+    const { result, sendMessage, queryClient } = renderGitOperations()
 
     await act(async () => {
       await result.current.handleResolveConflicts()
@@ -172,6 +187,15 @@ describe('useGitOperations conflict resolution', () => {
     expect(useChatStore.getState().executionModes['conflict-session']).toBe(
       'yolo'
     )
+    expect(
+      queryClient
+        .getQueryData<{ sessions: Session[] }>([
+          'chat',
+          'sessions',
+          'wt-1',
+        ])
+        ?.sessions.map(session => session.id)
+    ).toContain('conflict-session')
     expect(sendMessage.mutate).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: 'conflict-session',
@@ -191,47 +215,48 @@ describe('useGitOperations conflict resolution', () => {
     expect(sentArgs?.message).toContain('Resolve and finish.')
   })
 
-  it('starts a dedicated Final review session with the configured audit prompt', async () => {
-    const { result, sendMessage } = renderGitOperations({
-      magic_prompts: {
-        final_review: 'Audit this change and return tables only.',
-      },
-      magic_prompt_backends: { final_review_backend: 'codex' },
-      magic_prompt_models: { final_review_model: 'gpt-5.5' },
-      magic_prompt_efforts: { final_review_effort: 'high' },
-      magic_prompt_modes: { final_review_mode: 'plan' },
-    })
+  it('opens an already-linked PR instead of creating a new one', async () => {
+    const { openExternal } = await import('@/lib/platform')
+    const { result } = renderGitOperations()
 
     await act(async () => {
-      await result.current.handleFinalReview()
+      await result.current.handleOpenPr()
     })
 
-    expect(mocks.invoke).toHaveBeenCalledWith(
-      'create_session',
-      expect.objectContaining({
-        worktreeId: 'wt-1',
-        worktreePath: '/repo/worktree',
-        name: 'Final review',
-        backend: 'codex',
-      })
+    expect(openExternal).toHaveBeenCalledWith('https://github.com/o/r/pull/31')
+    expect(mocks.invoke).not.toHaveBeenCalledWith(
+      'create_pr_with_ai_content',
+      expect.anything()
     )
-    expect(sendMessage.mutate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: 'conflict-session',
-        message: 'Audit this change and return tables only.',
-        model: 'gpt-5.5',
-        effortLevel: 'high',
-        executionMode: 'plan',
-        backend: 'codex',
-      }),
-      expect.any(Object)
-    )
-    expect(mocks.invoke).toHaveBeenCalledWith('update_session_state', {
-      worktreeId: 'wt-1',
-      worktreePath: '/repo/worktree',
-      sessionId: 'conflict-session',
-      selectedExecutionMode: 'plan',
+  })
+
+  it('resolves missing PR URL from linked number before opening', async () => {
+    const { openExternal } = await import('@/lib/platform')
+    mocks.linkWorktreePr.mockResolvedValue({
+      pr_number: 31,
+      pr_url: 'https://github.com/o/r/pull/31',
+      title: 'Feature',
     })
+
+    const { result } = renderGitOperations(
+      {},
+      { pr_number: 31, pr_url: undefined }
+    )
+
+    await act(async () => {
+      await result.current.handleOpenPr()
+    })
+
+    expect(mocks.linkWorktreePr).toHaveBeenCalledWith(
+      'wt-1',
+      '/repo/worktree',
+      31
+    )
+    expect(openExternal).toHaveBeenCalledWith('https://github.com/o/r/pull/31')
+    expect(mocks.invoke).not.toHaveBeenCalledWith(
+      'create_pr_with_ai_content',
+      expect.anything()
+    )
   })
 
   it('shows a cancel button while creating a PR and cancels the backend action', async () => {
@@ -248,7 +273,11 @@ describe('useGitOperations conflict resolution', () => {
       return Promise.resolve(undefined)
     })
 
-    const { result } = renderGitOperations()
+    // Unlinked worktree so Open PR creates instead of opening an existing link
+    const { result } = renderGitOperations(
+      {},
+      { pr_number: undefined, pr_url: undefined }
+    )
 
     await act(async () => {
       void result.current.handleOpenPr()

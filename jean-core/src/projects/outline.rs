@@ -53,7 +53,9 @@ pub(crate) fn get_outline_config(
         .as_ref()
         .map(|u| u.trim().trim_end_matches('/').to_string())
         .filter(|u| !u.is_empty())
-        .ok_or("No Outline URL configured. Set your Outline instance URL in Settings → Integrations.")?;
+        .ok_or(
+            "No Outline URL configured. Set your Outline instance URL in Settings → Integrations.",
+        )?;
 
     Ok(OutlineConfig {
         api_key,
@@ -117,10 +119,7 @@ fn clean_input(mut input: Value) -> Value {
 // =============================================================================
 
 /// List Outline collections.
-pub async fn list_outline_collections(
-    app: AppHandle,
-    project_id: String,
-) -> Result<Value, String> {
+pub async fn list_outline_collections(app: AppHandle, project_id: String) -> Result<Value, String> {
     let config = get_outline_config(&app, &project_id)?;
     outline_api(&config, "collections.list", json!({ "limit": 100 })).await
 }

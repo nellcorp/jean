@@ -21,6 +21,7 @@ import { useAvailablePiModels } from '@/services/pi-cli'
 import { useAvailableCommandCodeModels } from '@/services/commandcode-cli'
 import { useAvailableGrokModels } from '@/services/grok-cli'
 import { useAvailableKimiModels } from '@/services/kimi-cli'
+import { useAvailableAntigravityModels } from '@/services/antigravity-cli'
 import { cn } from '@/lib/utils'
 import { Kbd } from '@/components/ui/kbd'
 import { BackendLabel } from '@/components/ui/backend-label'
@@ -30,6 +31,7 @@ import {
   formatOpencodeModelLabel,
   formatPiModelLabel,
 } from '@/components/chat/toolbar/toolbar-utils'
+import { ANTIGRAVITY_MODEL_OPTIONS } from '@/components/chat/toolbar/toolbar-options'
 import { useToolbarDerivedState } from '@/components/chat/toolbar/useToolbarDerivedState'
 import { useToolbarDropdownShortcuts } from '@/components/chat/toolbar/useToolbarDropdownShortcuts'
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -91,6 +93,9 @@ export function DesktopBackendModelPicker({
   const { data: availableKimiModels } = useAvailableKimiModels({
     enabled: installedBackends.includes('kimi'),
   })
+  const { data: availableAntigravityModels } = useAvailableAntigravityModels({
+    enabled: installedBackends.includes('antigravity'),
+  })
 
   const opencodeModelOptions = useMemo(() => {
     if (opencodeModelsError) return []
@@ -142,8 +147,19 @@ export function DesktopBackendModelPicker({
       })),
     [availableKimiModels]
   )
+  const antigravityModelOptions = useMemo(
+    () =>
+      availableAntigravityModels?.map(model => ({
+        value: `antigravity/${model.id}`,
+        label: model.label,
+      })),
+    [availableAntigravityModels]
+  )
 
-  const { backendModelSections, selectedModelLabel } = useToolbarDerivedState({
+  const {
+    backendModelSections,
+    selectedModelLabel: derivedSelectedModelLabel,
+  } = useToolbarDerivedState({
     selectedBackend,
     selectedProvider,
     selectedModel,
@@ -157,13 +173,30 @@ export function DesktopBackendModelPicker({
     installedBackends,
   })
 
-  const selectableChoiceCount = useMemo(
-    () =>
-      backendModelSections
-        .filter(section => installedBackends.includes(section.backend))
-        .reduce((count, section) => count + section.options.length, 0),
-    [backendModelSections, installedBackends]
-  )
+  // useToolbarDerivedState resolves Antigravity labels from the static option
+  // list only — prefer the CLI-reported label for the trigger when available.
+  const selectedModelLabel = useMemo(() => {
+    if (selectedBackend !== 'antigravity') return derivedSelectedModelLabel
+    return (
+      antigravityModelOptions?.find(option => option.value === selectedModel)
+        ?.label ??
+      ANTIGRAVITY_MODEL_OPTIONS.find(option => option.value === selectedModel)
+        ?.label ??
+      derivedSelectedModelLabel
+    )
+  }, [
+    antigravityModelOptions,
+    derivedSelectedModelLabel,
+    selectedBackend,
+    selectedModel,
+  ])
+
+  const selectableChoiceCount = useMemo(() => {
+    const installedBackendsSet = new Set(installedBackends)
+    return backendModelSections
+      .filter(section => installedBackendsSet.has(section.backend))
+      .reduce((count, section) => count + section.options.length, 0)
+  }, [backendModelSections, installedBackends])
   const hasMultipleChoices = selectableChoiceCount > 1
 
   const handleOpenChange = useCallback((nextOpen: boolean) => {

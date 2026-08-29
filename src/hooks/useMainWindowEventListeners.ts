@@ -23,10 +23,13 @@ import { usePreferences } from '@/services/preferences'
 import { logger } from '@/lib/logger'
 import {
   eventToShortcutString,
+  isModKeyEvent,
   DEFAULT_KEYBINDINGS,
   type KeybindingAction,
   type KeybindingsMap,
 } from '@/types/keybindings'
+import { installWindowKeyboardFocusRestore } from '@/lib/restore-keyboard-focus'
+import { useIsMobile } from '@/hooks/use-mobile'
 
 const PLAN_DIALOG_APPROVAL_ACTIONS = new Set<KeybindingAction>([
   'approve_plan',
@@ -37,11 +40,49 @@ const PLAN_DIALOG_APPROVAL_ACTIONS = new Set<KeybindingAction>([
   'approve_plan_worktree_yolo',
 ])
 
+interface RunEnvironmentStartedEvent {
+  worktreeId: string
+  terminalId: string
+  command: string
+}
+
+export function handleRunEnvironmentStarted(
+  payload: RunEnvironmentStartedEvent
+): void {
+  const terminalStore = useTerminalStore.getState()
+  terminalStore.registerStartedRun(
+    payload.worktreeId,
+    payload.terminalId,
+    payload.command
+  )
+
+  const uiState = useUIStore.getState()
+  if (
+    uiState.sessionChatModalOpen &&
+    uiState.sessionChatModalWorktreeId === payload.worktreeId
+  ) {
+    terminalStore.setModalTerminalOpen(payload.worktreeId, true)
+  }
+}
+
 export function shouldLetPlanDialogHandleAction(
   action: KeybindingAction,
   planDialogOpen: boolean
 ): boolean {
   return planDialogOpen && PLAN_DIALOG_APPROVAL_ACTIONS.has(action)
+}
+
+export function shouldLetChatInputHandleAction(
+  action: KeybindingAction,
+  target: EventTarget | null,
+  planDialogOpen: boolean
+): boolean {
+  return (
+    action === 'approve_plan' &&
+    !planDialogOpen &&
+    target instanceof Element &&
+    target.closest('[data-chat-input]') !== null
+  )
 }
 
 export function findKeybindingAction(
@@ -53,6 +94,15 @@ export function findKeybindingAction(
   }
 
   return null
+}
+
+export function useWindowKeyboardFocusRestore() {
+  const isMobile = useIsMobile()
+
+  useEffect(() => {
+    if (!isNativeApp() || isMobile) return
+    return installWindowKeyboardFocusRestore()
+  }, [isMobile])
 }
 
 /**
@@ -187,6 +237,13 @@ export function shouldAllowKeybindingThroughOpenOverlay(
 ): boolean {
   // GitDiffModal is intentionally a full-screen workflow overlay, but users
   // still need the global "Open in..." picker from there (Cmd/Ctrl+O).
+  if (
+    uiState.sessionChatModalOpen &&
+    (action === 'toggle_zen_mode' || action === 'clear_session_context')
+  ) {
+    return true
+  }
+
   return action === 'open_in_modal' && uiState.gitDiffModalOpen
 }
 
@@ -338,6 +395,22 @@ function executeKeybindingAction(
       setLeftSidebarVisible(!leftSidebarVisible)
       break
     }
+    case 'toggle_file_browser': {
+      logger.debug('Keybinding: toggle_file_browser')
+      const { fileBrowserVisible, setFileBrowserVisible } =
+        useUIStore.getState()
+      setFileBrowserVisible(!fileBrowserVisible)
+      break
+    }
+    case 'toggle_zen_mode': {
+      logger.debug('Keybinding: toggle_zen_mode')
+      useUIStore.getState().toggleZenMode()
+      break
+    }
+    case 'clear_session_context':
+      logger.debug('Keybinding: clear_session_context')
+      window.dispatchEvent(new CustomEvent('clear-session-context'))
+      break
     case 'open_preferences':
       logger.debug('Keybinding: open_preferences')
       commandContext.openPreferences()
@@ -392,25 +465,21 @@ function executeKeybindingAction(
 
       const resolvedWorktreePath = targetWorktreePath
 
-      // Fetch run scripts - use fetchQuery to handle uncached dashboard worktrees
+      // Always read jean.json from disk. A cached copy stays stale after
+      // the branch is updated from latest or Settings saves a new command.
       ;(async () => {
-        let runScripts = queryClient.getQueryData<string[]>([
-          'run-scripts',
-          resolvedWorktreePath,
-        ])
-
-        if (runScripts === undefined) {
-          try {
-            runScripts = await queryClient.fetchQuery<string[]>({
-              queryKey: ['run-scripts', resolvedWorktreePath],
-              queryFn: () =>
-                invoke<string[]>('get_run_scripts', {
-                  worktreePath: resolvedWorktreePath,
-                }),
-            })
-          } catch {
-            runScripts = []
-          }
+        let runScripts: string[] = []
+        try {
+          runScripts = await queryClient.fetchQuery<string[]>({
+            queryKey: ['run-scripts', resolvedWorktreePath],
+            queryFn: () =>
+              invoke<string[]>('get_run_scripts', {
+                worktreePath: resolvedWorktreePath,
+              }),
+            staleTime: 0,
+          })
+        } catch {
+          runScripts = []
         }
 
         const firstScript = runScripts?.[0]
@@ -719,6 +788,12 @@ export function useMainWindowEventListeners() {
     }
   }, [preferences?.keybindings])
 
+  // After alt-tab / OS window reactivation, WebViews often leave the document
+  // without keyboard focus until a click. Restore the last focused element
+  // (or chat input / body) so typing and shortcuts like Ctrl/Cmd+L work again.
+  // Issue #577.
+  useWindowKeyboardFocusRestore()
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Convert the keyboard event to our shortcut string format
@@ -765,6 +840,21 @@ export function useMainWindowEventListeners() {
 
       const keybindings = keybindingsRef.current
       const matchedAction = findKeybindingAction(shortcut, keybindings)
+
+      // Cmd/Ctrl+Enter is also the chat input's explicit steer shortcut. The
+      // global approve-plan binding runs in capture phase, so it must yield or
+      // the textarea never receives Enter. A visible plan dialog still owns
+      // the same shortcut.
+      if (
+        matchedAction &&
+        shouldLetChatInputHandleAction(
+          matchedAction,
+          e.target,
+          useUIStore.getState().planDialogOpen
+        )
+      ) {
+        return
+      }
 
       // OS key-repeat must not re-fire one-shot actions (issue #56: holding
       // Ctrl/Cmd+W cascade-closed every terminal/session under the cursor).
@@ -814,7 +904,7 @@ export function useMainWindowEventListeners() {
           const digit = digitMatch?.[1] ? parseInt(digitMatch[1], 10) : NaN
 
           if (
-            (e.metaKey || e.ctrlKey) &&
+            isModKeyEvent(e) &&
             !e.shiftKey &&
             !e.altKey &&
             digit >= 1 &&
@@ -852,8 +942,9 @@ export function useMainWindowEventListeners() {
         }
       }
 
-      // CMD/Ctrl+1–9: switch session tabs (when modal open), dashboard tabs, or worktree by index
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      // Mod+1–9: switch session tabs (when modal open), dashboard tabs, or worktree by index
+      // Use platform mod (Cmd on macOS native, Ctrl elsewhere) so Ctrl+digit reaches terminals.
+      if (isModKeyEvent(e) && !e.shiftKey && !e.altKey) {
         // Use e.code (physical key) since e.key can vary with CMD held on macOS
         const digitMatch = e.code.match(/^Digit(\d)$/)
         const digit = digitMatch?.[1] ? parseInt(digitMatch[1], 10) : NaN
@@ -946,11 +1037,36 @@ export function useMainWindowEventListeners() {
     const setupMenuListeners = async () => {
       logger.debug('Setting up menu event listeners')
       const unlisteners = await Promise.all([
+        listen<RunEnvironmentStartedEvent>(
+          'run-environment:started',
+          event => handleRunEnvironmentStarted(event.payload)
+        ),
+        listen<{ sessionId: string }>('terminal:working', event => {
+          const sessionId = event.payload?.sessionId
+          if (!sessionId) return
+          const store = useChatStore.getState()
+          store.addSendingSession(sessionId)
+          // Mirror chat turn start: clear waiting so the session shows as running.
+          store.setWaitingForInput(sessionId, false)
+        }),
+
+        listen<{ sessionId: string }>('terminal:attention', event => {
+          const sessionId = event.payload?.sessionId
+          if (!sessionId) return
+          const store = useChatStore.getState()
+          store.removeSendingSession(sessionId)
+          // Mirror chat:done waiting so canvas/list badges update before sessions
+          // cache invalidation lands (terminal sessions have no run transcript).
+          store.setWaitingForInput(sessionId, true)
+        }),
+
         listenLocal('menu-about', async () => {
           logger.debug('About menu event received')
           if (!isNativeApp()) return
-          const { getVersion } = await import('@tauri-apps/api/app')
-          const { message } = await import('@tauri-apps/plugin-dialog')
+          const [{ getVersion }, { message }] = await Promise.all([
+            import('@tauri-apps/api/app'),
+            import('@tauri-apps/plugin-dialog'),
+          ])
           // Show simple about dialog with dynamic version
           const appVersion = await getVersion()
           await message(
@@ -972,7 +1088,10 @@ export function useMainWindowEventListeners() {
             return
           }
           if (ui.isUpdateInstalling) {
-            commandContext.showToast('Update download already in progress', 'info')
+            commandContext.showToast(
+              'Update download already in progress',
+              'info'
+            )
             return
           }
           try {
@@ -1007,6 +1126,13 @@ export function useMainWindowEventListeners() {
           const { leftSidebarVisible, setLeftSidebarVisible } =
             useUIStore.getState()
           setLeftSidebarVisible(!leftSidebarVisible)
+        }),
+
+        listenLocal('menu-toggle-file-browser', () => {
+          logger.debug('Toggle file browser menu event received')
+          const { fileBrowserVisible, setFileBrowserVisible } =
+            useUIStore.getState()
+          setFileBrowserVisible(!fileBrowserVisible)
         }),
 
         listenLocal('menu-toggle-right-sidebar', () => {

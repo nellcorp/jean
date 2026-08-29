@@ -34,6 +34,11 @@ import {
   parseLinearItemNumber,
 } from '@/services/linear'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
+import {
+  filterSentryIssues,
+  useLoadedSentryContexts,
+  useSentryIssues,
+} from '@/services/sentry'
 import type { SavedContextsResponse } from '@/types/chat'
 
 interface UseLoadContextDataOptions {
@@ -98,6 +103,19 @@ export function useLoadContextData({
     isLoading: isLoadingLinearContexts,
     refetch: refetchLinearContexts,
   } = useLoadedLinearIssueContexts(activeSessionId, worktreeId, projectId)
+
+  const {
+    data: loadedSentryContexts,
+    isLoading: isLoadingSentryContexts,
+    refetch: refetchSentryContexts,
+  } = useLoadedSentryContexts(activeSessionId, worktreeId, projectId)
+  const {
+    data: sentryIssues = [],
+    isLoading: isLoadingSentryIssues,
+    isFetching: isRefetchingSentryIssues,
+    error: sentryIssuesError,
+    refetch: refetchSentryIssues,
+  } = useSentryIssues(projectId, searchQuery)
 
   // Linear issues query
   const {
@@ -247,11 +265,11 @@ export function useLoadContextData({
     )
     const localFiltered = filterAdvisories(advisories ?? [], searchQuery)
     return localFiltered
-      .filter(advisory => !loadedGhsaIds.has(advisory.ghsaId))
       .filter(
         advisory =>
-          includeClosed ||
-          (advisory.state !== 'closed' && advisory.state !== 'published')
+          !loadedGhsaIds.has(advisory.ghsaId) &&
+          (includeClosed ||
+            (advisory.state !== 'closed' && advisory.state !== 'published'))
       )
       .sort(
         (a, b) =>
@@ -280,30 +298,32 @@ export function useLoadContextData({
     )
   }, [contextsData, searchQuery, attachedSavedContexts])
 
-  // Filter sessions (exclude current session, apply search, group by project/worktree)
+  // Filter sessions (exclude current session + already-injected refs, apply search)
   const filteredEntries = useMemo(() => {
     if (!allSessionsData?.entries) return []
 
-    return allSessionsData.entries
-      .map(entry => {
-        const filteredSessions = entry.sessions
-          .filter(s => s.messages.length > 0)
-          .filter(s => s.id !== activeSessionId)
-          .filter(s => {
-            if (!searchQuery) return true
-            const query = searchQuery.toLowerCase()
-            return (
-              s.name.toLowerCase().includes(query) ||
-              entry.project_name.toLowerCase().includes(query) ||
-              entry.worktree_name.toLowerCase().includes(query) ||
-              s.messages.some(m => m.content.toLowerCase().includes(query))
-            )
-          })
+    const attachedSlugs = new Set(attachedSavedContexts?.map(c => c.slug) ?? [])
 
-        return { ...entry, sessions: filteredSessions }
+    return allSessionsData.entries.flatMap(entry => {
+      const query = searchQuery ? searchQuery.toLowerCase() : ''
+      const filteredSessions = entry.sessions.filter(s => {
+        if (s.messages.length === 0) return false
+        if (s.id === activeSessionId) return false
+        // Hide sessions already injected as session-ref-* attached contexts
+        if (attachedSlugs.has(`session-ref-${s.id}`)) return false
+        if (!query) return true
+        return (
+          s.name.toLowerCase().includes(query) ||
+          entry.project_name.toLowerCase().includes(query) ||
+          entry.worktree_name.toLowerCase().includes(query) ||
+          s.messages.some(m => m.content.toLowerCase().includes(query))
+        )
       })
-      .filter(entry => entry.sessions.length > 0)
-  }, [allSessionsData, searchQuery, activeSessionId])
+      return filteredSessions.length > 0
+        ? [{ ...entry, sessions: filteredSessions }]
+        : []
+    })
+  }, [allSessionsData, searchQuery, activeSessionId, attachedSavedContexts])
 
   // Filter Linear issues locally, merge with search results, exclude already loaded ones
   const filteredLinearIssues = useMemo(() => {
@@ -339,6 +359,13 @@ export function useLoadContextData({
     loadedLinearContexts,
     exactLinearIssue,
   ])
+
+  const filteredSentryIssues = useMemo(() => {
+    const loadedIds = new Set(loadedSentryContexts?.map(context => context.id))
+    return filterSentryIssues(sentryIssues, searchQuery).filter(
+      issue => !loadedIds.has(issue.id)
+    )
+  }, [loadedSentryContexts, searchQuery, sentryIssues])
 
   // Mutation for renaming contexts
   const renameMutation = useMutation({
@@ -415,6 +442,13 @@ export function useLoadContextData({
     isSearchingLinearIssues,
     linearIssuesError,
     refetchLinearIssues,
+    loadedSentryContexts,
+    isLoadingSentryContexts,
+    refetchSentryContexts,
+    isLoadingSentryIssues,
+    isRefetchingSentryIssues,
+    sentryIssuesError,
+    refetchSentryIssues,
 
     // Filtered data
     filteredIssues,
@@ -422,6 +456,7 @@ export function useLoadContextData({
     filteredSecurityAlerts,
     filteredAdvisories,
     filteredLinearIssues,
+    filteredSentryIssues,
     filteredContexts,
     filteredEntries,
 
@@ -434,6 +469,7 @@ export function useLoadContextData({
     hasLoadedSecurityContexts: (loadedSecurityContexts?.length ?? 0) > 0,
     hasLoadedAdvisoryContexts: (loadedAdvisoryContexts?.length ?? 0) > 0,
     hasLoadedLinearContexts: (loadedLinearContexts?.length ?? 0) > 0,
+    hasLoadedSentryContexts: (loadedSentryContexts?.length ?? 0) > 0,
     hasAttachedContexts: (attachedSavedContexts?.length ?? 0) > 0,
     hasContexts: filteredContexts.length > 0,
     hasSessions: filteredEntries.length > 0,

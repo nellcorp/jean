@@ -33,7 +33,11 @@ vi.mock('@/lib/transport', async importOriginal => ({
     command === 'get_server_platform' ? 'linux' : null
   ),
   listen: vi.fn(async () => () => undefined),
+  // Native remotes use the WS backend. Unblock the App loading gate so the
+  // test can assert we still mount the bundled local MainWindow.
   preloadInitialData: vi.fn(async () => null),
+  useWsConnectionStatus: () => true,
+  hasPreloadedData: () => true,
 }))
 
 vi.mock('./components/layout/MainWindow', () => ({
@@ -41,6 +45,9 @@ vi.mock('./components/layout/MainWindow', () => ({
 }))
 
 vi.mock('./hooks/use-zoom', () => ({ useZoom: vi.fn() }))
+vi.mock('./hooks/use-external-display-zoom-tip', () => ({
+  useExternalDisplayZoomTip: vi.fn(),
+}))
 
 describe('App remote UI', () => {
   it('keeps the bundled local React UI for an active native remote', async () => {

@@ -32,12 +32,17 @@ export function isCliAuthError(error: string): boolean {
     lower.includes('to login again') ||
     lower.includes('run `claude`') ||
     lower.includes('run `codex`') ||
-    lower.includes('run `opencode`')
+    lower.includes('run `opencode`') ||
+    lower.includes('run `agy`') ||
+    lower.includes('launch the cli without arguments to sign in')
   ) {
     return true
   }
   // Claude headless: "/login isn't available in this environment"
-  if (lower.includes("isn't available in this environment") && lower.includes('login')) {
+  if (
+    lower.includes("isn't available in this environment") &&
+    lower.includes('login')
+  ) {
     return true
   }
   return false
@@ -55,6 +60,31 @@ export function rewriteCliAuthErrorMessage(
   )
 }
 
+/** True when Codex reports a missing Linux sandbox / bubblewrap dependency. */
+export function isCodexBubblewrapError(error: string): boolean {
+  const lower = error.toLowerCase()
+  return (
+    lower.includes('bubblewrap') ||
+    lower.includes('no system bwrap') ||
+    (lower.includes('bwrap') &&
+      (lower.includes('not found') ||
+        lower.includes('unavailable') ||
+        lower.includes('could not find')))
+  )
+}
+
+/** User-facing guidance when Codex sandbox cannot find bubblewrap. */
+export function rewriteCodexBubblewrapErrorMessage(error: string): string {
+  if (/apt install bubblewrap/i.test(error)) {
+    return error
+  }
+  return (
+    'Codex sandbox requires bubblewrap. Install it with: sudo apt install bubblewrap ' +
+    '(or your distro equivalent: dnf/pacman). Jean Settings → Codex also shows this warning ' +
+    'when bwrap is missing. See https://developers.openai.com/codex/concepts/sandboxing#prerequisites'
+  )
+}
+
 /** Login CLI args for the given backend. */
 export function loginArgsForBackend(
   backend: CliBackend,
@@ -64,7 +94,10 @@ export function loginArgsForBackend(
     case 'claude':
       return supportsAuthCommand ? ['auth', 'login'] : ['login']
     case 'codex':
-      return ['login']
+      // Device-code auth works in Jean's embedded terminal and on headless
+      // servers. Browser callback (`codex login`) often fails without a local
+      // display / callback listener (Codex itself recommends --device-auth).
+      return ['login', '--device-auth']
     case 'opencode':
       return ['auth', 'login']
     case 'cursor':
@@ -77,6 +110,9 @@ export function loginArgsForBackend(
       return ['login']
     case 'kimi':
       return ['login']
+    case 'antigravity':
+      // Antigravity authentication is selected from its interactive start screen.
+      return []
     default:
       return ['login']
   }
@@ -93,6 +129,7 @@ const STATUS_COMMANDS: Partial<
   commandcode: { command: 'check_commandcode_cli_installed' },
   grok: { command: 'check_grok_cli_installed' },
   kimi: { command: 'check_kimi_cli_installed' },
+  antigravity: { command: 'check_antigravity_cli_installed' },
 }
 
 /**
@@ -123,7 +160,10 @@ export async function openBackendLoginModal(
       return false
     }
 
-    const args = loginArgsForBackend(backend, status.supports_auth_command ?? true)
+    const args = loginArgsForBackend(
+      backend,
+      status.supports_auth_command ?? true
+    )
     const loginType =
       backend === 'claude' ||
       backend === 'codex' ||
@@ -132,7 +172,8 @@ export async function openBackendLoginModal(
       backend === 'pi' ||
       backend === 'commandcode' ||
       backend === 'grok' ||
-      backend === 'kimi'
+      backend === 'kimi' ||
+      backend === 'antigravity'
         ? backend
         : null
     if (!loginType) {

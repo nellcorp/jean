@@ -34,6 +34,7 @@ import {
   isNativeApp,
 } from '@/lib/environment'
 import { getFileManagerName } from '@/lib/platform'
+import { useWebEditorUrl } from '@/services/projects'
 import type { useWorktreeMenuActions } from './useWorktreeMenuActions'
 
 interface WorktreeContextMenuProps {
@@ -62,6 +63,9 @@ export function WorktreeContextMenu({
     handleDelete,
   } = actions
 
+  const hasWebEditor = useWebEditorUrl() !== null
+  const showEditorItem = canOpenInEditor() || hasWebEditor
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
@@ -79,9 +83,9 @@ export function WorktreeContextMenu({
               Run
             </ContextMenuSubTrigger>
             <ContextMenuSubContent>
-              {runScripts.map((cmd, i) => (
+              {runScripts.map(cmd => (
                 <ContextMenuItem
-                  key={i}
+                  key={cmd}
                   onSelect={() => handleRunCommand(cmd)}
                   className="font-mono text-xs"
                 >
@@ -92,11 +96,9 @@ export function WorktreeContextMenu({
           </ContextMenuSub>
         )}
 
-        {(canOpenInEditor() || canOpenNativeApps() || !isNativeApp()) && (
-          <ContextMenuSeparator />
-        )}
+        {(showEditorItem || canOpenNativeApps()) && <ContextMenuSeparator />}
 
-        {(canOpenInEditor() || !isNativeApp()) && (
+        {showEditorItem && (
           <ContextMenuItem onClick={handleOpenInEditor}>
             <Code className="mr-2 h-4 w-4" />
             {isNativeApp()

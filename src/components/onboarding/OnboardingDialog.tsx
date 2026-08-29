@@ -9,6 +9,7 @@
 const dbg = (...args: unknown[]) => console.debug('[ONBOARDING]', ...args)
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { loginArgsForBackend } from '@/lib/cli-auth'
 import {
   Dialog,
   DialogContent,
@@ -61,6 +62,11 @@ import {
   useKimiPathDetection,
 } from '@/services/kimi-cli'
 import {
+  useAntigravityCliSetup,
+  useAntigravityCliAuth,
+  useAntigravityPathDetection,
+} from '@/services/antigravity-cli'
+import {
   useGhCliSetup,
   useGhCliAuth,
   useGhPathDetection,
@@ -88,12 +94,26 @@ import {
   GROK_DEFAULT_MAGIC_PROMPT_MODELS,
   KIMI_DEFAULT_MAGIC_PROMPT_BACKENDS,
   KIMI_DEFAULT_MAGIC_PROMPT_MODELS,
+  ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_BACKENDS,
+  ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_MODELS,
   type MagicPromptBackends,
   type MagicPromptModels,
 } from '@/types/preferences'
 import { isServerWindows } from '@/lib/platform'
+import { isNativeApp } from '@/lib/environment'
+import {
+  getActiveConnectionId,
+  LOCAL_CONNECTION_ID,
+} from '@/lib/remote-connections'
 import { WslSetupStep } from './WslSetupStep'
+import { UsageModeStep, type OnboardingUsageMode } from './UsageModeStep'
+import { RemoteSetupStep } from './RemoteSetupStep'
 import { ArrowLeft, Loader2 } from 'lucide-react'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import {
+  checkSystemPrerequisites,
+  type SystemPrerequisites,
+} from '@/services/prerequisites'
 
 type AIBackend =
   | 'claude'
@@ -104,7 +124,13 @@ type AIBackend =
   | 'commandcode'
   | 'grok'
   | 'kimi'
+  | 'antigravity'
 type CliType = AIBackend | 'gh'
+
+/** Static CLI login arg arrays (module scope — avoid recreating each render) */
+const AUTH_LOGIN_ARGS = ['auth', 'login']
+const SIMPLE_LOGIN_ARGS = ['login']
+const EMPTY_LOGIN_ARGS: string[] = []
 
 export const AI_BACKENDS: AIBackend[] = [
   'claude',
@@ -115,9 +141,12 @@ export const AI_BACKENDS: AIBackend[] = [
   'commandcode',
   'grok',
   'kimi',
+  'antigravity',
 ]
 
 type OnboardingStep =
+  | 'usage-mode'
+  | 'remote-setup'
   | 'wsl-setup'
   | 'backend-select'
   | 'claude-setup'
@@ -152,6 +181,10 @@ type OnboardingStep =
   | 'kimi-installing'
   | 'kimi-auth-checking'
   | 'kimi-auth-login'
+  | 'antigravity-setup'
+  | 'antigravity-installing'
+  | 'antigravity-auth-checking'
+  | 'antigravity-auth-login'
   | 'gh-setup'
   | 'gh-installing'
   | 'gh-auth-checking'
@@ -165,6 +198,8 @@ type OnboardingStep =
  * they never appear as a Back destination.
  */
 const BACK_NAVIGABLE_STEPS: readonly OnboardingStep[] = [
+  'usage-mode',
+  'remote-setup',
   'wsl-setup',
   'backend-select',
   'claude-setup',
@@ -183,6 +218,8 @@ const BACK_NAVIGABLE_STEPS: readonly OnboardingStep[] = [
   'grok-auth-login',
   'kimi-setup',
   'kimi-auth-login',
+  'antigravity-setup',
+  'antigravity-auth-login',
   'gh-setup',
   'gh-auth-login',
 ] as const
@@ -223,10 +260,11 @@ const backendLabel: Record<CliType, string> = {
   commandcode: 'Command Code CLI',
   grok: 'Grok CLI',
   kimi: 'Kimi Code CLI',
+  antigravity: 'Antigravity CLI',
   gh: 'GitHub CLI',
 }
 
-const BETA_BACKENDS = new Set<AIBackend>(['pi', 'commandcode', 'grok', 'kimi'])
+const BETA_BACKENDS = new Set<AIBackend>(['antigravity'])
 
 function magicDefaultsForBackend(
   backend: AIBackend
@@ -267,6 +305,12 @@ function magicDefaultsForBackend(
       backends: KIMI_DEFAULT_MAGIC_PROMPT_BACKENDS,
     }
   }
+  if (backend === 'antigravity') {
+    return {
+      models: ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_MODELS,
+      backends: ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_BACKENDS,
+    }
+  }
   return null
 }
 
@@ -279,6 +323,7 @@ function stepToBackend(step: OnboardingStep): AIBackend | null {
   if (step.startsWith('commandcode-')) return 'commandcode'
   if (step.startsWith('grok-')) return 'grok'
   if (step.startsWith('kimi-')) return 'kimi'
+  if (step.startsWith('antigravity-')) return 'antigravity'
   return null
 }
 
@@ -304,6 +349,20 @@ function OnboardingDialogContent() {
 
   const { data: preferences } = usePreferences()
   const patchPreferences = usePatchPreferences()
+  const [prerequisites, setPrerequisites] =
+    useState<SystemPrerequisites | null>(null)
+  const [installingPrerequisites, setInstallingPrerequisites] = useState(false)
+  const [prerequisiteAttempt, setPrerequisiteAttempt] = useState(0)
+
+  const refreshPrerequisites = useCallback(async () => {
+    const status = await checkSystemPrerequisites()
+    setPrerequisites(status)
+    return status
+  }, [])
+
+  useEffect(() => {
+    refreshPrerequisites().catch(() => undefined)
+  }, [refreshPrerequisites])
 
   const claudeSetup = useClaudeCliSetup()
   const pathDetection = useClaudePathDetection()
@@ -314,6 +373,7 @@ function OnboardingDialogContent() {
   const commandcodePathDetection = useCommandCodePathDetection()
   const grokPathDetection = useGrokPathDetection()
   const kimiPathDetection = useKimiPathDetection()
+  const antigravityPathDetection = useAntigravityPathDetection()
   const codexSetup = useCodexCliSetup()
   const opencodeSetup = useOpenCodeCliSetup()
   const cursorStatus = useCursorCliStatus()
@@ -321,6 +381,7 @@ function OnboardingDialogContent() {
   const commandcodeSetup = useCommandCodeCliSetup()
   const grokSetup = useGrokCliSetup()
   const kimiSetup = useKimiCliSetup()
+  const antigravitySetup = useAntigravityCliSetup()
   const ghPathDetection = useGhPathDetection()
   const ghSetup = useGhCliSetup()
 
@@ -340,6 +401,9 @@ function OnboardingDialogContent() {
   })
   const grokAuth = useGrokCliAuth({ enabled: !!grokSetup.status?.installed })
   const kimiAuth = useKimiCliAuth({ enabled: !!kimiSetup.status?.installed })
+  const antigravityAuth = useAntigravityCliAuth({
+    enabled: !!antigravitySetup.status?.installed,
+  })
   const ghAuth = useGhCliAuth({ enabled: !!ghSetup.status?.installed })
 
   const [step, _setStepRaw] = useState<OnboardingStep>('backend-select')
@@ -379,6 +443,9 @@ function OnboardingDialogContent() {
   )
   const [grokVersion, setGrokVersion] = useState<string | null>(null)
   const [kimiVersion, setKimiVersion] = useState<string | null>(null)
+  const [antigravityVersion, setAntigravityVersion] = useState<string | null>(
+    null
+  )
   const [ghVersion, setGhVersion] = useState<string | null>(null)
 
   const [claudeInstallFailed, setClaudeInstallFailed] = useState(false)
@@ -389,6 +456,8 @@ function OnboardingDialogContent() {
     useState(false)
   const [grokInstallFailed, setGrokInstallFailed] = useState(false)
   const [kimiInstallFailed, setKimiInstallFailed] = useState(false)
+  const [antigravityInstallFailed, setAntigravityInstallFailed] =
+    useState(false)
   const [ghInstallFailed, setGhInstallFailed] = useState(false)
   const [claudePathSelected, setClaudePathSelected] = useState(false)
   const [codexPathSelected, setCodexPathSelected] = useState(false)
@@ -397,6 +466,7 @@ function OnboardingDialogContent() {
   const [commandcodePathSelected, setCommandcodePathSelected] = useState(false)
   const [grokPathSelected, setGrokPathSelected] = useState(false)
   const [kimiPathSelected, setKimiPathSelected] = useState(false)
+  const [antigravityPathSelected, setAntigravityPathSelected] = useState(false)
   const [ghPathSelected, setGhPathSelected] = useState(false)
   const [claudeLoginAttempt, setClaudeLoginAttempt] = useState(0)
   const [codexLoginAttempt, setCodexLoginAttempt] = useState(0)
@@ -407,6 +477,7 @@ function OnboardingDialogContent() {
   const [commandcodeLoginAttempt, setCommandcodeLoginAttempt] = useState(0)
   const [grokLoginAttempt, setGrokLoginAttempt] = useState(0)
   const [kimiLoginAttempt, setKimiLoginAttempt] = useState(0)
+  const [antigravityLoginAttempt, setAntigravityLoginAttempt] = useState(0)
   const [ghLoginAttempt, setGhLoginAttempt] = useState(0)
 
   const goBack = useCallback(() => {
@@ -455,6 +526,11 @@ function OnboardingDialogContent() {
       setKimiInstallFailed(false)
       return
     }
+    if (current === 'antigravity-setup' && antigravityPathSelected) {
+      setAntigravityPathSelected(false)
+      setAntigravityInstallFailed(false)
+      return
+    }
     if (current === 'gh-setup' && ghPathSelected) {
       dbg('step: BACK (sub-state) gh-setup installer → picker')
       setGhPathSelected(false)
@@ -462,42 +538,45 @@ function OnboardingDialogContent() {
       return
     }
 
-    setHistoryStack(h => {
-      const prev = h.at(-1)
-      if (!prev) return h
-      dbg('step: BACK', stepRef.current, '→', prev)
-      // Reset transient per-CLI state so the user lands on a fresh screen
-      // (re-shows the path/Jean-managed picker, clears any prior install error).
-      if (prev === 'claude-setup') {
-        setClaudePathSelected(false)
-        setClaudeInstallFailed(false)
-      } else if (prev === 'codex-setup') {
-        setCodexPathSelected(false)
-        setCodexInstallFailed(false)
-      } else if (prev === 'opencode-setup') {
-        setOpencodePathSelected(false)
-        setOpencodeInstallFailed(false)
-      } else if (prev === 'pi-setup') {
-        setPiPathSelected(false)
-        setPiInstallFailed(false)
-      } else if (prev === 'commandcode-setup') {
-        setCommandcodePathSelected(false)
-        setCommandcodeInstallFailed(false)
-      } else if (prev === 'grok-setup') {
-        setGrokPathSelected(false)
-        setGrokInstallFailed(false)
-      } else if (prev === 'kimi-setup') {
-        setKimiPathSelected(false)
-        setKimiInstallFailed(false)
-      } else if (prev === 'gh-setup') {
-        setGhPathSelected(false)
-        setGhInstallFailed(false)
-      }
-      stepRef.current = prev
-      _setStepRaw(prev)
-      return h.slice(0, -1)
-    })
+    const prev = historyStack.at(-1)
+    if (!prev) return
+
+    dbg('step: BACK', stepRef.current, '→', prev)
+    // Reset transient per-CLI state so the user lands on a fresh screen
+    // (re-shows the path/Jean-managed picker, clears any prior install error).
+    if (prev === 'claude-setup') {
+      setClaudePathSelected(false)
+      setClaudeInstallFailed(false)
+    } else if (prev === 'codex-setup') {
+      setCodexPathSelected(false)
+      setCodexInstallFailed(false)
+    } else if (prev === 'opencode-setup') {
+      setOpencodePathSelected(false)
+      setOpencodeInstallFailed(false)
+    } else if (prev === 'pi-setup') {
+      setPiPathSelected(false)
+      setPiInstallFailed(false)
+    } else if (prev === 'commandcode-setup') {
+      setCommandcodePathSelected(false)
+      setCommandcodeInstallFailed(false)
+    } else if (prev === 'grok-setup') {
+      setGrokPathSelected(false)
+      setGrokInstallFailed(false)
+    } else if (prev === 'kimi-setup') {
+      setKimiPathSelected(false)
+      setKimiInstallFailed(false)
+    } else if (prev === 'antigravity-setup') {
+      setAntigravityPathSelected(false)
+      setAntigravityInstallFailed(false)
+    } else if (prev === 'gh-setup') {
+      setGhPathSelected(false)
+      setGhInstallFailed(false)
+    }
+    stepRef.current = prev
+    _setStepRaw(prev)
+    setHistoryStack(h => h.slice(0, -1))
   }, [
+    historyStack,
     claudePathSelected,
     codexPathSelected,
     opencodePathSelected,
@@ -505,6 +584,7 @@ function OnboardingDialogContent() {
     commandcodePathSelected,
     grokPathSelected,
     kimiPathSelected,
+    antigravityPathSelected,
     ghPathSelected,
   ])
 
@@ -518,6 +598,7 @@ function OnboardingDialogContent() {
     (step === 'commandcode-setup' && commandcodePathSelected) ||
     (step === 'grok-setup' && grokPathSelected) ||
     (step === 'kimi-setup' && kimiPathSelected) ||
+    (step === 'antigravity-setup' && antigravityPathSelected) ||
     (step === 'gh-setup' && ghPathSelected)
   const canGoBack =
     (historyStack.length > 0 || hasSubStateBack) &&
@@ -541,6 +622,7 @@ function OnboardingDialogContent() {
   const commandcodeLoginTerminalId = `onboarding-commandcode-login-${loginSessionSeed}-${commandcodeLoginAttempt}`
   const grokLoginTerminalId = `onboarding-grok-login-${loginSessionSeed}-${grokLoginAttempt}`
   const kimiLoginTerminalId = `onboarding-kimi-login-${loginSessionSeed}-${kimiLoginAttempt}`
+  const antigravityLoginTerminalId = `onboarding-antigravity-login-${loginSessionSeed}-${antigravityLoginAttempt}`
   const ghLoginTerminalId = `onboarding-gh-login-${loginSessionSeed}-${ghLoginAttempt}`
 
   const stableClaudeVersions = claudeSetup.versions.filter(v => !v.prerelease)
@@ -554,6 +636,9 @@ function OnboardingDialogContent() {
   )
   const stableGrokVersions = grokSetup.versions.filter(v => !v.prerelease)
   const stableKimiVersions = kimiSetup.versions.filter(v => !v.prerelease)
+  const stableAntigravityVersions = antigravitySetup.versions.filter(
+    v => !v.prerelease
+  )
   const stableGhVersions = ghSetup.versions.filter(v => !v.prerelease)
 
   useEffect(() => {
@@ -611,6 +696,14 @@ function OnboardingDialogContent() {
   }, [kimiVersion, stableKimiVersions])
 
   useEffect(() => {
+    if (!antigravityVersion && stableAntigravityVersions.length > 0) {
+      queueMicrotask(() =>
+        setAntigravityVersion(stableAntigravityVersions[0]?.version ?? null)
+      )
+    }
+  }, [antigravityVersion, stableAntigravityVersions])
+
+  useEffect(() => {
     if (!ghVersion && stableGhVersions.length > 0) {
       queueMicrotask(() => setGhVersion(stableGhVersions[0]?.version ?? null))
     }
@@ -640,8 +733,12 @@ function OnboardingDialogContent() {
           !!commandcodeAuth.data?.authenticated
       } else if (backend === 'grok') {
         ready = !!grokSetup.status?.installed && !!grokAuth.data?.authenticated
-      } else {
+      } else if (backend === 'kimi') {
         ready = !!kimiSetup.status?.installed && !!kimiAuth.data?.authenticated
+      } else {
+        ready =
+          !!antigravitySetup.status?.installed &&
+          !!antigravityAuth.data?.authenticated
       }
       dbg('isBackendReady:', backend, '→', ready)
       return ready
@@ -663,6 +760,8 @@ function OnboardingDialogContent() {
       grokAuth.data?.authenticated,
       kimiSetup.status?.installed,
       kimiAuth.data?.authenticated,
+      antigravitySetup.status?.installed,
+      antigravityAuth.data?.authenticated,
     ]
   )
 
@@ -726,6 +825,7 @@ function OnboardingDialogContent() {
     commandcodeSetup.isStatusLoading ||
     grokSetup.isStatusLoading ||
     kimiSetup.isStatusLoading ||
+    antigravitySetup.isStatusLoading ||
     (claudeSetup.status?.installed &&
       (claudeAuth.isLoading || claudeAuth.isFetching)) ||
     (codexSetup.status?.installed &&
@@ -739,7 +839,10 @@ function OnboardingDialogContent() {
       (commandcodeAuth.isLoading || commandcodeAuth.isFetching)) ||
     (grokSetup.status?.installed &&
       (grokAuth.isLoading || grokAuth.isFetching)) ||
-    (kimiSetup.status?.installed && (kimiAuth.isLoading || kimiAuth.isFetching))
+    (kimiSetup.status?.installed &&
+      (kimiAuth.isLoading || kimiAuth.isFetching)) ||
+    (antigravitySetup.status?.installed &&
+      (antigravityAuth.isLoading || antigravityAuth.isFetching))
 
   const loadingInitialState =
     claudeSetup.isStatusLoading ||
@@ -750,6 +853,7 @@ function OnboardingDialogContent() {
     commandcodeSetup.isStatusLoading ||
     grokSetup.isStatusLoading ||
     kimiSetup.isStatusLoading ||
+    antigravitySetup.isStatusLoading ||
     ghSetup.isStatusLoading ||
     (claudeSetup.status?.installed &&
       (claudeAuth.isLoading || claudeAuth.isFetching)) ||
@@ -766,6 +870,8 @@ function OnboardingDialogContent() {
       (grokAuth.isLoading || grokAuth.isFetching)) ||
     (kimiSetup.status?.installed &&
       (kimiAuth.isLoading || kimiAuth.isFetching)) ||
+    (antigravitySetup.status?.installed &&
+      (antigravityAuth.isLoading || antigravityAuth.isFetching)) ||
     (ghSetup.status?.installed && (ghAuth.isLoading || ghAuth.isFetching))
 
   dbg('loadingInitialState:', loadingInitialState, {
@@ -777,6 +883,7 @@ function OnboardingDialogContent() {
     commandcodeStatusLoading: commandcodeSetup.isStatusLoading,
     grokStatusLoading: grokSetup.isStatusLoading,
     kimiStatusLoading: kimiSetup.isStatusLoading,
+    antigravityStatusLoading: antigravitySetup.isStatusLoading,
     ghStatusLoading: ghSetup.isStatusLoading,
     claudeInstalled: claudeSetup.status?.installed,
     codexInstalled: codexSetup.status?.installed,
@@ -786,6 +893,7 @@ function OnboardingDialogContent() {
     commandcodeInstalled: commandcodeSetup.status?.installed,
     grokInstalled: grokSetup.status?.installed,
     kimiInstalled: kimiSetup.status?.installed,
+    antigravityInstalled: antigravitySetup.status?.installed,
     ghInstalled: ghSetup.status?.installed,
     claudeAuthLoading: claudeAuth.isLoading,
     codexAuthLoading: codexAuth.isLoading,
@@ -795,6 +903,7 @@ function OnboardingDialogContent() {
     commandcodeAuthLoading: commandcodeAuth.isLoading,
     grokAuthLoading: grokAuth.isLoading,
     kimiAuthLoading: kimiAuth.isLoading,
+    antigravityAuthLoading: antigravityAuth.isLoading,
     ghAuthLoading: ghAuth.isLoading,
   })
 
@@ -827,6 +936,7 @@ function OnboardingDialogContent() {
       setCommandcodeInstallFailed(false)
       setGrokInstallFailed(false)
       setKimiInstallFailed(false)
+      setAntigravityInstallFailed(false)
       setGhInstallFailed(false)
       setClaudePathSelected(false)
       setCodexPathSelected(false)
@@ -836,6 +946,7 @@ function OnboardingDialogContent() {
       setCommandcodePathSelected(false)
       setGrokPathSelected(false)
       setKimiPathSelected(false)
+      setAntigravityPathSelected(false)
       setGhPathSelected(false)
       setClaudeLoginAttempt(0)
       setCodexLoginAttempt(0)
@@ -846,20 +957,9 @@ function OnboardingDialogContent() {
       setCommandcodeLoginAttempt(0)
       setGrokLoginAttempt(0)
       setKimiLoginAttempt(0)
+      setAntigravityLoginAttempt(0)
       setGhLoginAttempt(0)
     })
-
-    // On Windows, show WSL mode selection first if not yet chosen
-    if (
-      isServerWindows() &&
-      preferences &&
-      !preferences.wsl_mode_chosen &&
-      !onboardingStartStep
-    ) {
-      dbg('init effect: Windows + WSL not chosen → wsl-setup')
-      queueMicrotask(() => setStep('wsl-setup', { replace: true }))
-      return
-    }
 
     if (onboardingStartStep === 'gh') {
       dbg('init effect: startStep=gh → gh-setup')
@@ -883,37 +983,85 @@ function OnboardingDialogContent() {
 
     const readyBackends = AI_BACKENDS.filter(isBackendReady)
     const ghReady = !!ghSetup.status?.installed && !!ghAuth.data?.authenticated
+    const remoteActive = getActiveConnectionId() !== LOCAL_CONNECTION_ID
     dbg(
       'init effect: readyBackends:',
       readyBackends,
       'ghReady:',
       ghReady,
+      'remoteActive:',
+      remoteActive,
       'manuallyTriggered:',
       onboardingManuallyTriggered
     )
 
-    // When manually triggered, always start at wsl-setup on Windows so users
-    // can change their WSL/native choice, then backend-select (via Continue
-    // on the WSL step). Non-Windows goes straight to backend-select.
+    // Local vs Remote selects the desktop shell's backend. Web Access already
+    // targets the Jean server that served the page, so there is no choice to
+    // make there.
     if (onboardingManuallyTriggered) {
-      const firstStep: OnboardingStep = isServerWindows()
-        ? 'wsl-setup'
-        : 'backend-select'
-      dbg('init effect: manual trigger →', firstStep)
+      const nextStep = isNativeApp() ? 'usage-mode' : 'backend-select'
+      dbg('init effect: manual trigger →', nextStep)
       queueMicrotask(() => {
         setSelectedBackends(readyBackends)
-        setStep(firstStep, { replace: true })
+        setStep(nextStep, { replace: true })
       })
       return
     }
 
-    if (ghReady && readyBackends.length > 0) {
+    // Already on a remote: skip usage mode and continue CLI setup there.
+    // WSL mode only applies to local Windows development.
+    if (!isNativeApp() || remoteActive) {
+      if (ghReady && readyBackends.length > 0) {
+        // Auto-opened with tools already ready (e.g. reconnecting to a remote
+        // that was set up earlier). Don't force the "Setup Complete" screen —
+        // that was reappearing on every remote session open.
+        if (!onboardingManuallyTriggered) {
+          dbg('init effect: remote all ready → auto-dismiss')
+          useUIStore.setState({
+            onboardingOpen: false,
+            onboardingStartStep: null,
+            onboardingDismissed: true,
+          })
+          return
+        }
+        dbg('init effect: remote all ready → complete')
+        queueMicrotask(() => setStep('complete', { replace: true }))
+        return
+      }
+      if (readyBackends.length > 0) {
+        dbg('init effect: remote + some backends ready → after backends')
+        queueMicrotask(() => {
+          setSelectedBackends(readyBackends)
+          setStep(getNextStepAfterBackends(), { replace: true })
+        })
+        return
+      }
+      dbg('init effect: remote + nothing ready → backend-select')
+      queueMicrotask(() => setStep('backend-select', { replace: true }))
+      return
+    }
+
+    const needsWslChoice =
+      isServerWindows() && !!preferences && !preferences.wsl_mode_chosen
+
+    // Local tools already ready and environment chosen → finish.
+    if (ghReady && readyBackends.length > 0 && !needsWslChoice) {
+      if (!onboardingManuallyTriggered) {
+        dbg('init effect: all ready → auto-dismiss')
+        useUIStore.setState({
+          onboardingOpen: false,
+          onboardingStartStep: null,
+          onboardingDismissed: true,
+        })
+        return
+      }
       dbg('init effect: all ready → complete')
       queueMicrotask(() => setStep('complete', { replace: true }))
       return
     }
 
-    if (readyBackends.length > 0) {
+    // Partial local progress (and WSL already chosen): resume CLI setup.
+    if (readyBackends.length > 0 && !needsWslChoice) {
       dbg('init effect: some backends ready → skip to after backends')
       queueMicrotask(() => {
         setSelectedBackends(readyBackends)
@@ -922,8 +1070,10 @@ function OnboardingDialogContent() {
       return
     }
 
-    dbg('init effect: nothing ready → backend-select')
-    queueMicrotask(() => setStep('backend-select', { replace: true }))
+    // First-run (or Windows still needs environment choice after Local):
+    // Local vs Remote before any CLI installs.
+    dbg('init effect: nothing ready or needs env choice → usage-mode')
+    queueMicrotask(() => setStep('usage-mode', { replace: true }))
   }, [
     onboardingOpen,
     onboardingStartStep,
@@ -1123,6 +1273,24 @@ function OnboardingDialogContent() {
     kimiAuth.isLoading,
     kimiAuth.isFetching,
     kimiAuth.data?.authenticated,
+    moveToNextBackendOrGh,
+    setStep,
+  ])
+
+  useEffect(() => {
+    if (step !== 'antigravity-auth-checking') return
+    if (antigravityAuth.isLoading || antigravityAuth.isFetching) return
+
+    if (antigravityAuth.data?.authenticated) {
+      queueMicrotask(() => moveToNextBackendOrGh('antigravity'))
+    } else {
+      queueMicrotask(() => setStep('antigravity-auth-login'))
+    }
+  }, [
+    step,
+    antigravityAuth.isLoading,
+    antigravityAuth.isFetching,
+    antigravityAuth.data?.authenticated,
     moveToNextBackendOrGh,
     setStep,
   ])
@@ -1441,6 +1609,32 @@ function OnboardingDialogContent() {
     setStep,
   ])
 
+  const handleAntigravityJeanSelect = useCallback(() => {
+    setAntigravityPathSelected(true)
+    if (!preferences) return
+    patchPreferences.mutate(
+      { antigravity_cli_source: 'jean' },
+      {
+        onSuccess: () => {
+          if (antigravitySetup.status?.installed) {
+            setStep('antigravity-auth-checking')
+            antigravityAuth.refetch()
+          }
+        },
+        onError: () => {
+          setAntigravityPathSelected(false)
+          toast.error('Failed to save CLI source preference')
+        },
+      }
+    )
+  }, [
+    preferences,
+    patchPreferences,
+    antigravitySetup.status?.installed,
+    antigravityAuth,
+    setStep,
+  ])
+
   const handleGhJeanSelect = useCallback(() => {
     dbg('handleGhJeanSelect: saving gh_cli_source=jean')
     setGhPathSelected(true)
@@ -1622,6 +1816,24 @@ function OnboardingDialogContent() {
     )
   }, [preferences, patchPreferences, kimiAuth, setStep])
 
+  const handleAntigravityPathSelect = useCallback(() => {
+    setAntigravityPathSelected(true)
+    if (!preferences) return
+    patchPreferences.mutate(
+      { antigravity_cli_source: 'path' },
+      {
+        onSuccess: () => {
+          setStep('antigravity-auth-checking')
+          antigravityAuth.refetch()
+        },
+        onError: () => {
+          setAntigravityPathSelected(false)
+          toast.error('Failed to save CLI source preference')
+        },
+      }
+    )
+  }, [preferences, patchPreferences, antigravityAuth, setStep])
+
   const handleGhPathSelect = useCallback(() => {
     dbg('handleGhPathSelect: saving gh_cli_source=path')
     setGhPathSelected(true)
@@ -1740,6 +1952,21 @@ function OnboardingDialogContent() {
     })
   }, [kimiVersion, kimiSetup, kimiAuth])
 
+  const handleAntigravityInstall = useCallback(() => {
+    if (!antigravityVersion) return
+    setStep('antigravity-installing')
+    antigravitySetup.install(antigravityVersion, {
+      onSuccess: () => {
+        setStep('antigravity-auth-checking')
+        antigravityAuth.refetch()
+      },
+      onError: () => {
+        setAntigravityInstallFailed(true)
+        setStep('antigravity-setup')
+      },
+    })
+  }, [antigravityVersion, antigravitySetup, antigravityAuth])
+
   const handleGhInstall = useCallback(() => {
     dbg('handleGhInstall: version =', ghVersion)
     if (!ghVersion) return
@@ -1804,6 +2031,11 @@ function OnboardingDialogContent() {
     await kimiAuth.refetch()
   }, [kimiAuth, setStep])
 
+  const handleAntigravityLoginComplete = useCallback(async () => {
+    setStep('antigravity-auth-checking')
+    await antigravityAuth.refetch()
+  }, [antigravityAuth, setStep])
+
   const handleGhLoginComplete = useCallback(async () => {
     dbg('handleGhLoginComplete: refetching auth')
     setStep('gh-auth-checking')
@@ -1843,11 +2075,15 @@ function OnboardingDialogContent() {
     setKimiLoginAttempt(prev => prev + 1)
   }, [])
 
+  const handleAntigravityLoginRetry = useCallback(() => {
+    setAntigravityLoginAttempt(prev => prev + 1)
+  }, [])
+
   const handleGhLoginRetry = useCallback(() => {
     setGhLoginAttempt(prev => prev + 1)
   }, [])
 
-  const handleComplete = useCallback(() => {
+  const handleComplete = useCallback(async () => {
     claudeSetup.refetchStatus()
     codexSetup.refetchStatus()
     opencodeSetup.refetchStatus()
@@ -1856,13 +2092,29 @@ function OnboardingDialogContent() {
     commandcodeSetup.refetchStatus()
     grokSetup.refetchStatus()
     kimiSetup.refetchStatus()
+    antigravitySetup.refetchStatus()
     ghSetup.refetchStatus()
     // Set the first selected backend as the default so the preference
     // isn't left pointing at an uninstalled backend (e.g. 'claude').
-    const [firstBackend] = selectedBackends
+    const authenticatedBackends: Partial<Record<AIBackend, boolean>> = {
+      claude: claudeAuth.data?.authenticated,
+      codex: codexAuth.data?.authenticated,
+      opencode: opencodeAuth.data?.authenticated,
+      cursor: cursorAuth.data?.authenticated,
+      pi: piAuth.data?.authenticated,
+      commandcode: commandcodeAuth.data?.authenticated,
+      grok: grokAuth.data?.authenticated,
+      kimi: kimiAuth.data?.authenticated,
+    }
+    const firstBackend = selectedBackends.find(
+      backend => authenticatedBackends[backend]
+    )
     if (firstBackend && preferences) {
       const magicDefaults = magicDefaultsForBackend(firstBackend)
-      patchPreferences.mutate({
+      // Persist the backend/model pair before closing onboarding. Otherwise a
+      // session opened immediately afterwards can be created with Claude's
+      // model while the UI has already fallen back to the installed Codex CLI.
+      await patchPreferences.mutateAsync({
         default_backend: firstBackend,
         ...(magicDefaults
           ? {
@@ -1888,7 +2140,16 @@ function OnboardingDialogContent() {
     commandcodeSetup,
     grokSetup,
     kimiSetup,
+    antigravitySetup,
     ghSetup,
+    claudeAuth.data?.authenticated,
+    codexAuth.data?.authenticated,
+    opencodeAuth.data?.authenticated,
+    cursorAuth.data?.authenticated,
+    piAuth.data?.authenticated,
+    commandcodeAuth.data?.authenticated,
+    grokAuth.data?.authenticated,
+    kimiAuth.data?.authenticated,
     selectedBackends,
     preferences,
     patchPreferences,
@@ -2034,6 +2295,25 @@ function OnboardingDialogContent() {
       }
     }
 
+    if (step === 'antigravity-setup' || step === 'antigravity-installing') {
+      return {
+        type: 'antigravity',
+        title: 'Antigravity CLI',
+        description: 'Antigravity CLI enables Google-backed AI sessions.',
+        versions: stableAntigravityVersions,
+        isVersionsLoading: antigravitySetup.isVersionsLoading,
+        isVersionsError: antigravitySetup.isVersionsError,
+        onRetryVersions: antigravitySetup.refetchVersions,
+        isInstalling: antigravitySetup.isInstalling,
+        installError: antigravityInstallFailed
+          ? antigravitySetup.installError
+          : null,
+        progress: antigravitySetup.progress,
+        install: antigravitySetup.install,
+        currentVersion: antigravitySetup.status?.version,
+      }
+    }
+
     if (step === 'gh-setup' || step === 'gh-installing') {
       return {
         type: 'gh',
@@ -2067,6 +2347,8 @@ function OnboardingDialogContent() {
     commandcodeSetup.status?.installed && step === 'commandcode-setup'
   const isGrokReinstall = grokSetup.status?.installed && step === 'grok-setup'
   const isKimiReinstall = kimiSetup.status?.installed && step === 'kimi-setup'
+  const isAntigravityReinstall =
+    antigravitySetup.status?.installed && step === 'antigravity-setup'
   const isGhReinstall = ghSetup.status?.installed && step === 'gh-setup'
 
   // When CLI source is 'path', use the path detection result for login command
@@ -2076,46 +2358,51 @@ function OnboardingDialogContent() {
       ? pathDetection.data.path
       : (claudeSetup.status?.path ?? '')
   const claudeLoginArgs = claudeSetup.status?.supports_auth_command
-    ? ['auth', 'login']
-    : ['login']
+    ? AUTH_LOGIN_ARGS
+    : SIMPLE_LOGIN_ARGS
   const codexLoginCommand =
     codexPathSelected && codexPathDetection.data?.path
       ? codexPathDetection.data.path
       : (codexSetup.status?.path ?? '')
-  const codexLoginArgs = ['login']
+  const codexLoginArgs = loginArgsForBackend('codex')
   const opencodeLoginCommand =
     opencodePathSelected && opencodePathDetection.data?.path
       ? opencodePathDetection.data.path
       : (opencodeSetup.status?.path ?? '')
-  const opencodeLoginArgs = ['auth', 'login']
+  const opencodeLoginArgs = AUTH_LOGIN_ARGS
   const cursorLoginCommand =
     cursorStatus.data?.path ?? cursorPathDetection.data?.path ?? ''
-  const cursorLoginArgs = ['login']
+  const cursorLoginArgs = SIMPLE_LOGIN_ARGS
   const piLoginCommand =
     piPathSelected && piPathDetection.data?.path
       ? piPathDetection.data.path
       : (piSetup.status?.path ?? '')
-  const piLoginArgs: string[] = []
+  const piLoginArgs = EMPTY_LOGIN_ARGS
   const commandcodeLoginCommand =
     commandcodePathSelected && commandcodePathDetection.data?.path
       ? commandcodePathDetection.data.path
       : (commandcodeSetup.status?.path ?? '')
-  const commandcodeLoginArgs = ['login']
+  const commandcodeLoginArgs = SIMPLE_LOGIN_ARGS
   const grokLoginCommand =
     grokPathSelected && grokPathDetection.data?.path
       ? grokPathDetection.data.path
       : (grokSetup.status?.path ?? '')
-  const grokLoginArgs = ['login']
+  const grokLoginArgs = SIMPLE_LOGIN_ARGS
   const kimiLoginCommand =
     kimiPathSelected && kimiPathDetection.data?.path
       ? kimiPathDetection.data.path
       : (kimiSetup.status?.path ?? '')
-  const kimiLoginArgs = ['login']
+  const kimiLoginArgs = SIMPLE_LOGIN_ARGS
+  const antigravityLoginCommand =
+    antigravityPathSelected && antigravityPathDetection.data?.path
+      ? antigravityPathDetection.data.path
+      : (antigravitySetup.status?.path ?? '')
+  const antigravityLoginArgs = EMPTY_LOGIN_ARGS
   const ghLoginCommand =
     ghPathSelected && ghPathDetection.data?.path
       ? ghPathDetection.data.path
       : (ghSetup.status?.path ?? '')
-  const ghLoginArgs = ['auth', 'login']
+  const ghLoginArgs = AUTH_LOGIN_ARGS
 
   dbg('login commands:', {
     claude: {
@@ -2173,6 +2460,13 @@ function OnboardingDialogContent() {
       pathSelected: kimiPathSelected,
       detectedPath: kimiPathDetection.data?.path,
     },
+    antigravity: {
+      cmd: antigravityLoginCommand,
+      args: antigravityLoginArgs,
+      path: antigravitySetup.status?.path,
+      pathSelected: antigravityPathSelected,
+      detectedPath: antigravityPathDetection.data?.path,
+    },
     gh: {
       cmd: ghLoginCommand,
       args: ghLoginArgs,
@@ -2182,8 +2476,45 @@ function OnboardingDialogContent() {
     },
   })
 
+  const continueAfterLocalChoice = useCallback(() => {
+    if (isServerWindows() && preferences && !preferences.wsl_mode_chosen) {
+      dbg('local chosen → wsl-setup')
+      setStep('wsl-setup')
+      return
+    }
+    dbg('local chosen → backend-select')
+    setStep('backend-select')
+  }, [preferences, setStep])
+
+  const handleUsageModeSelect = useCallback(
+    (mode: OnboardingUsageMode) => {
+      if (mode === 'remote') {
+        dbg('usage-mode → remote-setup')
+        setStep('remote-setup')
+        return
+      }
+      continueAfterLocalChoice()
+    },
+    [continueAfterLocalChoice, setStep]
+  )
+
   const getDialogContent = () => {
     const dialogStep = step as OnboardingStep
+    if (dialogStep === 'usage-mode') {
+      return {
+        title: 'Welcome to Jean',
+        description: 'Choose local development or remote control.',
+      }
+    }
+
+    if (dialogStep === 'remote-setup') {
+      return {
+        title: 'Connect to a remote Jean',
+        description:
+          'Install jean-server over SSH, or connect with an existing Web Access URL.',
+      }
+    }
+
     if (dialogStep === 'wsl-setup') {
       return {
         title: 'Welcome to Jean',
@@ -2351,6 +2682,22 @@ function OnboardingDialogContent() {
     }
 
     if (
+      dialogStep === 'antigravity-setup' ||
+      dialogStep === 'antigravity-installing'
+    ) {
+      return {
+        title: isAntigravityReinstall
+          ? `Change ${backendName} Version`
+          : `Setup ${backendName}`,
+        description: isAntigravityReinstall
+          ? 'Select a version to install. This will replace the current installation.'
+          : antigravityPathDetection.data?.found
+            ? 'Choose to use your system Antigravity or install with Jean.'
+            : 'Select a version to install.',
+      }
+    }
+
+    if (
       dialogStep === 'claude-auth-checking' ||
       dialogStep === 'claude-auth-login' ||
       dialogStep === 'codex-auth-checking' ||
@@ -2366,7 +2713,9 @@ function OnboardingDialogContent() {
       dialogStep === 'grok-auth-checking' ||
       dialogStep === 'grok-auth-login' ||
       dialogStep === 'kimi-auth-checking' ||
-      dialogStep === 'kimi-auth-login'
+      dialogStep === 'kimi-auth-login' ||
+      dialogStep === 'antigravity-auth-checking' ||
+      dialogStep === 'antigravity-auth-login'
     ) {
       return {
         title: `Authenticate ${backendName}`,
@@ -2389,7 +2738,8 @@ function OnboardingDialogContent() {
       step.startsWith('pi-') ||
       step.startsWith('commandcode-') ||
       step.startsWith('grok-') ||
-      step.startsWith('kimi-')
+      step.startsWith('kimi-') ||
+      step.startsWith('antigravity-')
     const isGhStep = step.startsWith('gh-')
 
     const backendComplete = !isBackendSelection && !isBackendStep
@@ -2462,15 +2812,77 @@ function OnboardingDialogContent() {
         </DialogHeader>
 
         <div className="overflow-y-auto py-4 flex flex-col">
-          {step !== 'wsl-setup' && renderStepIndicator()}
+          {step !== 'usage-mode' &&
+            step !== 'remote-setup' &&
+            step !== 'wsl-setup' &&
+            renderStepIndicator()}
 
           <div className="w-full">
-            {step === 'wsl-setup' ? (
+            {step === 'usage-mode' ? (
+              <UsageModeStep onSelect={handleUsageModeSelect} />
+            ) : step === 'remote-setup' ? (
+              <RemoteSetupStep />
+            ) : step === 'wsl-setup' ? (
               <WslSetupStep
                 onComplete={() => {
+                  const ready = AI_BACKENDS.filter(isBackendReady)
+                  const ghOk =
+                    !!ghSetup.status?.installed && !!ghAuth.data?.authenticated
+                  if (ghOk && ready.length > 0) {
+                    dbg('WSL setup complete → complete')
+                    setSelectedBackends(ready)
+                    setStep('complete')
+                    return
+                  }
+                  if (ready.length > 0) {
+                    dbg('WSL setup complete → after backends')
+                    setSelectedBackends(ready)
+                    setStep(getNextStepAfterBackends())
+                    return
+                  }
                   dbg('WSL setup complete → backend-select')
                   setStep('backend-select')
                 }}
+              />
+            ) : step === 'backend-select' &&
+              prerequisites &&
+              (!prerequisites.gitInstalled ||
+                !prerequisites.nodeInstalled ||
+                !prerequisites.npmInstalled) &&
+              installingPrerequisites &&
+              prerequisites.automaticInstallCommand ? (
+              <AuthLoginState
+                key={prerequisiteAttempt}
+                cliName="Git and Node.js prerequisites"
+                terminalId={`onboarding-prerequisites-${loginSessionSeed}-${prerequisiteAttempt}`}
+                command="/bin/bash"
+                commandArgs={['-lc', prerequisites.automaticInstallCommand]}
+                action="install"
+                onComplete={async () => {
+                  const status = await refreshPrerequisites()
+                  if (
+                    status.gitInstalled &&
+                    status.nodeInstalled &&
+                    status.npmInstalled
+                  ) {
+                    setInstallingPrerequisites(false)
+                  } else {
+                    toast.error(
+                      'Prerequisites are still missing. Restart Jean after installing Node.js so it can refresh PATH.'
+                    )
+                  }
+                }}
+                onRetry={() => setPrerequisiteAttempt(value => value + 1)}
+              />
+            ) : step === 'backend-select' &&
+              prerequisites &&
+              (!prerequisites.gitInstalled ||
+                !prerequisites.nodeInstalled ||
+                !prerequisites.npmInstalled) ? (
+              <PrerequisiteSetupState
+                status={prerequisites}
+                onAutomaticInstall={() => setInstallingPrerequisites(true)}
+                onRecheck={() => void refreshPrerequisites()}
               />
             ) : step === 'backend-select' ? (
               <BackendSelectionState
@@ -2495,6 +2907,7 @@ function OnboardingDialogContent() {
                 commandcodeVersion={commandcodeSetup.status?.version}
                 grokVersion={grokSetup.status?.version}
                 kimiVersion={kimiSetup.status?.version}
+                antigravityVersion={antigravitySetup.status?.version}
                 ghVersion={ghSetup.status?.version}
                 onContinue={handleComplete}
               />
@@ -2538,6 +2951,11 @@ function OnboardingDialogContent() {
                 cliName="Kimi Code CLI"
                 progress={cliData.progress}
               />
+            ) : step === 'antigravity-installing' && cliData ? (
+              <InstallingState
+                cliName="Antigravity CLI"
+                progress={cliData.progress}
+              />
             ) : step === 'gh-installing' && cliData ? (
               <InstallingState
                 cliName="GitHub CLI"
@@ -2559,6 +2977,8 @@ function OnboardingDialogContent() {
               <AuthCheckingState cliName="Grok CLI" />
             ) : step === 'kimi-auth-checking' ? (
               <AuthCheckingState cliName="Kimi Code CLI" />
+            ) : step === 'antigravity-auth-checking' ? (
+              <AuthCheckingState cliName="Antigravity CLI" />
             ) : step === 'gh-auth-checking' ? (
               <AuthCheckingState cliName="GitHub CLI" />
             ) : step === 'claude-setup' && !claudePathSelected ? (
@@ -2663,6 +3083,18 @@ function OnboardingDialogContent() {
                 jeanInstalled={!!kimiSetup.status?.installed}
                 onSelectPath={handleKimiPathSelect}
                 onSelectJean={handleKimiJeanSelect}
+              />
+            ) : step === 'antigravity-setup' && !antigravityPathSelected ? (
+              <CliPathSelector
+                cliName="Antigravity CLI"
+                pathFound={!!antigravityPathDetection.data?.found}
+                pathVersion={antigravityPathDetection.data?.version ?? null}
+                pathPath={antigravityPathDetection.data?.path ?? null}
+                isLoading={antigravityPathSelected}
+                currentSource={preferences?.antigravity_cli_source ?? null}
+                jeanInstalled={!!antigravitySetup.status?.installed}
+                onSelectPath={handleAntigravityPathSelect}
+                onSelectJean={handleAntigravityJeanSelect}
               />
             ) : step === 'claude-auth-login' ? (
               claudeLoginCommand ? (
@@ -2776,6 +3208,20 @@ function OnboardingDialogContent() {
               ) : (
                 <AuthCheckingState cliName="Kimi Code CLI" />
               )
+            ) : step === 'antigravity-auth-login' ? (
+              antigravityLoginCommand ? (
+                <AuthLoginState
+                  key={antigravityLoginTerminalId}
+                  cliName="Antigravity CLI"
+                  terminalId={antigravityLoginTerminalId}
+                  command={antigravityLoginCommand}
+                  commandArgs={antigravityLoginArgs}
+                  onComplete={handleAntigravityLoginComplete}
+                  onRetry={handleAntigravityLoginRetry}
+                />
+              ) : (
+                <AuthCheckingState cliName="Antigravity CLI" />
+              )
             ) : step === 'gh-setup' && !ghPathSelected ? (
               <CliPathSelector
                 cliName="GitHub CLI"
@@ -2822,7 +3268,9 @@ function OnboardingDialogContent() {
                                 ? handleGrokInstall
                                 : cliData.type === 'kimi'
                                   ? handleKimiInstall
-                                  : handleGhInstall
+                                  : cliData.type === 'antigravity'
+                                    ? handleAntigravityInstall
+                                    : handleGhInstall
                   }
                 />
               ) : (
@@ -2844,7 +3292,9 @@ function OnboardingDialogContent() {
                                 ? grokVersion
                                 : cliData.type === 'kimi'
                                   ? kimiVersion
-                                  : ghVersion
+                                  : cliData.type === 'antigravity'
+                                    ? antigravityVersion
+                                    : ghVersion
                   }
                   currentVersion={
                     (cliData.type === 'claude' && isClaudeReinstall) ||
@@ -2855,6 +3305,8 @@ function OnboardingDialogContent() {
                       isCommandcodeReinstall) ||
                     (cliData.type === 'grok' && isGrokReinstall) ||
                     (cliData.type === 'kimi' && isKimiReinstall) ||
+                    (cliData.type === 'antigravity' &&
+                      isAntigravityReinstall) ||
                     (cliData.type === 'gh' && isGhReinstall)
                       ? cliData.currentVersion
                       : null
@@ -2877,7 +3329,9 @@ function OnboardingDialogContent() {
                                 ? setGrokVersion
                                 : cliData.type === 'kimi'
                                   ? setKimiVersion
-                                  : setGhVersion
+                                  : cliData.type === 'antigravity'
+                                    ? setAntigravityVersion
+                                    : setGhVersion
                   }
                   onInstall={
                     cliData.type === 'claude'
@@ -2894,7 +3348,9 @@ function OnboardingDialogContent() {
                                 ? handleGrokInstall
                                 : cliData.type === 'kimi'
                                   ? handleKimiInstall
-                                  : handleGhInstall
+                                  : cliData.type === 'antigravity'
+                                    ? handleAntigravityInstall
+                                    : handleGhInstall
                   }
                 />
               )
@@ -2925,6 +3381,59 @@ function OnboardingDialogContent() {
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function PrerequisiteSetupState({
+  status,
+  onAutomaticInstall,
+  onRecheck,
+}: {
+  status: SystemPrerequisites
+  onAutomaticInstall: () => void
+  onRecheck: () => void
+}) {
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="font-medium">Install host prerequisites</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Git is required by Jean. Node.js and npm are shared prerequisites for
+          Jean-managed npm tools such as Grok, PI, Command Code, Kimi Code, and
+          agent-browser.
+        </p>
+      </div>
+      <div className="rounded-md border p-3 text-sm">
+        <div>Git: {status.gitVersion ?? 'missing'}</div>
+        <div>Node.js: {status.nodeVersion ?? 'missing'}</div>
+        <div>npm: {status.npmVersion ?? 'missing'}</div>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Jean uses the official Node.js installation flow because Debian and
+        Ubuntu packages can be outdated. Automatic installation requires your
+        confirmation and may ask for sudo access.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {status.automaticInstallSupported && (
+          <Button onClick={onAutomaticInstall}>Install automatically</Button>
+        )}
+        <Button
+          variant="outline"
+          onClick={() => openUrl(status.manualInstallUrl)}
+        >
+          Node.js instructions
+        </Button>
+        <Button
+          variant="outline"
+          onClick={() => openUrl('https://git-scm.com/downloads')}
+        >
+          Git instructions
+        </Button>
+        <Button variant="ghost" onClick={onRecheck}>
+          Recheck
+        </Button>
+      </div>
+    </div>
   )
 }
 
@@ -3084,6 +3593,7 @@ interface SuccessStateProps {
   commandcodeVersion: string | null | undefined
   grokVersion: string | null | undefined
   kimiVersion: string | null | undefined
+  antigravityVersion: string | null | undefined
   ghVersion: string | null | undefined
   onContinue: () => void
 }
@@ -3098,6 +3608,7 @@ function SuccessState({
   commandcodeVersion,
   grokVersion,
   kimiVersion,
+  antigravityVersion,
   ghVersion,
   onContinue,
 }: SuccessStateProps) {
@@ -3118,6 +3629,7 @@ function SuccessState({
           {commandcodeVersion && <p>Command Code CLI: v{commandcodeVersion}</p>}
           {grokVersion && <p>Grok CLI: v{grokVersion}</p>}
           {kimiVersion && <p>Kimi Code CLI: v{kimiVersion}</p>}
+          {antigravityVersion && <p>Antigravity CLI: v{antigravityVersion}</p>}
           {ghVersion && <p>GitHub CLI: v{ghVersion}</p>}
           {!claudeVersion &&
             !codexVersion &&
@@ -3127,6 +3639,7 @@ function SuccessState({
             !commandcodeVersion &&
             !grokVersion &&
             !kimiVersion &&
+            !antigravityVersion &&
             !ghVersion && <p>Setup complete</p>}
         </div>
       </div>

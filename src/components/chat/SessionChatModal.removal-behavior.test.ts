@@ -52,7 +52,7 @@ describe('SessionChatModal removal behavior', () => {
     )
     // Confirm gate wraps the action for every non-empty tab (not only last).
     expect(removeSessionTab).toMatch(
-      /if \(needsConfirm\) \{\s*pendingCloseAction\.current = action/
+      /if \(needsConfirm\) \{[\s\S]*?pendingCloseAction\.current = action/
     )
     // Neighbor select happens inside the deferred action, not as a bypass.
     expect(removeSessionTab).toMatch(
@@ -70,6 +70,45 @@ describe('SessionChatModal removal behavior', () => {
     expect(removeSessionTab).toContain('handleDeleteSession(session.id)')
     expect(removeSessionTab).not.toContain('onClose()')
     expect(removeSessionTab).not.toContain('navigateToProjectPicker(')
+  })
+
+  it('shows the empty worktree view after the last session is removed', () => {
+    const modalSource = readSource('src/components/chat/SessionChatModal.tsx')
+    const serviceSource = readSource('src/services/chat.ts')
+
+    expect(modalSource).toContain(
+      'No sessions yet. Create one to start chatting.'
+    )
+    expect(serviceSource).not.toContain('navigateToProjectPicker(')
+    expect(serviceSource).toContain(
+      'const { [worktreeId]: _removed, ...rest } = state.activeSessionIds'
+    )
+  })
+
+  it('asks to close the worktree when Cmd+W is pressed with no sessions', () => {
+    const modalSource = readSource('src/components/chat/SessionChatModal.tsx')
+    const canvasSource = readSource(
+      'src/components/dashboard/ProjectCanvasView.tsx'
+    )
+
+    expect(modalSource).toContain("setCloseConfirmMode('worktree')")
+    expect(modalSource).toContain('onRequestCloseWorktree')
+    expect(modalSource).toContain('mode={closeConfirmMode}')
+    expect(canvasSource).toContain('onRequestCloseWorktree={() => {')
+    expect(canvasSource).toContain(
+      'closeWorktreeDirectly(selectedWorktreeModal.worktreeId)'
+    )
+  })
+
+  it('hides session tabs and top action chrome when zen mode is active', () => {
+    const source = readSource('src/components/chat/SessionChatModal.tsx')
+
+    expect(source).toContain('state => state.zenMode')
+    expect(source).toContain('data-testid="toggle-zen-mode"')
+    expect(source).not.toContain('{!(zenMode && isMobile) && (')
+    expect(source).toContain('{!zenMode && sessions.length > 0 && (')
+    expect(source).toContain('{!zenMode && (')
+    expect(source).toContain('<ModalCloseButton onClick={handleClose} />')
   })
 
   it('uses terminal-like square tab styling for session header tabs', () => {
@@ -90,6 +129,27 @@ describe('SessionChatModal removal behavior', () => {
     )
   })
 
+  it('reattaches horizontal tab scrolling after leaving zen mode', () => {
+    const source = readSource('src/components/chat/SessionChatModal.tsx')
+
+    expect(source).toMatch(
+      /viewport\.addEventListener\('wheel',[\s\S]*\}, \[sessions\.length, zenMode\]\)/
+    )
+  })
+
+  it('keeps only the zen control in the mobile header', () => {
+    const source = readSource('src/components/chat/SessionChatModal.tsx')
+
+    expect(source).toContain('useClearSessionHistory')
+    expect(source).toContain('handleClearContext')
+    expect(source).toContain('data-testid="toggle-zen-mode"')
+    expect(source).not.toContain('aria-label="Clear context"')
+    expect(source).not.toContain('data-testid="clear-session-context"')
+    expect(source).toMatch(
+      /onSuccess:\s*\(\)\s*=>\s*window\.dispatchEvent\(new CustomEvent\('focus-chat-input'\)\)/
+    )
+  })
+
   it('falls back to a real session when restored active session state is stale', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
@@ -101,9 +161,18 @@ describe('SessionChatModal removal behavior', () => {
   it('keeps a yellow background on waiting session tabs', () => {
     const source = readSource('src/components/chat/SessionChatModal.tsx')
 
-    expect(source).toContain(
-      "status === 'waiting' &&\n                                'bg-yellow-500/10"
-    )
+    expect(source).toContain('isActionableWaitingStatus(status)')
+    expect(source).toContain("'bg-yellow-500/10")
+  })
+
+  it('uses a subtle grey background only for inactive unread session tabs', () => {
+    const source = readSource('src/components/chat/SessionChatModal.tsx')
+
+    expect(source).toContain('isUnreadSession(session)')
+    expect(source).toContain('!isActive')
+    expect(source).toContain('!isActionableWaitingStatus(status)')
+    expect(source).toContain("'bg-muted/60")
+    expect(source).not.toContain("'bg-green-500/10")
   })
 
   it('offers to open resumable chat sessions in a separate native client session', () => {

@@ -12,7 +12,11 @@ import { useUIStore } from '@/store/ui-store'
 import { chatQueryKeys, refreshWorktreeSessionsCaches } from '@/services/chat'
 import { startCommitJob } from '@/services/commit-jobs'
 import { buildMcpConfigJson } from '@/services/mcp'
-import { saveWorktreePr, projectsQueryKeys } from '@/services/projects'
+import {
+  saveWorktreePr,
+  linkWorktreePr,
+  projectsQueryKeys,
+} from '@/services/projects'
 import {
   gitPush,
   triggerImmediateGitPoll,
@@ -41,10 +45,10 @@ import type {
   McpServerInfo,
   Session,
   ThinkingLevel,
+  WorktreeSessions,
 } from '@/types/chat'
 import {
   DEFAULT_PARALLEL_EXECUTION_PROMPT,
-  DEFAULT_FINAL_REVIEW_PROMPT,
   DEFAULT_RESOLVE_CONFLICTS_PROMPT,
   DEFAULT_MAGIC_PROMPT_MODES,
   resolveMagicPromptBackend,
@@ -58,7 +62,6 @@ import {
   resolveCodeReviewConfigs,
   startCodeReviewsSequentially,
 } from '@/lib/code-review-configs'
-import { resolveDefaultModelForBackend } from '@/lib/session-defaults'
 
 interface SessionMutation<T> {
   mutate: (args: T) => void
@@ -117,8 +120,6 @@ interface UseGitOperationsReturn {
   handleOpenPr: () => Promise<void>
   /** Runs AI code review. */
   handleReview: () => Promise<void>
-  /** Starts an audit-only final review in a new session. */
-  handleFinalReview: () => Promise<void>
   /** Runs CodeRabbit CLI code review. */
   handleCodeRabbitReview: () => Promise<void>
   /** Triggers CodeRabbit by commenting on the open PR. */
@@ -167,6 +168,25 @@ export function useGitOperations({
   const [showMergeDialog, setShowMergeDialog] = useState(false)
   const [pendingMergeWorktree, setPendingMergeWorktree] =
     useState<Worktree | null>(null)
+
+  const cacheCreatedSession = useCallback(
+    (worktreeId: string, session: Session) => {
+      queryClient.setQueryData(chatQueryKeys.session(session.id), session)
+      queryClient.setQueryData<WorktreeSessions>(
+        chatQueryKeys.sessions(worktreeId),
+        old => ({
+          worktree_id: worktreeId,
+          version: old?.version ?? 2,
+          ...old,
+          active_session_id: session.id,
+          sessions: old?.sessions.some(item => item.id === session.id)
+            ? old.sessions
+            : [...(old?.sessions ?? []), session],
+        })
+      )
+    },
+    [queryClient]
+  )
 
   const applyResolveConflictSessionSelection = useCallback(
     (
@@ -380,128 +400,6 @@ export function useGitOperations({
     [project?.default_backend, preferences]
   )
 
-  const handleFinalReview = useCallback(async () => {
-    if (!activeWorktreeId || !activeWorktreePath) return
-
-    const defaultBackend = (project?.default_backend ??
-      preferences?.default_backend ??
-      'claude') as CliBackend
-    const backend = (resolveMagicPromptBackend(
-      preferences?.magic_prompt_backends,
-      'final_review_backend',
-      defaultBackend
-    ) ?? defaultBackend) as CliBackend
-    const model =
-      preferences?.magic_prompt_models?.final_review_model ??
-      resolveDefaultModelForBackend(backend, preferences)
-    const provider =
-      backend === 'claude'
-        ? resolveMagicPromptProvider(
-            preferences?.magic_prompt_providers,
-            'final_review_provider',
-            preferences?.default_provider
-          )
-        : null
-    const executionMode =
-      preferences?.magic_prompt_modes?.final_review_mode ??
-      DEFAULT_MAGIC_PROMPT_MODES.final_review_mode
-    const prompt =
-      preferences?.magic_prompts?.final_review ?? DEFAULT_FINAL_REVIEW_PROMPT
-
-    try {
-      const session = await invoke<Session>('create_session', {
-        worktreeId: activeWorktreeId,
-        worktreePath: activeWorktreePath,
-        name: 'Final review',
-        backend,
-      })
-      const store = useChatStore.getState()
-
-      store.setSelectedBackend(session.id, backend)
-      store.setSelectedModel(session.id, model)
-      store.setSelectedProvider(session.id, provider)
-      store.setActiveSession(activeWorktreeId, session.id)
-      store.setExecutionMode(session.id, executionMode)
-      store.setExecutingMode(session.id, executionMode)
-      store.setLastSentMessage(session.id, prompt)
-      store.setError(session.id, null)
-      store.clearInputDraft(session.id)
-
-      setSessionBackend.mutate({
-        sessionId: session.id,
-        worktreeId: activeWorktreeId,
-        worktreePath: activeWorktreePath,
-        backend,
-      })
-      setSessionModel.mutate({
-        sessionId: session.id,
-        worktreeId: activeWorktreeId,
-        worktreePath: activeWorktreePath,
-        model,
-      })
-      setSessionProvider.mutate({
-        sessionId: session.id,
-        worktreeId: activeWorktreeId,
-        worktreePath: activeWorktreePath,
-        provider,
-      })
-      await invoke('update_session_state', {
-        worktreeId: activeWorktreeId,
-        worktreePath: activeWorktreePath,
-        sessionId: session.id,
-        selectedExecutionMode: executionMode,
-      })
-
-      sendMessage.mutate(
-        {
-          sessionId: session.id,
-          worktreeId: activeWorktreeId,
-          worktreePath: activeWorktreePath,
-          message: prompt,
-          model,
-          executionMode,
-          effortLevel:
-            preferences?.magic_prompt_efforts?.final_review_effort ?? undefined,
-          mcpConfig: buildMcpConfigJson(
-            mcpServersDataRef.current ?? [],
-            enabledMcpServersRef.current,
-            backend
-          ),
-          customProfileName:
-            provider && provider !== '__anthropic__' ? provider : undefined,
-          parallelExecutionPrompt:
-            preferences?.parallel_execution_prompt_enabled
-              ? (preferences.magic_prompts?.parallel_execution ??
-                DEFAULT_PARALLEL_EXECUTION_PROMPT)
-              : undefined,
-          chromeEnabled: preferences?.chrome_enabled ?? false,
-          aiLanguage: preferences?.ai_language,
-          backend: backend !== 'claude' ? backend : undefined,
-        },
-        { onSettled: () => inputRef.current?.focus() }
-      )
-
-      queryClient.invalidateQueries({
-        queryKey: chatQueryKeys.sessions(activeWorktreeId),
-      })
-    } catch (error) {
-      toast.error(`Failed to start final review: ${error}`)
-    }
-  }, [
-    activeWorktreeId,
-    activeWorktreePath,
-    enabledMcpServersRef,
-    inputRef,
-    mcpServersDataRef,
-    preferences,
-    project?.default_backend,
-    queryClient,
-    sendMessage,
-    setSessionBackend,
-    setSessionModel,
-    setSessionProvider,
-  ])
-
   const handleCommit = useCallback(async () => {
     if (!activeWorktreePath || !activeWorktreeId) return
 
@@ -669,8 +567,7 @@ export function useGitOperations({
       await performGitPull({
         worktreeId: activeWorktreeId,
         worktreePath: activeWorktreePath,
-        baseBranch:
-          worktree?.base_branch ?? project?.default_branch ?? 'main',
+        baseBranch: worktree?.base_branch ?? project?.default_branch ?? 'main',
         branchLabel: worktree?.branch,
         remote: remote ?? worktree?.base_remote,
         onMergeConflict: () => {
@@ -714,6 +611,9 @@ export function useGitOperations({
           opToast.error(
             `No permission to push to PR #${worktree?.pr_number}. Create a separate PR instead.`,
             {
+              duration: Infinity,
+              description:
+                result.output.trim() || 'The remote rejected the push.',
               action: {
                 label: toastActionLabel('Open PR'),
                 onClick: () =>
@@ -767,9 +667,36 @@ export function useGitOperations({
     }
   }, [activeWorktreeId, activeWorktreePath, worktree?.project_id])
 
-  // Handle Open PR - creates PR with AI-generated title and description in background
+  // Handle Open PR - opens linked PR, or creates one with AI-generated content
   const handleOpenPr = useCallback(async () => {
     if (!activeWorktreeId || !activeWorktreePath || !worktree) return
+
+    // Already linked: open in browser (same as create-PR flow after success)
+    if (worktree.pr_url) {
+      await openExternal(worktree.pr_url)
+      return
+    }
+
+    // Number without URL (e.g. older checkout_pr): resolve URL then open
+    if (worktree.pr_number) {
+      try {
+        const linked = await linkWorktreePr(
+          activeWorktreeId,
+          activeWorktreePath,
+          worktree.pr_number
+        )
+        queryClient.invalidateQueries({
+          queryKey: projectsQueryKeys.worktrees(worktree.project_id),
+        })
+        queryClient.invalidateQueries({
+          queryKey: [...projectsQueryKeys.all, 'worktree', activeWorktreeId],
+        })
+        await openExternal(linked.pr_url)
+      } catch (error) {
+        toast.error(`Failed to open PR #${worktree.pr_number}: ${error}`)
+      }
+      return
+    }
 
     const { setWorktreeLoading, clearWorktreeLoading } = useChatStore.getState()
     setWorktreeLoading(activeWorktreeId, 'pr')
@@ -1171,8 +1098,8 @@ export function useGitOperations({
       return
     }
 
-    // Validate: no open PR
-    if (worktreeData.pr_url) {
+    // Validate: no open PR (number or URL — checkouts may have only a number)
+    if (worktreeData.pr_number || worktreeData.pr_url) {
       toast.error(
         'Cannot merge locally while a PR is open. Close or merge the PR on GitHub first.'
       )
@@ -1272,6 +1199,7 @@ export function useGitOperations({
             worktreePath: worktree.path,
             name: 'PR: resolve conflicts',
           })
+          cacheCreatedSession(activeWorktreeId, newSession)
 
           if (currentSessionId)
             copySessionSettings(currentSessionId, newSession.id)
@@ -1341,6 +1269,7 @@ ${resolveInstructions}`
           worktreePath: worktree.path,
           name: 'Resolve conflicts',
         })
+        cacheCreatedSession(activeWorktreeId, newSession)
 
         // Inherit model/mode/thinking settings from current session
         if (currentSessionId)
@@ -1402,6 +1331,7 @@ ${resolveInstructions}`
       queryClient,
       inputRef,
       applyResolveConflictSessionSelection,
+      cacheCreatedSession,
       resolveConflictSessionSelection,
       sendConflictResolutionPrompt,
     ]
@@ -1457,6 +1387,7 @@ ${resolveInstructions}`
           worktreePath: worktree.path,
           name: 'PR: resolve conflicts',
         })
+        cacheCreatedSession(activeWorktreeId, newSession)
 
         // Inherit model/mode/thinking settings from current session
         if (currentSessionId)
@@ -1521,6 +1452,7 @@ ${resolveInstructions}`
       queryClient,
       inputRef,
       applyResolveConflictSessionSelection,
+      cacheCreatedSession,
       resolveConflictSessionSelection,
       sendConflictResolutionPrompt,
     ]
@@ -1619,6 +1551,7 @@ ${resolveInstructions}`
             worktreePath: worktreeData.path,
             name: 'Merge: resolve conflicts',
           })
+          cacheCreatedSession(activeWorktreeId, newSession)
 
           // Inherit model/mode/thinking settings from current session
           if (currentSessionId)
@@ -1690,6 +1623,7 @@ ${resolveInstructions}`
       queryClient,
       inputRef,
       applyResolveConflictSessionSelection,
+      cacheCreatedSession,
       resolveConflictSessionSelection,
       sendConflictResolutionPrompt,
     ]
@@ -1703,7 +1637,6 @@ ${resolveInstructions}`
     handleRevertLastCommit,
     handleOpenPr,
     handleReview,
-    handleFinalReview,
     handleCodeRabbitReview,
     handleCodeRabbitPrReview,
     handleMerge,

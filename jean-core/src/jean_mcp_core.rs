@@ -12,6 +12,7 @@ use tauri::AppHandle;
 
 use crate::chat::types::LabelData;
 use crate::http_server::dispatch::dispatch_command;
+use crate::http_server::EmitExt;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const JEAN_MCP_STDIO_ARG: &str = "--jean-mcp-stdio";
@@ -36,11 +37,13 @@ const RATE_LIMITED_TOOLS: &[&str] = &[
     "import_worktree",
     "init_project",
     "merge_pull_request",
+    "move_session",
     "permanently_delete_worktree",
     "push_worktree",
     "run_review",
     "send_chat_message",
     "set_session_model",
+    "start_run_environment",
     "unarchive_session",
     "unarchive_worktree",
 ];
@@ -127,6 +130,58 @@ pub struct ToolCallRequest {
     pub arguments: Value,
 }
 
+#[derive(Debug, PartialEq)]
+enum SessionMoveMode {
+    Immediate,
+    Deferred,
+}
+
+fn session_move_mode(running: bool) -> SessionMoveMode {
+    if running {
+        SessionMoveMode::Deferred
+    } else {
+        SessionMoveMode::Immediate
+    }
+}
+
+fn schedule_session_move(
+    app: &AppHandle,
+    session_id: String,
+    source_worktree_id: String,
+    target_worktree_id: String,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while crate::chat::registry::is_session_actively_managed(&session_id) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        if crate::chat::worktree_archived_at(&app, &target_worktree_id).is_some() {
+            log::warn!(
+                "Deferred session move cancelled because target worktree is archived: session={session_id} target={target_worktree_id}"
+            );
+            return;
+        }
+
+        match crate::chat::storage::move_session(
+            &app,
+            &source_worktree_id,
+            &target_worktree_id,
+            &session_id,
+        ) {
+            Ok(()) => {
+                crate::chat::emit_sessions_cache_invalidation(&app);
+                log::info!(
+                    "Deferred session move completed: session={session_id} source={source_worktree_id} target={target_worktree_id}"
+                );
+            }
+            Err(error) => log::warn!(
+                "Deferred session move failed: session={session_id} source={source_worktree_id} target={target_worktree_id}: {error}"
+            ),
+        }
+    });
+}
+
 pub fn extract_tool_call(params: Value) -> Result<ToolCallRequest, ToolError> {
     let name = params
         .get("name")
@@ -172,61 +227,21 @@ pub fn handle_protocol_message(
 
 pub fn tool_registry() -> Value {
     // Split into multiple json! arrays so the macro does not hit recursion_limit.
-    let mut tools = tool_registry_core()
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let mut tools = tool_registry_core().as_array().cloned().unwrap_or_default();
     if let Some(session) = tool_registry_session().as_array() {
         tools.extend(session.iter().cloned());
     }
     if let Some(ship) = tool_registry_ship_loop().as_array() {
         tools.extend(ship.iter().cloned());
     }
+    if let Some(integrations) = tool_registry_integrations().as_array() {
+        tools.extend(integrations.iter().cloned());
+    }
     Value::Array(tools)
 }
 
-fn tool_registry_core() -> Value {
+fn tool_registry_integrations() -> Value {
     json!([
-        {"name":"list_projects","description":"List all Jean projects (id, name, path, default_branch).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
-        {"name":"add_project","description":"Add an existing local git repository as a Jean project. Path must already be a git repo (use init_project for a new folder, or clone_project for a remote URL). Returns the created project (id, name, path, default_branch).","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to an existing local git repository."},"parentId":{"type":"string","description":"Optional Jean folder/project parent id for nesting in the project list."}},"required":["path"],"additionalProperties":false}},
-        {"name":"clone_project","description":"Clone a remote git repository to a local path and add it as a Jean project. Returns the created project.","inputSchema":{"type":"object","properties":{"url":{"type":"string","description":"Git remote URL to clone (https or ssh)."},"path":{"type":"string","description":"Absolute local path where the repo should be cloned."},"parentId":{"type":"string","description":"Optional Jean folder/project parent id for nesting in the project list."}},"required":["url","path"],"additionalProperties":false}},
-        {"name":"init_project","description":"Create a new git repository at path (creating the directory if needed) and add it as a Jean project. Use add_project instead when the path is already a git repo. Returns the created project.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute path for the new project directory."},"parentId":{"type":"string","description":"Optional Jean folder/project parent id for nesting in the project list."}},"required":["path"],"additionalProperties":false}},
-        {"name":"list_worktrees","description":"List all worktrees for a project.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
-        {"name":"get_worktree","description":"Get a single worktree by id (path, branch, status, etc.).","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"get_project_context","description":"Get project-level context needed by orchestration agents: project settings, linked projects, default branch/backend, and worktree counts. Does not read arbitrary repo files.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
-        {"name":"list_github_issues","description":"List GitHub issues for a project. Pass projectId; the server resolves the repo path.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"state":{"type":"string","enum":["open","closed","all"],"default":"open"}},"required":["projectId"],"additionalProperties":false}},
-        {"name":"list_github_prs","description":"List GitHub pull requests for a project. Pass projectId; the server resolves the repo path.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"state":{"type":"string","enum":["open","closed","merged","all"],"default":"open"}},"required":["projectId"],"additionalProperties":false}},
-        {"name":"list_security_issues","description":"List Dependabot security alerts for a project using the same backend command as the UI. Pass projectId; the server resolves the repo path.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"state":{"type":"string","enum":["open","dismissed","fixed","auto_dismissed","all"],"default":"open"}},"required":["projectId"],"additionalProperties":false}},
-        {"name":"list_security_advisories","description":"List repository security advisories for a project using the same backend command as the UI. Pass projectId; the server resolves the repo path.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"state":{"type":"string","enum":["draft","published","triage","closed","all"],"default":"all"}},"required":["projectId"],"additionalProperties":false}},
-        {"name":"list_linear_issues","description":"List Linear issues for a project (active states only). Linear API config is resolved from project/global settings. By default returns up to 100 issues; pass all=true to paginate and return every matching issue, or limit to set a custom cap. Pass milestoneId (from list_linear_milestones) to return only issues in that project milestone.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"milestoneId":{"type":"string","description":"Restrict to issues in this project milestone."},"all":{"type":"boolean","description":"Return every matching issue via pagination (ignores limit)."},"limit":{"type":"integer","minimum":1,"description":"Max issues to return when not using all (default 100)."}},"required":["projectId"],"additionalProperties":false}},
-        {"name":"create_worktree","description":"Create a new worktree for a project. Provide issueNumber or prNumber for a GitHub issue/PR, linearIssueIdentifier (e.g. \"PLA-215\") for a Linear issue, or ghsaId (e.g. \"GHSA-xxxx-xxxx-xxxx\") for a repository security advisory; these are mutually exclusive. Jean fetches the chosen context and attaches it to the worktree, reusing the same branch naming and context-loading as the Jean UI. Pass action=\"start_autoinvestigating\" to create a session and start investigating (and magic-fix when the Magic Prompts execution mode is yolo) the issue/PR/Linear issue/security advisory with the Magic Prompts settings default backend/model. This never switches/opens Jean's UI unless the user opens the worktree separately.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"baseBranch":{"type":"string"},"customName":{"type":"string"},"issueNumber":{"type":"integer","minimum":1},"prNumber":{"type":"integer","minimum":1},"linearIssueIdentifier":{"type":"string","description":"Linear issue identifier like \"PLA-215\". Mutually exclusive with issueNumber/prNumber/ghsaId."},"ghsaId":{"type":"string","description":"Repository security advisory GHSA id like \"GHSA-xxxx-xxxx-xxxx\". Mutually exclusive with issueNumber/prNumber/linearIssueIdentifier."},"action":{"type":"string","enum":["start_autoinvestigating"]}},"required":["projectId"],"additionalProperties":false}},
-        {"name":"create_worktree_from_existing_branch","description":"Create a Jean worktree from an existing local or remote-tracking branch (branch name is used as the worktree name). Does not open Jean's UI. Prefer create_worktree for new branches; use this when the branch already exists.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"branchName":{"type":"string","description":"Existing branch name to check out into a new worktree path."}},"required":["projectId","branchName"],"additionalProperties":false}},
-        {"name":"import_worktree","description":"Import an existing git worktree/directory on disk into a Jean project. Path must already exist and be a git worktree or repo. Does not create a new git worktree.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"path":{"type":"string","description":"Absolute path to an existing git worktree directory."}},"required":["projectId","path"],"additionalProperties":false}},
-        {"name":"rename_worktree","description":"Rename a worktree's display name in Jean (does not rename the git branch or folder).","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"newName":{"type":"string","description":"New display name. Must be unique within the project."}},"required":["worktreeId","newName"],"additionalProperties":false}},
-        {"name":"archive_worktree","description":"Archive a worktree (hide from the active project canvas). Cancels running sessions for the worktree. Base sessions cannot be archived. Prefer this over delete when work may still be needed.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"unarchive_worktree","description":"Restore an archived worktree to the active project canvas. Fails if the worktree directory no longer exists on disk.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"list_archived_worktrees","description":"List archived worktrees. Optionally filter by projectId. Active worktrees are not included (use list_worktrees for those).","inputSchema":{"type":"object","properties":{"projectId":{"type":"string","description":"Optional project id to filter archived worktrees."}},"additionalProperties":false}},
-        {"name":"delete_worktree","description":"Start permanently deleting an active (non-archived) worktree in the background: removes Jean tracking, git worktree, and branch. Returns started=true when cleanup is accepted, not completion. Destructive and irreversible when cleanup succeeds. Cannot delete base sessions. Prefer archive_worktree when unsure.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"permanently_delete_worktree","description":"Start permanently deleting an already-archived worktree in the background (storage + git worktree/branch cleanup). Returns started=true when cleanup is accepted, not completion. Fails immediately if the worktree is not archived — archive it first, or use delete_worktree for active worktrees.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"update_worktree_labels","description":"Update native Jean worktree labels. Use action=add/remove/set/clear. Returns the updated worktree.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"action":{"type":"string","enum":["add","remove","set","clear"]},"label":{"type":"object","properties":{"name":{"type":"string"},"color":{"type":"string","description":"Hex color like #eab308. Optional for add; ignored by remove."},"pinned":{"type":"boolean","description":"Show this label as a project-view filter tab for the current project."}},"required":["name"],"additionalProperties":false},"labels":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"color":{"type":"string"},"pinned":{"type":"boolean","description":"Show this label as a project-view filter tab for the current project."}},"required":["name","color"],"additionalProperties":false}}},"required":["worktreeId","action"],"additionalProperties":false}}
-    ])
-}
-
-fn tool_registry_session() -> Value {
-    json!([
-        {"name":"list_sessions","description":"List chat sessions in a worktree without loading full message history. Use before creating a session to avoid duplicates.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"includeArchived":{"type":"boolean","default":false}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"create_session","description":"Create a new chat session in an existing non-archived worktree. Returns the session id needed for send_chat_message. Fails if the worktree is archived — call unarchive_worktree first.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"name":{"type":"string"},"backend":{"type":"string","enum":["claude","codex","cursor","opencode"]}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"send_chat_message","description":"Send a message to an existing non-archived session. Fire-and-forget: returns immediately as the session begins processing. Fails immediately if the session or its worktree is archived — call unarchive_session / unarchive_worktree first. Use this to kick off investigations.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"message":{"type":"string"},"model":{"type":"string"},"executionMode":{"type":"string","enum":["plan","build","yolo"]}},"required":["sessionId","message"],"additionalProperties":false}},
-        {"name":"archive_session","description":"Archive a chat session (hide it from the active session list). Prefer this over delete when history may still be useful. Cannot run send_chat_message on an archived session until unarchive_session is called.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
-        {"name":"unarchive_session","description":"Restore an archived chat session so it can run again. Also unarchives the parent worktree when it is archived. Call this before send_chat_message if a previous attempt failed because the session was archived.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
-        {"name":"get_session_status","description":"Get whether a Jean session is idle/running/resumable/cancelled/error plus latest run metadata. Use after send_chat_message to poll fire-and-forget work.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
-        {"name":"cancel_session_run","description":"Cancel the currently running request for a session. Returns whether Jean found an active process/turn/flag to cancel.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
-        {"name":"read_session_messages","description":"Read recent messages from a session (most recent first). Use limit to cap returned messages.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}},"required":["sessionId"],"additionalProperties":false}},
-        {"name":"set_session_model","description":"Persist the selected model (and optionally backend) on a Jean session without sending a message. Prefer this when switching models for later turns; pass model on send_chat_message for a one-shot override only. When backend is omitted, Jean infers it from the model id when possible (e.g. grok/*, gpt-*, cursor/*). Returns sessionId, model, backend.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"model":{"type":"string","description":"Model id as used in Jean (e.g. claude-sonnet-4-6[1m], gpt-5.6-sol, grok/grok-4.5)."},"backend":{"type":"string","enum":["claude","codex","cursor","opencode","pi","commandcode","grok","kimi"],"description":"Optional backend override. Inferred from model when omitted."}},"required":["sessionId","model"],"additionalProperties":false}},
-        {"name":"get_usage","description":"Fetch subscription/usage snapshots for Claude, Codex, and/or Grok (same data as Jean Settings → Usage). Use to decide whether to switch models when a plan is near limits. Optional backend filters to one provider; omit or pass \"all\" for every available snapshot. Per-backend failures are reported in errors without failing the whole call.","inputSchema":{"type":"object","properties":{"backend":{"type":"string","enum":["claude","codex","grok","all"],"default":"all","description":"Which provider usage to fetch. Default all."}},"additionalProperties":false}},
-        {"name":"get_worktree_changes","description":"Get a bounded summary of a worktree's git changes: porcelain status, ahead/behind counts, diff stats, and changed files. Does not return full diffs.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"maxFiles":{"type":"integer","minimum":1,"maximum":500,"default":100}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"get_worktree_diff","description":"Get a bounded unified git diff for a worktree. diffType is uncommitted (HEAD vs working tree) or branch (origin/base...HEAD). Optional path limits to one pathspec; maxBytes is capped.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"diffType":{"type":"string","enum":["uncommitted","branch"],"default":"uncommitted"},"path":{"type":"string"},"maxBytes":{"type":"integer","minimum":1,"maximum":200000,"default":60000}},"required":["worktreeId"],"additionalProperties":false}},
-        {"name":"get_current_context","description":"Return the calling session's context: sessionId, worktreeId, projectId, projectPath, projectName. Use this so the agent knows what 'this project' refers to without guessing.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
         {"name":"get_linear_project","description":"Get a single Linear project (status, progress, lead, members, teams, milestones). Defaults to the project's configured Linear project; pass linearProjectId to override.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
         {"name":"list_linear_milestones","description":"List milestones of a Linear project. Defaults to the configured Linear project; pass linearProjectId to override.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
         {"name":"list_linear_documents","description":"List Linear documents, scoped to the configured Linear project by default; pass linearProjectId to override.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"linearProjectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
@@ -265,6 +280,54 @@ fn tool_registry_session() -> Value {
         {"name":"archive_outline_document","description":"Archive an Outline document by id.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"}},"required":["projectId","documentId"],"additionalProperties":false}},
         {"name":"delete_outline_document","description":"Delete an Outline document by id. permanent=true skips the trash.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"},"permanent":{"type":"boolean"}},"required":["projectId","documentId"],"additionalProperties":false}},
         {"name":"move_outline_document","description":"Move an Outline document to another collection and/or parent. input fields: collectionId, parentDocumentId, index.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"documentId":{"type":"string"},"input":{"type":"object"}},"required":["projectId","documentId","input"],"additionalProperties":false}}
+    ])
+}
+
+fn tool_registry_core() -> Value {
+    json!([
+        {"name":"list_projects","description":"List all Jean projects (id, name, path, default_branch).","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+        {"name":"add_project","description":"Add an existing local git repository as a Jean project. Path must already be a git repo (use init_project for a new folder, or clone_project for a remote URL). Returns the created project (id, name, path, default_branch).","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to an existing local git repository."},"parentId":{"type":"string","description":"Optional Jean folder/project parent id for nesting in the project list."}},"required":["path"],"additionalProperties":false}},
+        {"name":"clone_project","description":"Clone a remote git repository to a local path and add it as a Jean project. Returns the created project.","inputSchema":{"type":"object","properties":{"url":{"type":"string","description":"Git remote URL to clone (https or ssh)."},"path":{"type":"string","description":"Absolute local path where the repo should be cloned."},"parentId":{"type":"string","description":"Optional Jean folder/project parent id for nesting in the project list."}},"required":["url","path"],"additionalProperties":false}},
+        {"name":"init_project","description":"Create a new git repository at path (creating the directory if needed) and add it as a Jean project. Use add_project instead when the path is already a git repo. Returns the created project.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute path for the new project directory."},"parentId":{"type":"string","description":"Optional Jean folder/project parent id for nesting in the project list."}},"required":["path"],"additionalProperties":false}},
+        {"name":"list_worktrees","description":"List all worktrees for a project.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"get_worktree","description":"Get a single worktree by id (path, branch, status, etc.).","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"get_project_context","description":"Get project-level context needed by orchestration agents: project settings, linked projects, default branch/backend, and worktree counts. Does not read arbitrary repo files.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_github_issues","description":"List GitHub issues for a project. Pass projectId; the server resolves the repo path.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"state":{"type":"string","enum":["open","closed","all"],"default":"open"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_github_prs","description":"List GitHub pull requests for a project. Pass projectId; the server resolves the repo path.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"state":{"type":"string","enum":["open","closed","merged","all"],"default":"open"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_security_issues","description":"List Dependabot security alerts for a project using the same backend command as the UI. Pass projectId; the server resolves the repo path.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"state":{"type":"string","enum":["open","dismissed","fixed","auto_dismissed","all"],"default":"open"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_security_advisories","description":"List repository security advisories for a project using the same backend command as the UI. Pass projectId; the server resolves the repo path.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"state":{"type":"string","enum":["draft","published","triage","closed","all"],"default":"all"}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"list_linear_issues","description":"List Linear issues for a project (active states only). Linear API config is resolved from project/global settings. By default returns up to 100 issues; pass all=true to paginate and return every matching issue, or limit to set a custom cap. Pass milestoneId (from list_linear_milestones) to return only issues in that project milestone.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"milestoneId":{"type":"string","description":"Restrict to issues in this project milestone."},"all":{"type":"boolean","description":"Return every matching issue via pagination (ignores limit)."},"limit":{"type":"integer","minimum":1,"description":"Max issues to return when not using all (default 100)."}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"create_worktree","description":"Create a new worktree for a project. Provide issueNumber or prNumber for a GitHub issue/PR, linearIssueIdentifier (e.g. \"PLA-215\") for a Linear issue, or ghsaId (e.g. \"GHSA-xxxx-xxxx-xxxx\") for a repository security advisory; these are mutually exclusive. Jean fetches the chosen context and attaches it to the worktree, reusing the same branch naming and context-loading as the Jean UI. Pass action=\"start_autoinvestigating\" to create a session and start investigating (and magic-fix when the Magic Prompts execution mode is yolo) the issue/PR/Linear issue/security advisory with the Magic Prompts settings default backend/model. This never switches/opens Jean's UI unless the user opens the worktree separately.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"baseBranch":{"type":"string"},"customName":{"type":"string"},"issueNumber":{"type":"integer","minimum":1},"prNumber":{"type":"integer","minimum":1},"linearIssueIdentifier":{"type":"string","description":"Linear issue identifier like \"PLA-215\". Mutually exclusive with issueNumber/prNumber/ghsaId."},"ghsaId":{"type":"string","description":"Repository security advisory GHSA id like \"GHSA-xxxx-xxxx-xxxx\". Mutually exclusive with issueNumber/prNumber/linearIssueIdentifier."},"action":{"type":"string","enum":["start_autoinvestigating"]}},"required":["projectId"],"additionalProperties":false}},
+        {"name":"create_worktree_from_existing_branch","description":"Create a Jean worktree from an existing local or remote-tracking branch (branch name is used as the worktree name). Does not open Jean's UI. Prefer create_worktree for new branches; use this when the branch already exists.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"branchName":{"type":"string","description":"Existing branch name to check out into a new worktree path."}},"required":["projectId","branchName"],"additionalProperties":false}},
+        {"name":"import_worktree","description":"Import an existing git worktree/directory on disk into a Jean project. Path must already exist and be a git worktree or repo. Does not create a new git worktree.","inputSchema":{"type":"object","properties":{"projectId":{"type":"string"},"path":{"type":"string","description":"Absolute path to an existing git worktree directory."}},"required":["projectId","path"],"additionalProperties":false}},
+        {"name":"rename_worktree","description":"Rename a worktree's display name in Jean (does not rename the git branch or folder).","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"newName":{"type":"string","description":"New display name. Must be unique within the project."}},"required":["worktreeId","newName"],"additionalProperties":false}},
+        {"name":"archive_worktree","description":"Archive a worktree (hide from the active project canvas). Cancels running sessions for the worktree. Base sessions cannot be archived. Prefer this over delete when work may still be needed.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"unarchive_worktree","description":"Restore an archived worktree to the active project canvas. Fails if the worktree directory no longer exists on disk.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"list_archived_worktrees","description":"List archived worktrees. Optionally filter by projectId. Active worktrees are not included (use list_worktrees for those).","inputSchema":{"type":"object","properties":{"projectId":{"type":"string","description":"Optional project id to filter archived worktrees."}},"additionalProperties":false}},
+        {"name":"delete_worktree","description":"Start permanently deleting an active (non-archived) worktree in the background: removes Jean tracking, git worktree, and branch. Returns started=true when cleanup is accepted, not completion. Destructive and irreversible when cleanup succeeds. Cannot delete base sessions. Prefer archive_worktree when unsure.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"permanently_delete_worktree","description":"Start permanently deleting an already-archived worktree in the background (storage + git worktree/branch cleanup). Returns started=true when cleanup is accepted, not completion. Fails immediately if the worktree is not archived — archive it first, or use delete_worktree for active worktrees.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"update_worktree_labels","description":"Update native Jean worktree labels. Use action=add/remove/set/clear. Returns the updated worktree.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"action":{"type":"string","enum":["add","remove","set","clear"]},"label":{"type":"object","properties":{"name":{"type":"string"},"color":{"type":"string","description":"Hex color like #eab308. Optional for add; ignored by remove."},"pinned":{"type":"boolean","description":"Show this label as a project-view filter tab for the current project."}},"required":["name"],"additionalProperties":false},"labels":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"color":{"type":"string"},"pinned":{"type":"boolean","description":"Show this label as a project-view filter tab for the current project."}},"required":["name","color"],"additionalProperties":false}}},"required":["worktreeId","action"],"additionalProperties":false}}
+    ])
+}
+
+fn tool_registry_session() -> Value {
+    json!([
+        {"name":"list_sessions","description":"List chat sessions in a worktree without loading full message history. Use before creating a session to avoid duplicates.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"includeArchived":{"type":"boolean","default":false}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"create_session","description":"Create a new chat session in an existing non-archived worktree. Returns the session id needed for send_chat_message. Fails if the worktree is archived — call unarchive_worktree first.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"name":{"type":"string"},"backend":{"type":"string","enum":["claude","codex","cursor","opencode"]}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"send_chat_message","description":"Send a message to an existing non-archived session. Fire-and-forget: returns immediately as the session begins processing. Fails immediately if the session or its worktree is archived — call unarchive_session / unarchive_worktree first. Use this to kick off investigations. When model/executionMode are omitted, Jean uses the session's selected model and execution mode (set via set_session_model or the Jean UI). Pass model for a one-shot override of this turn only.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"message":{"type":"string"},"model":{"type":"string","description":"Optional one-shot model override. When omitted, uses the session selected model (set_session_model / UI)."},"executionMode":{"type":"string","enum":["plan","build","yolo"],"description":"Optional one-shot execution mode. When omitted, uses the session selected execution mode."}},"required":["sessionId","message"],"additionalProperties":false}},
+        {"name":"archive_session","description":"Archive a chat session (hide it from the active session list). Prefer this over delete when history may still be useful. Cannot run send_chat_message on an archived session until unarchive_session is called.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
+        {"name":"unarchive_session","description":"Restore an archived chat session so it can run again. Also unarchives the parent worktree when it is archived. Call this before send_chat_message if a previous attempt failed because the session was archived.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
+        {"name":"move_session","description":"Move a Jean session to another active worktree while preserving its session id, complete message/run history, attachments, settings, and backend resume context. An idle session moves immediately. A running session is scheduled to move automatically after its current turn finishes; do not cancel the run or retry the move.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"targetWorktreeId":{"type":"string"}},"required":["sessionId","targetWorktreeId"],"additionalProperties":false}},
+        {"name":"get_session_status","description":"Get whether a Jean session is idle/running/resumable/cancelled/error plus latest run metadata. Use after send_chat_message to poll fire-and-forget work.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
+        {"name":"cancel_session_run","description":"Cancel the currently running request for a session. Returns whether Jean found an active process/turn/flag to cancel.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"}},"required":["sessionId"],"additionalProperties":false}},
+        {"name":"read_session_messages","description":"Read recent messages from a session (most recent first). Use limit to cap returned messages.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}},"required":["sessionId"],"additionalProperties":false}},
+        {"name":"set_session_model","description":"Persist the selected model (and optionally backend) on a Jean session without sending a message. Prefer this when switching models for later turns; pass model on send_chat_message for a one-shot override only. When backend is omitted, Jean infers it from the model id when possible (e.g. grok/*, gpt-*, cursor/*). Returns sessionId, model, backend.","inputSchema":{"type":"object","properties":{"sessionId":{"type":"string"},"model":{"type":"string","description":"Model id as used in Jean (e.g. claude-sonnet-4-6[1m], gpt-5.6-sol, grok/grok-4.6)."},"backend":{"type":"string","enum":["claude","codex","cursor","opencode","pi","commandcode","grok","kimi","antigravity"],"description":"Optional backend override. Inferred from model when omitted."}},"required":["sessionId","model"],"additionalProperties":false}},
+        {"name":"get_usage","description":"Fetch subscription/usage snapshots for Claude, Codex, and/or Grok (same data as Jean Settings → Usage). Use to decide whether to switch models when a plan is near limits. Optional backend filters to one provider; omit or pass \"all\" for every available snapshot. Per-backend failures are reported in errors without failing the whole call.","inputSchema":{"type":"object","properties":{"backend":{"type":"string","enum":["claude","codex","grok","all"],"default":"all","description":"Which provider usage to fetch. Default all."}},"additionalProperties":false}},
+        {"name":"get_worktree_changes","description":"Get a bounded summary of a worktree's git changes: porcelain status, ahead/behind counts, diff stats, and changed files. Does not return full diffs.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"maxFiles":{"type":"integer","minimum":1,"maximum":500,"default":100}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"get_worktree_diff","description":"Get a bounded unified git diff for a worktree. diffType is uncommitted (HEAD vs working tree) or branch (origin/base...HEAD). Optional path limits to one pathspec; maxBytes is capped.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string"},"diffType":{"type":"string","enum":["uncommitted","branch"],"default":"uncommitted"},"path":{"type":"string"},"maxBytes":{"type":"integer","minimum":1,"maximum":200000,"default":60000}},"required":["worktreeId"],"additionalProperties":false}},
+        {"name":"get_current_context","description":"Return the calling session's context: sessionId, worktreeId, projectId, projectPath, projectName. Use this so the agent knows what 'this project' refers to without guessing.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+        {"name":"get_run_environments","description":"List Jean Run-command / panel-command dev environments. Returns whether each is running, worktree/base-session identity, startup command, listening/configured ports, and http URL when a port is known. Optional worktreeId or projectId filters. Does not include full-screen CLI session terminals.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string","description":"Optional worktree id to filter to one worktree or base session."},"projectId":{"type":"string","description":"Optional project id to filter to that project's worktrees."}},"additionalProperties":false}}
+        ,{"name":"start_run_environment","description":"Start or reuse a Jean-managed Run environment for a worktree using a run command configured in jean.json. When command is omitted, uses the first configured run command. Returns the environment identity, command, running state, ports, and URL when detected.","inputSchema":{"type":"object","properties":{"worktreeId":{"type":"string","description":"Worktree whose configured Run environment should start."},"command":{"type":"string","description":"Optional exact jean.json run command to start. Must be one of the configured run commands."}},"required":["worktreeId"],"additionalProperties":false}}
     ])
 }
 
@@ -332,8 +395,8 @@ async fn run_tool(
             .map_err(ToolError::internal),
         "add_project" => {
             let path = require_nonempty_str(&args, "path")?;
-            let parent_id = optional_str(&args, "parentId")
-                .or_else(|| optional_str(&args, "parent_id"));
+            let parent_id =
+                optional_str(&args, "parentId").or_else(|| optional_str(&args, "parent_id"));
             let mut payload = serde_json::Map::new();
             payload.insert("path".to_string(), Value::String(path));
             if let Some(parent_id) = parent_id {
@@ -346,8 +409,8 @@ async fn run_tool(
         "clone_project" => {
             let url = require_nonempty_str(&args, "url")?;
             let path = require_nonempty_str(&args, "path")?;
-            let parent_id = optional_str(&args, "parentId")
-                .or_else(|| optional_str(&args, "parent_id"));
+            let parent_id =
+                optional_str(&args, "parentId").or_else(|| optional_str(&args, "parent_id"));
             let mut payload = serde_json::Map::new();
             payload.insert("url".to_string(), Value::String(url));
             payload.insert("path".to_string(), Value::String(path));
@@ -360,8 +423,8 @@ async fn run_tool(
         }
         "init_project" => {
             let path = require_nonempty_str(&args, "path")?;
-            let parent_id = optional_str(&args, "parentId")
-                .or_else(|| optional_str(&args, "parent_id"));
+            let parent_id =
+                optional_str(&args, "parentId").or_else(|| optional_str(&args, "parent_id"));
             let mut payload = serde_json::Map::new();
             payload.insert("path".to_string(), Value::String(path));
             if let Some(parent_id) = parent_id {
@@ -561,8 +624,8 @@ async fn run_tool(
             .map_err(ToolError::internal)
         }
         "list_archived_worktrees" => {
-            let project_id = optional_str(&args, "projectId")
-                .or_else(|| optional_str(&args, "project_id"));
+            let project_id =
+                optional_str(&args, "projectId").or_else(|| optional_str(&args, "project_id"));
             let result = dispatch_command(app, "list_archived_worktrees", json!({}))
                 .await
                 .map_err(ToolError::internal)?;
@@ -589,13 +652,9 @@ async fn run_tool(
         }
         "delete_worktree" => {
             let worktree_id = require_str(&args, "worktreeId")?;
-            dispatch_command(
-                app,
-                "delete_worktree",
-                json!({ "worktreeId": worktree_id }),
-            )
-            .await
-            .map_err(ToolError::internal)?;
+            dispatch_command(app, "delete_worktree", json!({ "worktreeId": worktree_id }))
+                .await
+                .map_err(ToolError::internal)?;
             Ok(deletion_started_result(&worktree_id, "delete"))
         }
         "permanently_delete_worktree" => {
@@ -607,10 +666,7 @@ async fn run_tool(
             )
             .await
             .map_err(ToolError::internal)?;
-            Ok(deletion_started_result(
-                &worktree_id,
-                "permanently_delete",
-            ))
+            Ok(deletion_started_result(&worktree_id, "permanently_delete"))
         }
         "create_worktree" => {
             let project_id = require_str(&args, "projectId")?;
@@ -1050,6 +1106,64 @@ async fn run_tool(
                 "session": session,
             }))
         }
+        "move_session" => {
+            let session_id = require_str(&args, "sessionId")?;
+            let target_worktree_id = require_str(&args, "targetWorktreeId")?;
+            let (source_worktree_id, _) = resolve_session_worktree(app, &session_id)?;
+            if source_worktree_id == target_worktree_id {
+                return Err(ToolError::invalid_params(
+                    "Session already belongs to the target worktree",
+                ));
+            }
+            resolve_worktree_path(app, &target_worktree_id)?;
+            ensure_mcp_worktree_not_archived(app, &target_worktree_id)?;
+
+            let metadata = crate::chat::storage::load_metadata(app, &session_id)
+                .map_err(|e| ToolError::internal(format!("load_metadata: {e}")))?
+                .ok_or_else(|| {
+                    ToolError::invalid_params(format!("Unknown sessionId: {session_id}"))
+                })?;
+            if !metadata.queued_messages.is_empty() {
+                return Err(ToolError::invalid_params(
+                    "Cannot move a session while it has queued messages",
+                ));
+            }
+
+            let move_mode = session_move_mode(crate::chat::registry::is_session_actively_managed(
+                &session_id,
+            ));
+            if move_mode == SessionMoveMode::Deferred {
+                schedule_session_move(
+                    app,
+                    session_id.clone(),
+                    source_worktree_id.clone(),
+                    target_worktree_id.clone(),
+                );
+                return Ok(json!({
+                    "sessionId": session_id,
+                    "sourceWorktreeId": source_worktree_id,
+                    "targetWorktreeId": target_worktree_id,
+                    "status": "scheduled",
+                    "ok": true,
+                }));
+            }
+
+            crate::chat::storage::move_session(
+                app,
+                &source_worktree_id,
+                &target_worktree_id,
+                &session_id,
+            )
+            .map_err(ToolError::internal)?;
+
+            Ok(json!({
+                "sessionId": session_id,
+                "sourceWorktreeId": source_worktree_id,
+                "targetWorktreeId": target_worktree_id,
+                "status": "moved",
+                "ok": true,
+            }))
+        }
         "get_session_status" => {
             let session_id = require_str(&args, "sessionId")?;
             dispatch_command(
@@ -1275,8 +1389,8 @@ async fn run_tool(
             let worktree_id = require_str(&args, "worktreeId")?;
             ensure_mcp_worktree_not_archived(app, &worktree_id)?;
             let worktree_path = resolve_worktree_path(app, &worktree_id)?;
-            let session_id = optional_str(&args, "sessionId")
-                .or_else(|| optional_str(&args, "session_id"));
+            let session_id =
+                optional_str(&args, "sessionId").or_else(|| optional_str(&args, "session_id"));
             let custom_prompt = optional_str(&args, "customPrompt")
                 .or_else(|| optional_str(&args, "custom_prompt"));
             let model = optional_str(&args, "model");
@@ -1339,6 +1453,140 @@ async fn run_tool(
             dispatch_command(app, "run_review_with_ai", Value::Object(payload))
                 .await
                 .map_err(ToolError::internal)
+        }
+        "get_run_environments" => {
+            let worktree_id =
+                optional_str(&args, "worktreeId").or_else(|| optional_str(&args, "worktree_id"));
+            let project_id =
+                optional_str(&args, "projectId").or_else(|| optional_str(&args, "project_id"));
+            dispatch_command(
+                app,
+                "get_run_environments",
+                json!({
+                    "worktreeId": worktree_id,
+                    "projectId": project_id
+                }),
+            )
+            .await
+            .map_err(ToolError::internal)
+        }
+        "start_run_environment" => {
+            let worktree_id = require_str(&args, "worktreeId")?;
+            ensure_mcp_worktree_not_archived(app, &worktree_id)?;
+            let worktree_path = resolve_worktree_path(app, &worktree_id)?;
+            let requested_command = optional_str(&args, "command");
+
+            let existing = dispatch_command(
+                app,
+                "get_run_environments",
+                json!({ "worktreeId": worktree_id }),
+            )
+            .await
+            .map_err(ToolError::internal)?;
+            if let Some(environment) = existing["environments"].as_array().and_then(|items| {
+                items.iter().find(|environment| {
+                    environment["running"].as_bool() == Some(true)
+                        && requested_command
+                            .as_deref()
+                            .is_none_or(|command| environment["command"].as_str() == Some(command))
+                })
+            }) {
+                return Ok(json!({
+                    "started": false,
+                    "reused": true,
+                    "environment": environment,
+                }));
+            }
+
+            let scripts = dispatch_command(
+                app,
+                "get_run_scripts",
+                json!({ "worktreePath": worktree_path }),
+            )
+            .await
+            .map_err(ToolError::internal)?;
+            let scripts = scripts
+                .as_array()
+                .ok_or_else(|| ToolError::internal("Invalid run-script response"))?;
+            let command = match requested_command {
+                Some(command)
+                    if scripts
+                        .iter()
+                        .any(|script| script.as_str() == Some(&command)) =>
+                {
+                    command
+                }
+                Some(command) => {
+                    return Err(ToolError::invalid_params(format!(
+                        "Run command is not configured in jean.json: {command}"
+                    )));
+                }
+                None => scripts
+                    .first()
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| {
+                        ToolError::invalid_params(
+                            "No run command configured in jean.json for this worktree",
+                        )
+                    })?,
+            };
+
+            let terminal_id = format!("run-{}", uuid::Uuid::new_v4());
+            dispatch_command(
+                app,
+                "start_terminal",
+                json!({
+                    "terminalId": terminal_id,
+                    "worktreePath": worktree_path,
+                    "cols": 80,
+                    "rows": 24,
+                    "command": command,
+                    "commandArgs": null,
+                    "sessionId": null,
+                }),
+            )
+            .await
+            .map_err(ToolError::internal)?;
+
+            let environments = dispatch_command(
+                app,
+                "get_run_environments",
+                json!({ "worktreeId": worktree_id }),
+            )
+            .await
+            .map_err(ToolError::internal)?;
+            let environment = environments["environments"]
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|environment| environment["terminalId"] == terminal_id)
+                })
+                .cloned()
+                .ok_or_else(|| ToolError::internal("Started Run environment was not found"))?;
+
+            let mut ui_state = crate::load_ui_state(app.clone()).await.unwrap_or_default();
+            register_run_in_ui_state(&mut ui_state, &worktree_id, &terminal_id, &command);
+            if let Err(error) = crate::save_ui_state(app.clone(), ui_state).await {
+                log::warn!("Failed to persist MCP-started Run environment UI state: {error}");
+            }
+
+            app.emit_all(
+                "run-environment:started",
+                &json!({
+                    "worktreeId": worktree_id,
+                    "terminalId": terminal_id,
+                    "command": command,
+                }),
+            )
+            .map_err(ToolError::internal)?;
+
+            Ok(json!({
+                "started": true,
+                "reused": false,
+                "environment": environment,
+            }))
         }
         "get_current_context" => {
             if source == "anon" {
@@ -1760,7 +2008,11 @@ pub(crate) fn apply_yolo_investigation_fix_directive(
     }
 
     let cleaned = strip_investigation_anti_fix_lines(message);
-    format!("{}\n\n{}\n", cleaned.trim_end(), YOLO_INVESTIGATION_FIX_APPEND)
+    format!(
+        "{}\n\n{}\n",
+        cleaned.trim_end(),
+        YOLO_INVESTIGATION_FIX_APPEND
+    )
 }
 
 fn strip_investigation_anti_fix_lines(prompt: &str) -> String {
@@ -2259,6 +2511,8 @@ fn infer_backend_from_model(model: &str) -> &'static str {
         "grok"
     } else if crate::is_kimi_model(model) {
         "kimi"
+    } else if crate::is_antigravity_model(model) {
+        "antigravity"
     } else if crate::is_codex_model(model) {
         "codex"
     } else {
@@ -2269,11 +2523,10 @@ fn infer_backend_from_model(model: &str) -> &'static str {
 fn normalize_backend_name(backend: &str) -> Result<String, ToolError> {
     let normalized = backend.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "claude" | "codex" | "cursor" | "opencode" | "pi" | "commandcode" | "grok" | "kimi" => {
-            Ok(normalized)
-        }
+        "claude" | "codex" | "cursor" | "opencode" | "pi" | "commandcode" | "grok" | "kimi"
+        | "antigravity" => Ok(normalized),
         other => Err(ToolError::invalid_params(format!(
-            "backend must be one of claude, codex, cursor, opencode, pi, commandcode, grok, kimi (got '{other}')"
+            "backend must be one of claude, codex, cursor, opencode, pi, commandcode, grok, kimi, antigravity (got '{other}')"
         ))),
     }
 }
@@ -2407,6 +2660,44 @@ fn ensure_mcp_session_can_run(
     .map_err(ToolError::invalid_params)
 }
 
+fn register_run_in_ui_state(
+    state: &mut crate::UIState,
+    worktree_id: &str,
+    terminal_id: &str,
+    command: &str,
+) {
+    let terminals = state
+        .terminal_instances
+        .entry(worktree_id.to_string())
+        .or_default();
+    if !terminals.iter().any(|terminal| terminal.id == terminal_id) {
+        let label = command
+            .split_whitespace()
+            .next()
+            .and_then(|part| std::path::Path::new(part).file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or(command)
+            .chars()
+            .take(20)
+            .collect();
+        terminals.push(crate::TerminalInstancePersisted {
+            id: terminal_id.to_string(),
+            command: Some(command.to_string()),
+            command_args: None,
+            label,
+            kind: Some("panel".to_string()),
+            session_id: None,
+        });
+    }
+    state
+        .terminal_active_ids
+        .insert(worktree_id.to_string(), terminal_id.to_string());
+    state
+        .terminal_panel_open
+        .insert(worktree_id.to_string(), true);
+    state.terminal_visible = Some(true);
+}
+
 fn rate_check(source: &str, tool: &str, limit_per_minute: u32) -> bool {
     if limit_per_minute == 0 {
         return true;
@@ -2442,6 +2733,27 @@ pub fn jsonrpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_run_is_added_to_persisted_worktree_ui_state() {
+        let mut state = crate::UIState::default();
+
+        register_run_in_ui_state(&mut state, "worktree-1", "run-from-mcp", "bun run dev");
+
+        let terminals = &state.terminal_instances["worktree-1"];
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0].id, "run-from-mcp");
+        assert_eq!(terminals[0].command.as_deref(), Some("bun run dev"));
+        assert_eq!(state.terminal_active_ids["worktree-1"], "run-from-mcp");
+        assert_eq!(state.terminal_panel_open["worktree-1"], true);
+        assert_eq!(state.terminal_visible, Some(true));
+    }
+
+    #[test]
+    fn running_session_move_is_deferred_for_persistent_mcp_clients() {
+        assert_eq!(session_move_mode(true), SessionMoveMode::Deferred);
+        assert_eq!(session_move_mode(false), SessionMoveMode::Immediate);
+    }
 
     fn find_tool(tools: &Value, name: &str) -> Value {
         tools
@@ -2498,8 +2810,7 @@ mod tests {
         let tools = tool_registry();
         let create_worktree = find_tool(&tools, "create_worktree");
         assert_eq!(
-            create_worktree["inputSchema"]["properties"]["ghsaId"]["type"],
-            "string",
+            create_worktree["inputSchema"]["properties"]["ghsaId"]["type"], "string",
             "create_worktree must expose a ghsaId input for security advisories"
         );
         let description = create_worktree["description"].as_str().unwrap_or_default();
@@ -2508,7 +2819,8 @@ mod tests {
             "create_worktree description must document ghsaId"
         );
         assert!(
-            description.contains("security advisory") || description.contains("security advisories"),
+            description.contains("security advisory")
+                || description.contains("security advisories"),
             "create_worktree description must mention security advisories"
         );
     }
@@ -2606,8 +2918,7 @@ mod tests {
         let worktree = json!({
             "advisory_ghsa_id": "GHSA-xxxx-yyyy-zzzz",
         });
-        let prompt =
-            build_investigation_prompt(&prefs, &worktree, InvestigationKind::Advisory);
+        let prompt = build_investigation_prompt(&prefs, &worktree, InvestigationKind::Advisory);
         assert!(
             prompt.contains("GHSA-xxxx-yyyy-zzzz"),
             "advisory investigation prompt should include the GHSA id"
@@ -2761,11 +3072,14 @@ mod tests {
             "set_session_model",
             "archive_session",
             "unarchive_session",
+            "move_session",
+            "get_run_environments",
+            "start_run_environment",
         ] {
             assert!(names.contains(expected), "missing MCP tool {expected}");
         }
 
-        for limited in ["archive_session", "unarchive_session"] {
+        for limited in ["archive_session", "unarchive_session", "move_session"] {
             assert!(
                 RATE_LIMITED_TOOLS.contains(&limited),
                 "session archive tool {limited} must be rate-limited"
@@ -2773,21 +3087,56 @@ mod tests {
         }
 
         let archive = find_tool(&tools, "archive_session");
-        assert_eq!(
-            archive["inputSchema"]["required"],
-            json!(["sessionId"])
-        );
+        assert_eq!(archive["inputSchema"]["required"], json!(["sessionId"]));
         let unarchive = find_tool(&tools, "unarchive_session");
+        assert_eq!(unarchive["inputSchema"]["required"], json!(["sessionId"]));
+        let move_session = find_tool(&tools, "move_session");
         assert_eq!(
-            unarchive["inputSchema"]["required"],
-            json!(["sessionId"])
+            move_session["inputSchema"]["required"],
+            json!(["sessionId", "targetWorktreeId"])
+        );
+        let send = find_tool(&tools, "send_chat_message");
+        let send_desc = send["description"].as_str().unwrap_or("");
+        assert!(
+            send_desc.contains("archived"),
+            "send_chat_message description should mention archive rejection"
         );
         assert!(
-            find_tool(&tools, "send_chat_message")["description"]
-                .as_str()
-                .unwrap_or("")
-                .contains("archived"),
-            "send_chat_message description should mention archive rejection"
+            send_desc.contains("selected model"),
+            "send_chat_message description should mention session model fallback"
+        );
+
+        let run_envs = find_tool(&tools, "get_run_environments");
+        assert!(
+            run_envs["inputSchema"]
+                .get("required")
+                .map(|required| required.as_array().is_some_and(|items| items.is_empty()))
+                .unwrap_or(true),
+            "get_run_environments should not require filters"
+        );
+        assert!(run_envs["inputSchema"]["properties"]
+            .get("worktreeId")
+            .is_some());
+        assert!(run_envs["inputSchema"]["properties"]
+            .get("projectId")
+            .is_some());
+        assert!(
+            !RATE_LIMITED_TOOLS.contains(&"get_run_environments"),
+            "get_run_environments is read-only and should not be rate-limited"
+        );
+        let run_desc = run_envs["description"].as_str().unwrap_or("");
+        assert!(
+            run_desc.contains("running"),
+            "get_run_environments description should mention running state"
+        );
+        let start_run = find_tool(&tools, "start_run_environment");
+        assert_eq!(start_run["inputSchema"]["required"], json!(["worktreeId"]));
+        assert!(start_run["inputSchema"]["properties"]
+            .get("command")
+            .is_some());
+        assert!(
+            RATE_LIMITED_TOOLS.contains(&"start_run_environment"),
+            "starting a process must be rate-limited"
         );
     }
 
@@ -2820,7 +3169,8 @@ mod tests {
                 "pi",
                 "commandcode",
                 "grok",
-                "kimi"
+                "kimi",
+                "antigravity"
             ])
         );
         assert!(
@@ -2838,6 +3188,7 @@ mod tests {
         assert_eq!(infer_backend_from_model("opencode/gpt-5.2"), "opencode");
         assert_eq!(infer_backend_from_model("pi/sonnet"), "pi");
         assert_eq!(infer_backend_from_model("kimi/k2"), "kimi");
+        assert_eq!(infer_backend_from_model("antigravity/auto"), "antigravity");
         assert_eq!(
             infer_backend_from_model("commandcode/default"),
             "commandcode"
@@ -2848,6 +3199,10 @@ mod tests {
     fn normalize_backend_name_accepts_known_backends() {
         assert_eq!(normalize_backend_name("Claude").unwrap(), "claude");
         assert_eq!(normalize_backend_name("GROK").unwrap(), "grok");
+        assert_eq!(
+            normalize_backend_name("Antigravity").unwrap(),
+            "antigravity"
+        );
         assert!(normalize_backend_name("openai").is_err());
     }
 
@@ -2883,15 +3238,10 @@ mod tests {
         );
 
         let create_pr = find_tool(&tools, "create_pull_request");
-        assert_eq!(
-            create_pr["inputSchema"]["required"],
-            json!(["worktreeId"])
-        );
-        assert!(
-            create_pr["inputSchema"]["properties"]
-                .get("sessionId")
-                .is_some()
-        );
+        assert_eq!(create_pr["inputSchema"]["required"], json!(["worktreeId"]));
+        assert!(create_pr["inputSchema"]["properties"]
+            .get("sessionId")
+            .is_some());
 
         for limited in [
             "create_commit",
@@ -2944,9 +3294,7 @@ mod tests {
 
         for name in ["delete_worktree", "permanently_delete_worktree"] {
             let tool = find_tool(&tools, name);
-            let description = tool["description"]
-                .as_str()
-                .expect("tool description");
+            let description = tool["description"].as_str().expect("tool description");
 
             assert!(description.contains("background"));
             assert!(description.contains("started"));
@@ -3154,8 +3502,12 @@ mod tests {
         let result = apply_yolo_investigation_fix_directive(prompt, "yolo");
         assert!(result.contains(YOLO_INVESTIGATION_FIX_MARKER));
         assert!(result.contains("After investigation, fix the issue"));
-        assert!(!result.to_ascii_lowercase().contains("if you are in yolo mode"));
-        assert!(!result.to_ascii_lowercase().contains("do not implement fixes"));
+        assert!(!result
+            .to_ascii_lowercase()
+            .contains("if you are in yolo mode"));
+        assert!(!result
+            .to_ascii_lowercase()
+            .contains("do not implement fixes"));
         assert!(result.contains("Propose solution"));
     }
 

@@ -60,6 +60,7 @@ const INSTALLABLE_BACKENDS = [
   'cursor',
   'grok',
   'kimi',
+  'antigravity',
 ] as const satisfies readonly CliBackend[]
 
 const BACKEND_LABELS: Record<(typeof INSTALLABLE_BACKENDS)[number], string> = {
@@ -69,6 +70,7 @@ const BACKEND_LABELS: Record<(typeof INSTALLABLE_BACKENDS)[number], string> = {
   cursor: 'Cursor',
   grok: 'Grok',
   kimi: 'Kimi',
+  antigravity: 'Antigravity',
 }
 
 interface SnippetTarget {
@@ -113,6 +115,15 @@ function installButtonContent(state: InstallState, message: string) {
   }
 }
 
+function handleCopySnippet(label: string, content: string | null) {
+  if (!content) {
+    toast.error(`No ${label} snippet available — enable Jean MCP first`)
+    return
+  }
+  copyToClipboard(content)
+  toast.success(`${label} snippet copied`)
+}
+
 export const JeanMcpSection: React.FC = () => {
   const { data: preferences } = usePreferences()
   const patchPreferences = usePatchPreferences()
@@ -142,9 +153,10 @@ export const JeanMcpSection: React.FC = () => {
     (backend): backend is (typeof INSTALLABLE_BACKENDS)[number] =>
       (INSTALLABLE_BACKENDS as readonly CliBackend[]).includes(backend)
   )
-  const installableLabels = installableBackends
-    .map(backend => BACKEND_LABELS[backend])
-    .filter(Boolean)
+  const installableLabels = installableBackends.flatMap(backend => {
+    const label = BACKEND_LABELS[backend]
+    return label ? [label] : []
+  })
 
   const snippetTargets = useMemo<SnippetTarget[]>(
     () => [
@@ -183,6 +195,12 @@ export const JeanMcpSection: React.FC = () => {
         label: 'OpenCode',
         path: '~/.config/opencode/opencode.json',
         content: snippet?.opencodeJson ?? null,
+      },
+      {
+        id: 'antigravity',
+        label: 'Antigravity',
+        path: '~/.gemini/config/mcp_config.json',
+        content: snippet?.claude ?? null,
       },
     ],
     [snippet]
@@ -226,7 +244,7 @@ export const JeanMcpSection: React.FC = () => {
       if (installableBackends.length === 0) {
         setTemporaryInstallState(
           'error',
-          'Install a supported CLI first (Claude, Codex, Cursor, Grok, Kimi, or OpenCode)'
+          'Install a supported CLI first (Claude, Codex, Cursor, Grok, Kimi, Antigravity, or OpenCode)'
         )
         return
       }
@@ -280,15 +298,6 @@ export const JeanMcpSection: React.FC = () => {
     setShowInstallChoice(false)
     if (serverRunning) handleInstall(true)
     else setTemporaryInstallState('waiting')
-  }
-
-  const handleCopy = (label: string, content: string | null) => {
-    if (!content) {
-      toast.error(`No ${label} snippet available — enable Jean MCP first`)
-      return
-    }
-    copyToClipboard(content)
-    toast.success(`${label} snippet copied`)
   }
 
   const transientButton = installButtonContent(installState, installMessage)
@@ -417,7 +426,9 @@ export const JeanMcpSection: React.FC = () => {
                     key={target.id}
                     variant="outline"
                     size="sm"
-                    onClick={() => handleCopy(target.label, target.content)}
+                    onClick={() =>
+                      handleCopySnippet(target.label, target.content)
+                    }
                     className="h-auto w-full justify-start gap-2 px-3 py-2.5 text-left"
                   >
                     <Copy className="mt-0.5 size-3.5 shrink-0" />

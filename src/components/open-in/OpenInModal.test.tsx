@@ -5,6 +5,7 @@ import { OpenInModal } from './OpenInModal'
 const localBackendState = vi.hoisted(() => ({ value: true }))
 const nativeOpenAllowedState = vi.hoisted(() => ({ value: false }))
 const remoteEditorLocallyState = vi.hoisted(() => ({ value: false }))
+const webEditorUrlState = vi.hoisted(() => ({ value: null as string | null }))
 
 const mocks = vi.hoisted(() => ({
   setOpenInModalOpen: vi.fn(),
@@ -79,8 +80,7 @@ vi.mock('@/services/preferences', () => ({
 
 vi.mock('@/lib/environment', () => ({
   isLocalBackend: () => localBackendState.value,
-  isNativeApp: () =>
-    localBackendState.value || remoteEditorLocallyState.value,
+  isNativeApp: () => localBackendState.value || remoteEditorLocallyState.value,
   canOpenNativeApps: () =>
     localBackendState.value || nativeOpenAllowedState.value,
   canOpenRemoteEditorLocally: () => remoteEditorLocallyState.value,
@@ -129,6 +129,7 @@ vi.mock('@/services/projects', () => ({
   useOpenWorktreeInFinder: () => ({ mutate: vi.fn() }),
   useOpenWorktreeInTerminal: () => ({ mutate: vi.fn() }),
   useOpenWorktreeInEditor: () => ({ mutate: vi.fn() }),
+  useWebEditorUrl: () => webEditorUrlState.value,
   usePorts: () => ({ data: [] }),
 }))
 
@@ -172,6 +173,7 @@ describe('OpenInModal', () => {
     localBackendState.value = true
     nativeOpenAllowedState.value = false
     remoteEditorLocallyState.value = false
+    webEditorUrlState.value = null
   })
 
   it('hides Finder/editor/terminal in browser/headless mode without native open', async () => {
@@ -184,6 +186,19 @@ describe('OpenInModal', () => {
     expect(await screen.findByText('GitHub')).toBeInTheDocument()
     expect(screen.queryByText('Finder')).not.toBeInTheDocument()
     expect(screen.queryByText('Zed')).not.toBeInTheDocument()
+    expect(screen.queryByText('Ghostty')).not.toBeInTheDocument()
+  })
+
+  it('offers the browser editor when a web editor URL is configured', async () => {
+    localBackendState.value = false
+    nativeOpenAllowedState.value = false
+    remoteEditorLocallyState.value = false
+    webEditorUrlState.value = '/code'
+
+    render(<OpenInModal />)
+
+    expect(await screen.findByText('Open Editor')).toBeInTheDocument()
+    expect(screen.queryByText('Finder')).not.toBeInTheDocument()
     expect(screen.queryByText('Ghostty')).not.toBeInTheDocument()
   })
 

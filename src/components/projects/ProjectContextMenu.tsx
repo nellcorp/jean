@@ -28,13 +28,14 @@ import {
   useOpenWorktreeInTerminal,
   useRemoveProject,
   useWorktrees,
+  useWebEditorUrl,
 } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import { getFileManagerName } from '@/lib/platform'
-import { isNativeApp } from '@/lib/environment'
+import { canOpenInEditor, isNativeApp } from '@/lib/environment'
 
 interface ProjectContextMenuProps {
   project: Project
@@ -55,6 +56,8 @@ export function ProjectContextMenu({
   const openInEditor = useOpenWorktreeInEditor()
   const { data: worktrees = [] } = useWorktrees(project.id)
   const { data: preferences } = usePreferences()
+  const hasWebEditor = useWebEditorUrl() !== null
+  const showEditorItem = canOpenInEditor() || hasWebEditor
   const { openProjectSettings, selectProject } = useProjectsStore()
   const setNewWorktreeModalOpen = useUIStore(
     state => state.setNewWorktreeModalOpen
@@ -131,12 +134,14 @@ export function ProjectContextMenu({
 
         <ContextMenuSeparator />
 
-        <ContextMenuItem onClick={handleOpenInEditor}>
-          <Code className="mr-2 h-4 w-4" />
-          {isNativeApp()
-            ? `Open in ${getEditorLabel(preferences?.editor)}`
-            : 'Open Editor'}
-        </ContextMenuItem>
+        {showEditorItem && (
+          <ContextMenuItem onClick={handleOpenInEditor}>
+            <Code className="mr-2 h-4 w-4" />
+            {isNativeApp()
+              ? `Open in ${getEditorLabel(preferences?.editor)}`
+              : 'Open Editor'}
+          </ContextMenuItem>
+        )}
 
         {isNativeApp() && (
           <ContextMenuItem onClick={handleOpenInFinder}>

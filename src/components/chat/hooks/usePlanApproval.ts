@@ -20,6 +20,7 @@ import type { SessionCardData } from '../session-card-utils'
 
 const THINKING_LEVEL_VALUES = new Set<ThinkingLevel>([
   'off',
+  'adaptive',
   'think',
   'megathink',
   'ultrathink',
@@ -34,6 +35,7 @@ function isThinkingLevel(
 
 const EFFORT_LEVEL_VALUES = new Set<EffortLevel>([
   'off',
+  'adaptive',
   'minimal',
   'low',
   'medium',
@@ -184,6 +186,7 @@ export function usePlanApproval({
       const isCodex = sessionBackend === 'codex'
       const isPi = sessionBackend === 'pi'
       const isGrok = sessionBackend === 'grok'
+      const isAntigravity = sessionBackend === 'antigravity'
       const buildEffortOverride = overridesApply
         ? preferences?.build_effort_level
         : null
@@ -191,6 +194,7 @@ export function usePlanApproval({
         isCodex ||
         isPi ||
         isGrok ||
+        isAntigravity ||
         supportsAdaptiveThinking(model, cliStatus?.version ?? null)
       const defaultGrokEffort = isEffortLevel(
         preferences?.default_grok_reasoning_effort
@@ -202,9 +206,11 @@ export function usePlanApproval({
           ? buildEffortOverride
           : isGrok
             ? defaultGrokEffort
-            : isEffortLevel(preferences?.default_effort_level)
-              ? preferences?.default_effort_level
-              : undefined
+            : isAntigravity
+              ? 'adaptive'
+              : isEffortLevel(preferences?.default_effort_level)
+                ? preferences?.default_effort_level
+                : undefined
         : undefined
       const baseMsg = isCodex
         ? 'Execute the plan you created. Implement all changes described.'
@@ -397,6 +403,7 @@ export function usePlanApproval({
       const isCodexYolo = sessionBackend === 'codex'
       const isPiYolo = sessionBackend === 'pi'
       const isGrokYolo = sessionBackend === 'grok'
+      const isAntigravityYolo = sessionBackend === 'antigravity'
       const yoloEffortOverride = overridesApplyYolo
         ? preferences?.yolo_effort_level
         : null
@@ -404,6 +411,7 @@ export function usePlanApproval({
         isCodexYolo ||
         isPiYolo ||
         isGrokYolo ||
+        isAntigravityYolo ||
         supportsAdaptiveThinking(model, cliStatus?.version ?? null)
       const defaultGrokEffortYolo = isEffortLevel(
         preferences?.default_grok_reasoning_effort
@@ -415,9 +423,11 @@ export function usePlanApproval({
           ? yoloEffortOverride
           : isGrokYolo
             ? defaultGrokEffortYolo
-            : isEffortLevel(preferences?.default_effort_level)
-              ? preferences?.default_effort_level
-              : undefined
+            : isAntigravityYolo
+              ? 'adaptive'
+              : isEffortLevel(preferences?.default_effort_level)
+                ? preferences?.default_effort_level
+                : undefined
         : undefined
       const baseMsgYolo = isCodexYolo
         ? 'Execute the plan you created. Implement all changes described.'

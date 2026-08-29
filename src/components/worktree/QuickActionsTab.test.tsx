@@ -23,7 +23,7 @@ vi.mock('@/services/projects', async importOriginal => {
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
   const actual = await importOriginal<typeof import('@/services/projects')>()
   return {
-    ...actual,
+    ...(actual as object),
     // Remotes for the selected base are loaded inside the tab; tests pass
     // remotes via props as the fallback and leave this empty.
     useProjectRemotes: () => ({ data: undefined }),

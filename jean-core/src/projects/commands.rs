@@ -1,8 +1,7 @@
-use ignore::WalkBuilder;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -702,6 +701,9 @@ pub async fn add_project(
 ) -> Result<Project, String> {
     log::trace!("Adding project from path: {path}, parent_id: {parent_id:?}");
 
+    // A save dialog can return a new path that does not exist yet.
+    git::ensure_project_directory(Path::new(&path))?;
+
     // Validate it's a git repository
     if !git::validate_git_repo(&path)? {
         return Err(format!(
@@ -1075,6 +1077,67 @@ pub async fn list_worktrees(app: AppHandle, project_id: String) -> Result<Vec<Wo
     Ok(worktrees)
 }
 
+/// One-shot project open payload: worktrees + session lists (with message counts).
+/// Avoids the frontend waterfall of `list_worktrees` then N× `get_sessions` over WS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectBootstrap {
+    pub worktrees: Vec<Worktree>,
+    pub sessions_by_worktree: HashMap<String, crate::chat::types::WorktreeSessions>,
+}
+
+/// Load worktrees and per-worktree session lists for a project in one round-trip.
+/// Sessions are fetched in parallel with message counts (canvas needs them).
+pub async fn bootstrap_project(
+    app: AppHandle,
+    project_id: String,
+) -> Result<ProjectBootstrap, String> {
+    log::trace!("Bootstrapping project canvas data: {project_id}");
+
+    let worktrees = list_worktrees(app.clone(), project_id).await?;
+
+    let session_futures: Vec<_> = worktrees
+        .iter()
+        .map(|wt| {
+            let app = app.clone();
+            let worktree_id = wt.id.clone();
+            let worktree_path = wt.path.clone();
+            async move {
+                let sessions = crate::chat::get_sessions(
+                    app,
+                    worktree_id.clone(),
+                    worktree_path,
+                    None,       // include_archived
+                    Some(true), // include_message_counts
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    log::warn!("bootstrap_project: get_sessions failed for {worktree_id}: {e}");
+                    crate::chat::types::WorktreeSessions {
+                        worktree_id: worktree_id.clone(),
+                        sessions: vec![],
+                        active_session_id: None,
+                        default_model: None,
+                        version: 2,
+                        branch_naming_completed: false,
+                    }
+                });
+                (worktree_id, sessions)
+            }
+        })
+        .collect();
+
+    let sessions_by_worktree = futures_util::future::join_all(session_futures)
+        .await
+        .into_iter()
+        .collect();
+
+    Ok(ProjectBootstrap {
+        worktrees,
+        sessions_by_worktree,
+    })
+}
+
 /// Get a single worktree by ID
 pub async fn get_worktree(app: AppHandle, worktree_id: String) -> Result<Worktree, String> {
     log::trace!("Getting worktree: {worktree_id}");
@@ -1152,6 +1215,7 @@ pub async fn get_worktree_diff(
     let base_remote = worktree.base_remote.clone();
     let base_branch = worktree.base_branch.unwrap_or(project_default_branch);
     let has_head = git_has_head(&worktree.path);
+    // -c core.quotePath=false so non-ASCII paths are raw UTF-8 (issue #631).
     let mut args = match diff_type.as_str() {
         "uncommitted" => {
             let diff_base = if has_head {
@@ -1160,12 +1224,16 @@ pub async fn get_worktree_diff(
                 "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
             };
             vec![
+                "-c".to_string(),
+                "core.quotePath=false".to_string(),
                 "diff".to_string(),
                 diff_base.to_string(),
                 "--unified=3".to_string(),
             ]
         }
         "branch" => vec![
+            "-c".to_string(),
+            "core.quotePath=false".to_string(),
             "diff".to_string(),
             "--unified=3".to_string(),
             format!(
@@ -1379,10 +1447,14 @@ fn clear_session_runtime_state(session: &mut Session) {
     session.grok_session_id = None;
     session.kimi_session_id = None;
     session.is_reviewing = false;
+    if session.status_override.as_deref() == Some("review") {
+        session.status_override = None;
+    }
     session.waiting_for_input = false;
     session.waiting_for_input_type = None;
     session.pending_permission_denials.clear();
     session.pending_codex_permission_requests.clear();
+    session.pending_opencode_permission_requests.clear();
     session.pending_codex_command_approval_requests.clear();
     session.pending_codex_user_input_requests.clear();
     session.pending_codex_mcp_elicitation_requests.clear();
@@ -1447,12 +1519,16 @@ fn prepare_forked_metadata(
     metadata.archived_by_base_close = None;
     metadata.pending_permission_denials.clear();
     metadata.pending_codex_permission_requests.clear();
+    metadata.pending_opencode_permission_requests.clear();
     metadata.pending_codex_command_approval_requests.clear();
     metadata.pending_codex_user_input_requests.clear();
     metadata.pending_codex_mcp_elicitation_requests.clear();
     metadata.pending_codex_dynamic_tool_call_requests.clear();
     metadata.denied_message_context = None;
     metadata.is_reviewing = false;
+    if metadata.status_override.as_deref() == Some("review") {
+        metadata.status_override = None;
+    }
     metadata.waiting_for_input = false;
     metadata.waiting_for_input_type = None;
     metadata.queued_messages.clear();
@@ -2099,6 +2175,14 @@ pub async fn create_worktree(
                 actual_branch_name
             };
 
+            // Remember fork remotes added by `gh pr checkout` so clearing/deleting
+            // the PR can remove them from git later.
+            let (detected_pr_push_remote, detected_pr_push_branch) = if pr_context_clone.is_some() {
+                detect_ephemeral_pr_push_target(&project_path, &final_branch)
+            } else {
+                (None, None)
+            };
+
             // Write issue context file if provided (to shared git-context directory)
             if let Some(ctx) = &issue_context_clone {
                 log::trace!(
@@ -2340,7 +2424,8 @@ pub async fn create_worktree(
             // initial worktree record. This lets the frontend know a setup script
             // will run (setup_script is set, but setup_output is still None).
             let pending_setup_script =
-                git::read_jean_config(&project_path).and_then(|config| config.scripts.setup);
+                git::resolve_jean_config(&worktree_path_clone, Some(&project_path))
+                    .and_then(|config| config.scripts.setup);
 
             // Save to storage and emit worktree:created BEFORE running setup script
             // so the UI can open immediately and the user can start typing.
@@ -2398,8 +2483,8 @@ pub async fn create_worktree(
                     cached_base_branch_behind_count: None,
                     cached_worktree_ahead_count: None,
                     cached_unpushed_count: None,
-                    pr_push_remote: None,
-                    pr_push_branch: None,
+                    pr_push_remote: detected_pr_push_remote,
+                    pr_push_branch: detected_pr_push_branch,
                     order: max_order + 1,
                     origin: worktree_origin_clone.clone(),
                     archived_at: None,
@@ -3144,28 +3229,29 @@ pub async fn create_worktree_from_existing_branch(
             }
 
             // Check for jean.json and run setup script
-            let (setup_output, setup_script, setup_success) =
-                if let Some(config) = git::read_jean_config(&project_path) {
-                    if let Some(script) = config.scripts.setup {
-                        log::trace!("Background: Found jean.json with setup script, executing...");
-                        match git::run_setup_script(
-                            &worktree_path_clone,
-                            &project_path,
-                            &name_clone,
-                            &script,
-                        ) {
-                            Ok(output) => (Some(output), Some(script), Some(true)),
-                            Err(e) => {
-                                log::warn!("Background: Setup script failed (continuing): {e}");
-                                (Some(e), Some(script), Some(false))
-                            }
+            let (setup_output, setup_script, setup_success) = if let Some(config) =
+                git::resolve_jean_config(&worktree_path_clone, Some(&project_path))
+            {
+                if let Some(script) = config.scripts.setup {
+                    log::trace!("Background: Found jean.json with setup script, executing...");
+                    match git::run_setup_script(
+                        &worktree_path_clone,
+                        &project_path,
+                        &name_clone,
+                        &script,
+                    ) {
+                        Ok(output) => (Some(output), Some(script), Some(true)),
+                        Err(e) => {
+                            log::warn!("Background: Setup script failed (continuing): {e}");
+                            (Some(e), Some(script), Some(false))
                         }
-                    } else {
-                        (None, None, None)
                     }
                 } else {
                     (None, None, None)
-                };
+                }
+            } else {
+                (None, None, None)
+            };
 
             // Save to storage
             if let Ok(mut data) = load_projects_data(&app_clone) {
@@ -3326,6 +3412,13 @@ pub async fn checkout_pr(
 
     // Fetch PR details from GitHub (for context and worktree naming)
     let pr_detail = get_github_pr(app.clone(), project.path.clone(), pr_number).await?;
+    // Persist the same PR link fields as create/link PR so magic actions
+    // (Open/Merge/PR Comments/status polling) work immediately after checkout.
+    let pr_url = if pr_detail.url.trim().is_empty() {
+        None
+    } else {
+        Some(pr_detail.url.clone())
+    };
 
     // Prefer the PR's target branch so status/diff compare against the same base
     // GitHub uses (e.g. v4.x), not always the project default (main).
@@ -3449,7 +3542,7 @@ pub async fn checkout_pr(
         setup_success: None,
         session_type: SessionType::Worktree,
         pr_number: Some(pr_number),
-        pr_url: None,
+        pr_url: pr_url.clone(),
         issue_number: None,
         linear_issue_identifier: None,
         security_alert_number: None,
@@ -3488,6 +3581,7 @@ pub async fn checkout_pr(
     let worktree_name_clone = final_worktree_name.clone();
     let temp_branch_clone = temp_branch_name.clone();
     let base_branch_clone = base_branch.clone();
+    let pr_url_clone = pr_url.clone();
     let pr_title = pr_detail.title.clone();
     let pr_body = pr_detail.body.clone();
     let pr_head_ref = pr_detail.head_ref_name.clone();
@@ -3658,29 +3752,35 @@ pub async fn checkout_pr(
                 "Background: Git worktree ready with PR #{pr_number} on branch {actual_branch}"
             );
 
+            // Remember fork remotes added by `gh pr checkout` so clearing/deleting
+            // the PR can remove them from git later.
+            let (detected_pr_push_remote, detected_pr_push_branch) =
+                detect_ephemeral_pr_push_target(&project_path, &actual_branch);
+
             // Check for jean.json and run setup script
-            let (setup_output, setup_script, setup_success) =
-                if let Some(config) = git::read_jean_config(&worktree_path_clone) {
-                    if let Some(script) = config.scripts.setup {
-                        log::trace!("Background: Found jean.json with setup script, executing...");
-                        match git::run_setup_script(
-                            &worktree_path_clone,
-                            &project_path,
-                            &actual_branch,
-                            &script,
-                        ) {
-                            Ok(output) => (Some(output), Some(script), Some(true)),
-                            Err(e) => {
-                                log::warn!("Background: Setup script failed (continuing): {e}");
-                                (Some(e), Some(script), Some(false))
-                            }
+            let (setup_output, setup_script, setup_success) = if let Some(config) =
+                git::resolve_jean_config(&worktree_path_clone, Some(&project_path))
+            {
+                if let Some(script) = config.scripts.setup {
+                    log::trace!("Background: Found jean.json with setup script, executing...");
+                    match git::run_setup_script(
+                        &worktree_path_clone,
+                        &project_path,
+                        &actual_branch,
+                        &script,
+                    ) {
+                        Ok(output) => (Some(output), Some(script), Some(true)),
+                        Err(e) => {
+                            log::warn!("Background: Setup script failed (continuing): {e}");
+                            (Some(e), Some(script), Some(false))
                         }
-                    } else {
-                        (None, None, None)
                     }
                 } else {
                     (None, None, None)
-                };
+                }
+            } else {
+                (None, None, None)
+            };
 
             // Write PR context file to shared git-context directory
             if let Ok(repo_id) = get_repo_identifier(&project_path) {
@@ -3775,7 +3875,7 @@ pub async fn checkout_pr(
                     setup_success,
                     session_type: SessionType::Worktree,
                     pr_number: Some(pr_number),
-                    pr_url: None,
+                    pr_url: pr_url_clone,
                     issue_number: None,
                     linear_issue_identifier: None,
                     security_alert_number: None,
@@ -3795,8 +3895,8 @@ pub async fn checkout_pr(
                     cached_base_branch_behind_count: None,
                     cached_worktree_ahead_count: None,
                     cached_unpushed_count: None,
-                    pr_push_remote: None,
-                    pr_push_branch: None,
+                    pr_push_remote: detected_pr_push_remote,
+                    pr_push_branch: detected_pr_push_branch,
                     order: max_order + 1,
                     origin: None,
                     archived_at: None,
@@ -3908,10 +4008,8 @@ pub async fn delete_worktree(app: AppHandle, worktree_id: String) -> Result<(), 
 
     log::trace!("Found project: id={}, path={}", project.id, project.path);
 
-    // Read jean.json teardown script — try worktree first, fall back to project root
-    // (worktree has jean.json if committed; project root always has it if saved via UI)
-    let teardown_script = git::read_jean_config(&worktree.path)
-        .or_else(|| git::read_jean_config(&project.path))
+    // Read jean.json teardown script from the newest project/worktree copy.
+    let teardown_script = git::resolve_jean_config(&worktree.path, Some(&project.path))
         .and_then(|config| config.scripts.teardown);
 
     // Remove from storage SYNCHRONOUSLY to avoid race conditions with other operations
@@ -3920,6 +4018,16 @@ pub async fn delete_worktree(app: AppHandle, worktree_id: String) -> Result<(), 
     data.remove_worktree(&worktree_id);
     save_projects_data(&app, &data)?;
     log::trace!("Worktree removed from storage: {worktree_id}");
+
+    // Drop Jean-managed fork remotes for this PR when nothing else needs them.
+    // Done after storage removal so reference checks see the updated worktree list.
+    cleanup_unused_pr_remotes(
+        &data,
+        &worktree_id,
+        &project.path,
+        worktree.pr_push_remote.as_deref(),
+        Some(worktree.branch.as_str()),
+    );
 
     // Emit deleting event immediately
     let deleting_event = WorktreeDeletingEvent {
@@ -4604,6 +4712,15 @@ pub async fn permanently_delete_worktree(
     save_projects_data(&app, &data)?;
     log::trace!("Worktree removed from storage: {worktree_id}");
 
+    // Drop Jean-managed fork remotes for this PR when nothing else needs them.
+    cleanup_unused_pr_remotes(
+        &data,
+        &worktree_id,
+        &project.path,
+        worktree.pr_push_remote.as_deref(),
+        Some(worktree.branch.as_str()),
+    );
+
     // Collect session IDs for cleanup before the index file is deleted
     let session_ids: Vec<String> =
         crate::chat::storage::load_sessions(&app, &worktree.path, &worktree.id)
@@ -5238,32 +5355,7 @@ pub async fn open_branch_on_github(repo_path: String, branch: String) -> Result<
     let url = format!("{github_url}/tree/{branch}");
 
     log::trace!("Opening GitHub branch URL: {url}");
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(&url)
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {e}"))?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&url)
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {e}"))?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &url])
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {e}"))?;
-    }
-
-    Ok(())
+    crate::platform::open_url_in_browser(&url)
 }
 
 /// Open the project's GitHub page in the browser
@@ -5282,32 +5374,7 @@ pub async fn open_project_on_github(app: AppHandle, project_id: String) -> Resul
     let github_url = get_project_github_url(&app, &project_id)?;
 
     log::trace!("Opening GitHub URL: {github_url}");
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(&github_url)
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {e}"))?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&github_url)
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {e}"))?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &github_url])
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {e}"))?;
-    }
-
-    Ok(())
+    crate::platform::open_url_in_browser(&github_url)
 }
 
 /// Rename a worktree (display name only, doesn't affect git branch)
@@ -5454,15 +5521,27 @@ pub async fn open_pull_request(
 
     let worktree = data
         .find_worktree(&worktree_id)
-        .ok_or_else(|| format!("Worktree not found: {worktree_id}"))?;
+        .ok_or_else(|| format!("Worktree not found: {worktree_id}"))?
+        .clone();
+    let project = data
+        .find_project(&worktree.project_id)
+        .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
-    // Use the worktree path for the PR creation
+    let base_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
+
+    // Use the worktree path for the PR creation; open against the worktree base
+    // (not only the project default) so stacked branches target the right base.
     let gh = resolve_gh_binary(&app);
     let result = git::open_pull_request(
         &worktree.path,
         title.as_deref(),
         body.as_deref(),
         draft.unwrap_or(false),
+        Some(&base_branch),
         &gh,
     )?;
 
@@ -5484,137 +5563,147 @@ pub struct WorktreeFile {
     pub is_dir: bool,
 }
 
-/// Directories pruned when `include_ignored` is set, so surfacing gitignored
-/// files (e.g. .env, build outputs) doesn't flood the list with dependency and
-/// build caches. These are almost always gitignored and rarely referenced.
-const IGNORED_WALK_PRUNE_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    "out",
-    ".next",
-    ".nuxt",
-    ".svelte-kit",
-    ".turbo",
-    ".parcel-cache",
-    ".cache",
-    "coverage",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    "vendor",
-    ".gradle",
-    "Pods",
-];
+/// Directory names skipped while listing worktree files.
+///
+/// Gitignored files (e.g. `.env`) are intentionally included so the file
+/// browser can open them. Heavy dependency/build trees are still skipped so
+/// listing stays usable under the max-files cap.
+///
+/// `vendor` (Composer/PHP and some Go layouts) must be skipped: a single
+/// Laravel `vendor/` tree can exceed the max-files cap alone, which used to
+/// truncate the walk mid-tree and hide most project source directories.
+fn is_skipped_file_browser_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".nuxt"
+            | ".turbo"
+            | ".cache"
+            | "coverage"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | "elm-stuff"
+            | "vendor"
+            | "Pods"
+            | "bower_components"
+            | ".gradle"
+            | ".pnpm-store"
+            | "site-packages"
+            | ".tox"
+            | ".mypy_cache"
+            | ".pytest_cache"
+            | ".sass-cache"
+            | "DerivedData"
+            | ".dart_tool"
+            | ".parcel-cache"
+            | ".svelte-kit"
+            | ".vercel"
+            | ".output"
+    )
+}
 
-/// List files in a worktree. By default respects .gitignore; pass
-/// `include_ignored = true` to also surface gitignored files (heavy dependency
-/// and build directories are still pruned so the list stays usable).
-/// Returns files sorted alphabetically, limited to prevent performance issues.
-pub async fn list_worktree_files(
-    worktree_path: String,
-    max_files: Option<usize>,
-    include_ignored: Option<bool>,
-    extra_prune_dirs: Option<Vec<String>>,
+/// Synchronous breadth-first listing used by [`list_worktree_files`].
+///
+/// BFS is intentional: with a max-files cap, depth-first walks (e.g. into
+/// `vendor/` or a deep monorepo package) used to exhaust the budget before
+/// sibling top-level directories were discovered, so the file browser looked
+/// nearly empty compared to editors like Zed.
+fn list_worktree_files_sync(
+    worktree_path: &str,
+    max: usize,
+    extra_skipped_dirs: &HashSet<String>,
 ) -> Result<Vec<WorktreeFile>, String> {
-    log::trace!("Listing files in worktree: {worktree_path}");
-
-    let max = max_files.unwrap_or(5000);
-    let include_ignored = include_ignored.unwrap_or(false);
-    let mut files = Vec::new();
-
-    // Built-in prune dirs plus any user-configured extras (trimmed, non-empty).
-    let prune_dirs: std::collections::HashSet<String> = IGNORED_WALK_PRUNE_DIRS
-        .iter()
-        .map(|s| s.to_string())
-        .chain(
-            extra_prune_dirs
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-        )
-        .collect();
-
-    // Use ignore crate's WalkBuilder. By default it respects .gitignore; when
-    // include_ignored is set we disable that and instead prune only heavy dirs.
-    let mut builder = WalkBuilder::new(&worktree_path);
-    builder
-        .hidden(false) // Include hidden files (user may want .env.example etc)
-        .git_ignore(!include_ignored)
-        .git_global(!include_ignored)
-        .git_exclude(!include_ignored)
-        .require_git(false); // Work even if not a git repo
-
-    if include_ignored {
-        builder.filter_entry(move |entry| {
-            let name = entry.file_name().to_string_lossy();
-            !prune_dirs.contains(name.as_ref())
-        });
+    let root = Path::new(worktree_path);
+    if !root.is_dir() {
+        // Missing/stale path while switching projects — return empty, not an error.
+        log::debug!("Worktree path is not a directory (skipping list): {worktree_path}");
+        return Ok(Vec::new());
     }
 
-    let walker = builder.build();
+    let mut files: Vec<WorktreeFile> = Vec::new();
+    let mut queue: VecDeque<PathBuf> = VecDeque::new();
+    queue.push_back(root.to_path_buf());
 
-    let worktree_path_ref = Path::new(&worktree_path);
-
-    for entry in walker {
+    while let Some(dir) = queue.pop_front() {
         if files.len() >= max {
             break;
         }
 
-        let entry = match entry {
-            Ok(e) => e,
+        let read = match fs::read_dir(&dir) {
+            Ok(r) => r,
             Err(e) => {
-                log::warn!("Failed to read entry: {e}");
+                log::warn!("Failed to read directory {}: {e}", dir.display());
                 continue;
             }
         };
 
-        let path = entry.path();
+        // Stable order within each directory so BFS truncation is deterministic.
+        let mut entries: Vec<fs::DirEntry> = read.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
 
-        // Skip the root directory itself
-        if path == worktree_path_ref {
-            continue;
+        for entry in entries {
+            if files.len() >= max {
+                break;
+            }
+
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if is_skipped_file_browser_dir(name_str.as_ref())
+                || extra_skipped_dirs.contains(name_str.as_ref())
+            {
+                continue;
+            }
+
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("Failed to read file type for {}: {e}", path.display());
+                    continue;
+                }
+            };
+
+            // Do not follow symlinks when deciding to recurse (avoids loops /
+            // walking outside the worktree). Symlink-to-dir is listed as a
+            // non-directory leaf so the tree stays finite.
+            let entry_is_dir = file_type.is_dir() && !file_type.is_symlink();
+
+            let relative = match path.strip_prefix(root) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            // Normalize to forward slashes so UI/API paths are platform-stable
+            // (Windows Path::to_string_lossy() uses backslashes).
+            let relative_str = relative.to_string_lossy().replace('\\', "/");
+            if relative_str.is_empty() {
+                continue;
+            }
+
+            let extension = if entry_is_dir {
+                String::new()
+            } else {
+                path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+
+            files.push(WorktreeFile {
+                relative_path: relative_str,
+                extension,
+                is_dir: entry_is_dir,
+            });
+
+            if entry_is_dir {
+                queue.push_back(path);
+            }
         }
-
-        // Skip .git directory and its contents
-        if path.components().any(|c| c.as_os_str() == ".git") {
-            continue;
-        }
-
-        let entry_is_dir = path.is_dir();
-
-        // Get relative path
-        let relative = match path.strip_prefix(worktree_path_ref) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        let relative_str = relative.to_string_lossy().to_string();
-
-        // Skip empty paths
-        if relative_str.is_empty() {
-            continue;
-        }
-
-        let extension = if entry_is_dir {
-            String::new()
-        } else {
-            path.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_string()
-        };
-
-        files.push(WorktreeFile {
-            relative_path: relative_str,
-            extension,
-            is_dir: entry_is_dir,
-        });
     }
 
     // Sort: directories first, then alphabetically within each group
@@ -5623,6 +5712,39 @@ pub async fn list_worktree_files(
             .cmp(&a.is_dir)
             .then_with(|| a.relative_path.cmp(&b.relative_path))
     });
+
+    Ok(files)
+}
+
+/// List files in a worktree for the file browser and @-mentions.
+///
+/// Includes hidden and gitignored files (e.g. `.env`) so users can open them
+/// from the sidebar. Skips `.git` and common heavy dependency/build directories
+/// (including `vendor` / `node_modules`), plus any `extra_prune_dirs` the user
+/// configured. Walks breadth-first so a max-files cap still leaves a complete
+/// shallow project tree.
+/// Returns files sorted alphabetically, limited to prevent performance issues.
+pub async fn list_worktree_files(
+    worktree_path: String,
+    max_files: Option<usize>,
+    extra_prune_dirs: Option<Vec<String>>,
+) -> Result<Vec<WorktreeFile>, String> {
+    log::trace!("Listing files in worktree: {worktree_path}");
+
+    let max = max_files.unwrap_or(5000);
+    let extra_skipped_dirs: HashSet<String> = extra_prune_dirs
+        .unwrap_or_default()
+        .into_iter()
+        .map(|dir| dir.trim().to_string())
+        .filter(|dir| !dir.is_empty())
+        .collect();
+    // Filesystem walk is sync and can be large; keep it off the async runtime
+    // so project switches (which re-list) cannot stall other Tauri commands.
+    let files = tokio::task::spawn_blocking(move || {
+        list_worktree_files_sync(&worktree_path, max, &extra_skipped_dirs)
+    })
+    .await
+    .map_err(|e| format!("Failed to list worktree files: {e}"))??;
 
     log::trace!("Found {} files in worktree", files.len());
     Ok(files)
@@ -5675,6 +5797,10 @@ pub async fn get_project_branches(
 }
 
 /// Update project settings
+fn checkout_project_default_branch(project_path: &str, branch: &str) -> Result<(), String> {
+    git::checkout_branch(project_path, branch)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_project_settings(
     app: AppHandle,
@@ -5721,7 +5847,10 @@ pub async fn update_project_settings(
             project.default_branch,
             branch
         );
-        project.default_branch = branch;
+        if branch != project.default_branch {
+            checkout_project_default_branch(&project.path, &branch)?;
+            project.default_branch = branch;
+        }
     }
 
     if let Some(servers) = enabled_mcp_servers {
@@ -5948,13 +6077,17 @@ pub async fn get_pr_prompt(app: AppHandle, worktree_path: String) -> Result<Stri
         .find(|w| w.path == worktree_path)
         .ok_or_else(|| format!("Worktree not found: {worktree_path}"))?;
 
-    // Find the project to get default_branch
+    // Prefer worktree base (stacked / non-default branch) over project default
     let project = data
         .find_project(&worktree.project_id)
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
-    let target_branch = &project.default_branch;
-    let context = git::generate_pr_context(&worktree_path, target_branch)?;
+    let target_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
+    let context = git::generate_pr_context(&worktree_path, &target_branch)?;
 
     let mut prompt = format!(
         r#"The user likes the state of the code and wants to open a PR.
@@ -6039,12 +6172,16 @@ pub async fn get_review_prompt(
         .find(|w| w.path == worktree_path)
         .ok_or_else(|| format!("Worktree not found: {worktree_path}"))?;
 
-    // Find the project to get default_branch
+    // Prefer worktree base (stacked / non-default branch) over project default
     let project = data
         .find_project(&worktree.project_id)
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
-    let target_branch = &project.default_branch;
+    let target_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
     let current_branch = git::get_current_branch(&worktree_path)?;
 
     // Get the full git diff (origin/target...HEAD)
@@ -6077,9 +6214,10 @@ pub async fn get_review_prompt(
         return Err(format!("Git log failed: {stderr}"));
     };
 
-    // Get uncommitted changes (staged + unstaged for tracked files)
+    // Get uncommitted changes (staged + unstaged for tracked files).
+    // core.quotePath=false: raw UTF-8 paths for non-ASCII names (#631).
     let uncommitted_output = wsl_aware_command("git", Some(Path::new(&worktree_path)))
-        .args(["diff", "HEAD"])
+        .args(["-c", "core.quotePath=false", "diff", "HEAD"])
         .output()
         .map_err(|e| format!("Failed to run git diff HEAD: {e}"))?;
 
@@ -6089,9 +6227,15 @@ pub async fn get_review_prompt(
         String::new() // Not an error if no uncommitted changes
     };
 
-    // Get list of untracked files
+    // Get list of untracked files (raw UTF-8 paths — #631)
     let untracked_output = wsl_aware_command("git", Some(Path::new(&worktree_path)))
-        .args(["ls-files", "--others", "--exclude-standard"])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ])
         .output()
         .map_err(|e| format!("Failed to list untracked files: {e}"))?;
 
@@ -6437,6 +6581,67 @@ pub async fn detect_open_pr_for_branch(
     find_open_pr_for_branch(&app, &worktree_path)
 }
 
+/// Parse `gh pr view --json number,url,title` output into a PR link response.
+fn parse_pr_view_link(output: &[u8]) -> Result<Option<DetectPrResponse>, String> {
+    let view_json: serde_json::Value = serde_json::from_slice(output)
+        .map_err(|e| format!("Failed to parse PR view response: {e}"))?;
+    let viewed_pr_number = view_json["number"].as_u64().unwrap_or(0) as u32;
+    let pr_url = view_json["url"].as_str().unwrap_or("").to_string();
+    let title = view_json["title"].as_str().unwrap_or("").to_string();
+
+    if viewed_pr_number == 0 || pr_url.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(DetectPrResponse {
+        pr_number: viewed_pr_number,
+        pr_url,
+        title,
+    }))
+}
+
+/// Resolve PR number/url/title via `gh pr view <number>`.
+fn view_pr_link_by_number(
+    app: &AppHandle,
+    worktree_path: &str,
+    pr_number: u32,
+) -> Result<Option<DetectPrResponse>, String> {
+    let gh = resolve_gh_binary(app);
+    let output = gh_command(&gh, worktree_path)
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "number,url,title",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run gh pr view #{pr_number}: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!("gh pr view #{pr_number} failed: {stderr}");
+        return Ok(None);
+    }
+
+    parse_pr_view_link(&output.stdout)
+}
+
+fn save_worktree_pr_link(
+    app: &AppHandle,
+    worktree_id: &str,
+    pr_number: u32,
+    pr_url: &str,
+) -> Result<(), String> {
+    let mut data = load_projects_data(app)?;
+    if let Some(wt) = data.worktrees.iter_mut().find(|w| w.id == worktree_id) {
+        wt.pr_number = Some(pr_number);
+        wt.pr_url = Some(pr_url.to_string());
+        save_projects_data(app, &data)?;
+    }
+    Ok(())
+}
+
 /// Detect and link an existing PR for the current branch of a worktree.
 ///
 /// Checks explicitly for an open PR. If found, saves the PR info to the
@@ -6448,11 +6653,34 @@ pub async fn detect_and_link_pr(
 ) -> Result<Option<DetectPrResponse>, String> {
     log::trace!("Detecting PR for worktree {worktree_id} at {worktree_path}");
 
+    // Base sessions represent the repository's default branch, not a PR head.
+    // `gh pr list --head <branch>` also returns fork PRs with the same branch
+    // name, so auto-linking here can route pushes into an unrelated fork PR.
+    if let Ok(mut data) = load_projects_data(&app) {
+        if let Some(worktree) = data.worktrees.iter_mut().find(|w| w.id == worktree_id) {
+            if worktree.session_type == SessionType::Base {
+                if clear_invalid_base_pr_link(worktree) {
+                    save_projects_data(&app, &data)?;
+                    log::warn!("Removed invalid PR link from base session {worktree_id}");
+                }
+                return Ok(None);
+            }
+        }
+    }
+
+    detect_and_link_pr_for_worktree(&app, &worktree_id, &worktree_path)
+}
+
+fn detect_and_link_pr_for_worktree(
+    app: &AppHandle,
+    worktree_id: &str,
+    worktree_path: &str,
+) -> Result<Option<DetectPrResponse>, String> {
     // Preserve an intentional link (opened from a PR, or already fully linked).
     // Branch-name detection is best-effort and can match the wrong fork PR when
     // several PRs share a head name, or clear a correct link after a temp-branch
     // checkout renames the local head.
-    let (existing_pr_number, existing_pr_url) = match load_projects_data(&app) {
+    let (existing_pr_number, existing_pr_url) = match load_projects_data(app) {
         Ok(data) => data
             .worktrees
             .iter()
@@ -6469,7 +6697,27 @@ pub async fn detect_and_link_pr(
         return Ok(None);
     }
 
-    if let Some(response) = find_open_pr_for_branch(&app, &worktree_path)? {
+    // Older PR checkouts stored the number but left the URL empty. Fill it by
+    // exact PR number so magic Open/Merge/status work without branch detection.
+    if let Some(pr_number) = existing_pr_number {
+        if existing_pr_url.is_none() {
+            if let Some(response) = view_pr_link_by_number(app, worktree_path, pr_number)? {
+                log::trace!(
+                    "Filled missing PR URL for worktree {worktree_id} from PR #{pr_number}"
+                );
+                let _ =
+                    save_worktree_pr_link(app, worktree_id, response.pr_number, &response.pr_url);
+                return Ok(Some(response));
+            }
+            log::trace!(
+                "Could not resolve URL for linked PR #{pr_number} on worktree {worktree_id}"
+            );
+            // Keep the intentional number; do not replace via branch name.
+            return Ok(None);
+        }
+    }
+
+    if let Some(response) = find_open_pr_for_branch(app, worktree_path)? {
         // If the worktree was created from a specific PR but URL is still missing,
         // only accept a branch match for that same number — never overwrite with
         // a different PR that happens to share the head branch name.
@@ -6488,13 +6736,7 @@ pub async fn detect_and_link_pr(
             response.pr_number
         );
 
-        if let Ok(mut data) = load_projects_data(&app) {
-            if let Some(wt) = data.worktrees.iter_mut().find(|w| w.id == worktree_id) {
-                wt.pr_number = Some(response.pr_number);
-                wt.pr_url = Some(response.pr_url.clone());
-                let _ = save_projects_data(&app, &data);
-            }
-        }
+        let _ = save_worktree_pr_link(app, worktree_id, response.pr_number, &response.pr_url);
 
         return Ok(Some(response));
     }
@@ -6514,6 +6756,25 @@ pub async fn detect_and_link_pr(
     }
 
     Ok(None)
+}
+
+fn clear_invalid_base_pr_link(worktree: &mut Worktree) -> bool {
+    if worktree.session_type != SessionType::Base {
+        return false;
+    }
+    let had_pr_link = worktree.pr_number.is_some()
+        || worktree.pr_url.is_some()
+        || worktree.pr_push_remote.is_some()
+        || worktree.pr_push_branch.is_some();
+    if had_pr_link {
+        worktree.pr_number = None;
+        worktree.pr_url = None;
+        worktree.pr_push_remote = None;
+        worktree.pr_push_branch = None;
+        worktree.cached_pr_status = None;
+        worktree.cached_check_status = None;
+    }
+    had_pr_link
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -6613,9 +6874,222 @@ pub async fn trigger_coderabbit_pr_review(
     })
 }
 
+/// Whether any worktree (other than `exclude_worktree_id`) still references `remote`
+/// as a PR push target or base remote. Used so we don't drop a fork remote while
+/// another session still depends on it.
+fn remote_still_referenced_by_other_worktrees(
+    data: &super::types::ProjectsData,
+    exclude_worktree_id: &str,
+    remote: &str,
+) -> bool {
+    data.worktrees.iter().any(|w| {
+        w.id != exclude_worktree_id
+            && (w.pr_push_remote.as_deref() == Some(remote)
+                || w.base_remote.as_deref() == Some(remote))
+    })
+}
+
+/// Remove Jean-managed PR/fork remotes that are no longer needed after a PR is
+/// cleared or a worktree is deleted.
+///
+/// Candidates: remembered `pr_push_remote` plus the branch's configured remote
+/// (what `gh pr checkout` often adds for cross-repo forks). Never removes
+/// `origin`. Skips remotes still referenced by other worktrees.
+fn cleanup_unused_pr_remotes(
+    data: &super::types::ProjectsData,
+    exclude_worktree_id: &str,
+    repo_path: &str,
+    pr_push_remote: Option<&str>,
+    branch: Option<&str>,
+) {
+    let mut candidates: Vec<String> = Vec::new();
+
+    if let Some(remote) = pr_push_remote {
+        if git::is_ephemeral_pr_remote(remote) {
+            candidates.push(remote.to_string());
+        }
+    }
+
+    if let Some(branch) = branch {
+        if let Some(configured) = git::configured_branch_remote(repo_path, branch) {
+            if git::is_ephemeral_pr_remote(&configured)
+                && !candidates.iter().any(|c| c == &configured)
+            {
+                candidates.push(configured);
+            }
+        }
+    }
+
+    for remote in candidates {
+        if remote_still_referenced_by_other_worktrees(data, exclude_worktree_id, &remote) {
+            log::trace!("Keeping remote '{remote}' — still referenced by another worktree");
+            continue;
+        }
+        git::try_remove_ephemeral_remote(repo_path, &remote);
+    }
+}
+
+/// After `gh pr checkout` (or a manual PR fetch), remember the branch's
+/// configured remote when it is a non-origin fork remote so later PR cleanup
+/// can remove it from git.
+fn detect_ephemeral_pr_push_target(
+    repo_path: &str,
+    branch: &str,
+) -> (Option<String>, Option<String>) {
+    match git::configured_branch_remote(repo_path, branch) {
+        Some(remote) if git::is_ephemeral_pr_remote(&remote) => {
+            (Some(remote), Some(branch.to_string()))
+        }
+        _ => (None, None),
+    }
+}
+
+#[cfg(test)]
+mod pr_remote_cleanup_tests {
+    use super::super::types::ProjectsData;
+    use super::*;
+
+    fn minimal_worktree(
+        id: &str,
+        pr_push_remote: Option<&str>,
+        base_remote: Option<&str>,
+    ) -> Worktree {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "project_id": "proj",
+            "name": id,
+            "path": format!("/tmp/{id}"),
+            "branch": "feature",
+            "created_at": 0,
+            "pr_push_remote": pr_push_remote,
+            "base_remote": base_remote,
+        }))
+        .expect("minimal worktree")
+    }
+
+    #[test]
+    fn remote_still_referenced_checks_other_worktrees_only() {
+        let data = ProjectsData {
+            projects: vec![],
+            worktrees: vec![
+                minimal_worktree("a", Some("fork-a"), None),
+                minimal_worktree("b", Some("fork-b"), None),
+                minimal_worktree("c", None, Some("fork-a")),
+            ],
+        };
+
+        // Excluding `a` — still referenced as base_remote by `c`
+        assert!(remote_still_referenced_by_other_worktrees(
+            &data, "a", "fork-a"
+        ));
+        // Excluding `b` — nobody else uses fork-b
+        assert!(!remote_still_referenced_by_other_worktrees(
+            &data, "b", "fork-b"
+        ));
+        // Excluding `c` — `a` still has pr_push_remote fork-a
+        assert!(remote_still_referenced_by_other_worktrees(
+            &data, "c", "fork-a"
+        ));
+    }
+
+    #[test]
+    fn base_session_never_uses_pr_aware_push() {
+        let mut base = minimal_worktree("base", Some("contributor"), None);
+        base.session_type = SessionType::Base;
+        base.pr_number = Some(9822);
+
+        let data = ProjectsData {
+            projects: vec![],
+            worktrees: vec![base],
+        };
+
+        assert_eq!(
+            effective_pr_number_for_push(&data, "/tmp/base", Some(9822)),
+            None
+        );
+    }
+
+    #[test]
+    fn regular_worktree_keeps_pr_aware_push() {
+        let mut worktree = minimal_worktree("feature", Some("contributor"), None);
+        worktree.pr_number = Some(42);
+
+        let data = ProjectsData {
+            projects: vec![],
+            worktrees: vec![worktree],
+        };
+
+        assert_eq!(
+            effective_pr_number_for_push(&data, "/tmp/feature", Some(42)),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn base_session_pr_link_is_cleared() {
+        let mut base = minimal_worktree("base", Some("contributor"), None);
+        base.session_type = SessionType::Base;
+        base.pr_number = Some(9822);
+        base.pr_url = Some("https://github.com/acme/app/pull/9822".to_string());
+        base.pr_push_branch = Some("v4.x".to_string());
+        base.cached_pr_status = Some("open".to_string());
+
+        assert!(clear_invalid_base_pr_link(&mut base));
+        assert_eq!(base.pr_number, None);
+        assert_eq!(base.pr_url, None);
+        assert_eq!(base.pr_push_remote, None);
+        assert_eq!(base.pr_push_branch, None);
+        assert_eq!(base.cached_pr_status, None);
+    }
+
+    #[test]
+    fn cleanup_unused_pr_remotes_removes_only_unreferenced_forks() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let path = repo.to_str().unwrap();
+
+        // Minimal git repo with two fork remotes + origin
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "--initial-branch", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "init"]);
+        run(&["remote", "add", "origin", "https://example.com/origin.git"]);
+        run(&["remote", "add", "fork-keep", "https://example.com/keep.git"]);
+        run(&["remote", "add", "fork-drop", "https://example.com/drop.git"]);
+        run(&["config", "branch.main.remote", "fork-drop"]);
+
+        let data = ProjectsData {
+            projects: vec![],
+            worktrees: vec![
+                // Being cleared
+                minimal_worktree("clearing", Some("fork-drop"), None),
+                // Still uses fork-keep
+                minimal_worktree("other", Some("fork-keep"), None),
+            ],
+        };
+
+        cleanup_unused_pr_remotes(&data, "clearing", path, Some("fork-drop"), Some("main"));
+
+        assert!(!git::remote_exists(path, "fork-drop"));
+        assert!(git::remote_exists(path, "fork-keep"));
+        assert!(git::remote_exists(path, "origin"));
+    }
+}
+
 /// Clear PR information from a worktree
 ///
 /// Called when a PR is closed or merged and the user wants to create a new one.
+/// Also removes Jean-managed fork remotes that were added for that PR when no
+/// other worktree still references them.
 pub async fn clear_worktree_pr(app: AppHandle, worktree_id: String) -> Result<(), String> {
     log::trace!("Clearing PR info for worktree {worktree_id}");
 
@@ -6627,6 +7101,11 @@ pub async fn clear_worktree_pr(app: AppHandle, worktree_id: String) -> Result<()
         .find(|w| w.id == worktree_id)
         .ok_or_else(|| format!("Worktree not found: {worktree_id}"))?;
 
+    let project_id = worktree.project_id.clone();
+    let worktree_path = worktree.path.clone();
+    let branch = worktree.branch.clone();
+    let pr_push_remote = worktree.pr_push_remote.clone();
+
     worktree.pr_number = None;
     worktree.pr_url = None;
     worktree.pr_push_remote = None;
@@ -6635,6 +7114,21 @@ pub async fn clear_worktree_pr(app: AppHandle, worktree_id: String) -> Result<()
     worktree.cached_check_status = None;
 
     save_projects_data(&app, &data)?;
+
+    // Prefer the main project path (shared gitdir / remotes); fall back to the
+    // worktree path if the project record is missing.
+    let repo_path = data
+        .find_project(&project_id)
+        .map(|p| p.path.as_str())
+        .unwrap_or(worktree_path.as_str());
+
+    cleanup_unused_pr_remotes(
+        &data,
+        &worktree_id,
+        repo_path,
+        pr_push_remote.as_deref(),
+        Some(branch.as_str()),
+    );
 
     log::trace!("Successfully cleared PR info for worktree {worktree_id}");
     Ok(())
@@ -7424,12 +7918,18 @@ pub async fn create_pr_with_ai_content(
         .find_project(&worktree.project_id)
         .ok_or_else(|| format!("Project not found: {}", worktree.project_id))?;
 
-    let target_branch = &project.default_branch;
+    // Prefer the worktree's base (e.g. feature branch when stacked) over the
+    // project default so PRs open against the branch the worktree was created from.
+    let target_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
     let current_branch = git::get_current_branch(&worktree_path)?;
     check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
     // Check if we're on the target branch (can't create PR to same branch)
-    if current_branch == *target_branch {
+    if current_branch == target_branch {
         return Err(format!(
             "Cannot create PR: current branch '{current_branch}' is the same as target branch"
         ));
@@ -7602,7 +8102,7 @@ pub async fn create_pr_with_ai_content(
         &app,
         &worktree_path,
         &current_branch,
-        target_branch,
+        &target_branch,
         custom_prompt.as_deref(),
         model.as_deref(),
         &context_content,
@@ -7654,14 +8154,14 @@ pub async fn create_pr_with_ai_content(
     log::trace!("Generated PR title: {}", pr_content.title);
     check_pr_creation_cancelled(&pr_creation.cancelled)?;
 
-    // Create the PR using gh CLI
-    log::trace!("Creating PR with gh CLI");
+    // Create the PR using gh CLI (base = worktree base branch when set)
+    log::trace!("Creating PR with gh CLI against base branch: {target_branch}");
     let output = gh_command(&gh, &worktree_path)
         .args([
             "pr",
             "create",
             "--base",
-            target_branch,
+            &target_branch,
             "--title",
             &pr_content.title,
             "--body",
@@ -8044,6 +8544,19 @@ fn generate_pr_content_from_inputs(
         )?;
         let mut response: PrContentResponse = serde_json::from_str(&json_str)
             .map_err(|error| format!("Failed to parse Kimi PR content: {error}"))?;
+        response.body = augment_pr_references_in_body(&response.body, related_pr_issue_refs);
+        return Ok(response);
+    }
+    if backend == crate::chat::types::Backend::Antigravity {
+        let json_str = crate::chat::antigravity::execute_one_shot_antigravity(
+            app,
+            &prompt,
+            model_str,
+            Some(PR_CONTENT_SCHEMA),
+            Some(std::path::Path::new(repo_path)),
+        )?;
+        let mut response: PrContentResponse = serde_json::from_str(&json_str)
+            .map_err(|error| format!("Failed to parse Antigravity PR content: {error}"))?;
         response.body = augment_pr_references_in_body(&response.body, related_pr_issue_refs);
         return Ok(response);
     }
@@ -8610,7 +9123,16 @@ fn push_for_commit(
     remote: Option<&str>,
     pr_number: Option<u32>,
 ) -> Result<(bool, bool), String> {
-    match pr_number {
+    let mut data = load_projects_data(app)?;
+    let effective_pr_number = effective_pr_number_for_push(&data, repo_path, pr_number);
+    if let Some(worktree) = data.worktrees.iter_mut().find(|w| w.path == repo_path) {
+        if clear_invalid_base_pr_link(worktree) {
+            save_projects_data(app, &data)?;
+            log::warn!("Removed invalid PR link from base session before commit push");
+        }
+    }
+
+    match effective_pr_number {
         Some(pr) => {
             let result = git::git_push_to_pr(repo_path, pr, &resolve_gh_binary(app))?;
             Ok((result.fell_back, result.permission_denied))
@@ -8799,6 +9321,17 @@ fn generate_commit_message_once(
         )?;
         return serde_json::from_str(&json_str)
             .map_err(|error| format!("Failed to parse Kimi commit message: {error}"));
+    }
+    if backend == crate::chat::types::Backend::Antigravity {
+        let json_str = crate::chat::antigravity::execute_one_shot_antigravity(
+            app,
+            prompt,
+            model_str,
+            Some(COMMIT_MESSAGE_SCHEMA),
+            working_dir,
+        )?;
+        return serde_json::from_str(&json_str)
+            .map_err(|error| format!("Failed to parse Antigravity commit message: {error}"));
     }
 
     log::trace!("Generating commit message with Claude CLI (JSON schema)");
@@ -9138,6 +9671,55 @@ pub struct ReviewResponse {
     pub approval_status: String,
 }
 
+fn validate_review_response(
+    response: ReviewResponse,
+    working_dir: Option<&Path>,
+) -> Result<ReviewResponse, String> {
+    let Some(root) = working_dir else {
+        return Ok(response);
+    };
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve review root: {error}"))?;
+    for finding in &response.findings {
+        let relative = Path::new(&finding.file);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "Review finding uses an unsafe file path: {}",
+                finding.file
+            ));
+        }
+        let path = root.join(relative);
+        let canonical = path
+            .canonicalize()
+            .map_err(|_| format!("Review finding references a missing file: {}", finding.file))?;
+        if !canonical.starts_with(&root) {
+            return Err(format!(
+                "Review finding is outside the reviewed worktree: {}",
+                finding.file
+            ));
+        }
+        if let Some(line) = finding.line {
+            let line_count = std::fs::read_to_string(&canonical)
+                .map_err(|error| format!("Failed to read {}: {error}", finding.file))?
+                .lines()
+                .count()
+                .max(1) as u32;
+            if line == 0 || line > line_count {
+                return Err(format!(
+                    "Review finding line {line} is outside {} (1-{line_count})",
+                    finding.file
+                ));
+            }
+        }
+    }
+    Ok(response)
+}
+
 fn extract_codex_review_structured_output(output: &str) -> Result<String, String> {
     let mut last_agent_message = None;
 
@@ -9424,6 +10006,18 @@ fn generate_review(
         return serde_json::from_str(&json_str)
             .map_err(|error| format!("Failed to parse Kimi review: {error}"));
     }
+    if backend == crate::chat::types::Backend::Antigravity {
+        let json_str = crate::chat::antigravity::execute_one_shot_antigravity(
+            app,
+            prompt,
+            model_str,
+            Some(REVIEW_SCHEMA),
+            working_dir,
+        )?;
+        let response = serde_json::from_str(&json_str)
+            .map_err(|error| format!("Failed to parse Antigravity review: {error}"))?;
+        return validate_review_response(response, working_dir);
+    }
 
     let cli_path = resolve_cli_binary(app);
     if !cli_path.exists() {
@@ -9498,7 +10092,11 @@ fn generate_review(
         .map_err(|e| format!("Failed to parse review response: {e}"))
 }
 
-fn select_review_target_branch(
+/// Resolve the git/PR target branch for a worktree.
+///
+/// Priority: linked PR base → worktree `base_branch` (branch the worktree was
+/// created from) → project default. Empty strings are treated as missing.
+fn select_target_branch(
     linked_pr_base: Option<&str>,
     worktree_base: Option<&str>,
     project_default: &str,
@@ -9558,7 +10156,7 @@ pub async fn run_review_with_ai(
     } else {
         None
     };
-    let target_branch = select_review_target_branch(
+    let target_branch = select_target_branch(
         linked_pr_base.as_deref(),
         worktree_base.as_deref(),
         &project_default,
@@ -9570,9 +10168,10 @@ pub async fn run_review_with_ai(
     // Get commit history (non-fatal — same reason)
     let commits = get_branch_commits(&worktree_path, &target_branch, "HEAD").unwrap_or_default();
 
-    // Get uncommitted changes (staged + unstaged for tracked files)
+    // Get uncommitted changes (staged + unstaged for tracked files).
+    // core.quotePath=false: raw UTF-8 paths for non-ASCII names (#631).
     let uncommitted_output = wsl_aware_command("git", Some(Path::new(&worktree_path)))
-        .args(["diff", "HEAD"])
+        .args(["-c", "core.quotePath=false", "diff", "HEAD"])
         .output()
         .map_err(|e| format!("Failed to get uncommitted diff: {e}"))?;
 
@@ -9583,9 +10182,15 @@ pub async fn run_review_with_ai(
         String::new()
     };
 
-    // Get untracked files
+    // Get untracked files (raw UTF-8 paths — #631)
     let untracked_output = wsl_aware_command("git", Some(Path::new(&worktree_path)))
-        .args(["ls-files", "--others", "--exclude-standard"])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ])
         .output()
         .map_err(|e| format!("Failed to list untracked files: {e}"))?;
 
@@ -9969,12 +10574,14 @@ async fn update_review_session_state(
         None,
         None,
         None,
+        None, // pending_opencode_permission_requests
         None,
         None,
         None,
         None,
         None,
         is_reviewing,
+        None, // status_override
         None,
         None,
         None,
@@ -10562,6 +11169,17 @@ fn persist_pr_push_target(
     Ok(())
 }
 
+fn effective_pr_number_for_push(
+    data: &super::types::ProjectsData,
+    worktree_path: &str,
+    requested_pr_number: Option<u32>,
+) -> Option<u32> {
+    match data.worktrees.iter().find(|w| w.path == worktree_path) {
+        Some(worktree) if worktree.session_type == SessionType::Base => None,
+        _ => requested_pr_number,
+    }
+}
+
 /// Push current branch to remote. If pr_number is provided, uses PR-aware push
 /// that handles fork remotes and uses --force-with-lease.
 pub async fn git_push(
@@ -10570,8 +11188,16 @@ pub async fn git_push(
     pr_number: Option<u32>,
     remote: Option<String>,
 ) -> Result<GitPushResponse, String> {
-    log::trace!("Pushing changes for worktree: {worktree_path}, pr_number: {pr_number:?}, remote: {remote:?}");
-    match pr_number {
+    let mut data = load_projects_data(&app)?;
+    let effective_pr_number = effective_pr_number_for_push(&data, &worktree_path, pr_number);
+    if let Some(worktree) = data.worktrees.iter_mut().find(|w| w.path == worktree_path) {
+        if clear_invalid_base_pr_link(worktree) {
+            save_projects_data(&app, &data)?;
+            log::warn!("Removed invalid PR link from base session before push");
+        }
+    }
+    log::trace!("Pushing changes for worktree: {worktree_path}, pr_number: {pr_number:?}, effective_pr_number: {effective_pr_number:?}, remote: {remote:?}");
+    match effective_pr_number {
         Some(pr) => {
             let result = git::git_push_to_pr(&worktree_path, pr, &resolve_gh_binary(&app))?;
             if let (Some(pushed_remote), Some(pushed_branch)) =
@@ -10736,7 +11362,8 @@ const RELEASE_NOTES_PROMPT: &str = r#"Generate release notes for changes since t
 
 ## Instructions
 
-- Write a concise release title.
+- Use only the release version as the release title and prefix the release version with `v` (for example, `v0.1.74`); do not add the app name, other words, or a second `v` if the version already has one.
+- Do not repeat the app name or release version at the top of the release notes body; start directly with the release content or first category heading.
 - Group changes into categories: Features, Fixes, Improvements, Breaking Changes (only include categories that have entries).
 - Explicitly use the merged pull request metadata above as the primary source, then use commits as fallback context.
 - Inspect PR titles, PR bodies, and PR commit messages for GitHub closing keywords: close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved.
@@ -10933,6 +11560,20 @@ fn generate_release_notes_content(
         )?;
         let mut response: ReleaseNotesResponse = serde_json::from_str(&json_str)
             .map_err(|error| format!("Failed to parse Kimi release notes: {error}"))?;
+        response.body =
+            augment_pr_references_in_body(&response.body, &release_notes_context.pr_issue_refs);
+        return Ok(response);
+    }
+    if backend == crate::chat::types::Backend::Antigravity {
+        let json_str = crate::chat::antigravity::execute_one_shot_antigravity(
+            app,
+            &prompt,
+            model_str,
+            Some(RELEASE_NOTES_SCHEMA),
+            Some(std::path::Path::new(project_path)),
+        )?;
+        let mut response: ReleaseNotesResponse = serde_json::from_str(&json_str)
+            .map_err(|error| format!("Failed to parse Antigravity release notes: {error}"))?;
         response.body =
             augment_pr_references_in_body(&response.body, &release_notes_context.pr_issue_refs);
         return Ok(response);
@@ -11257,8 +11898,8 @@ pub async fn merge_worktree_to_base(
         return Err("Cannot merge base branch into itself".to_string());
     }
 
-    // Validate: no open PR
-    if worktree.pr_url.is_some() {
+    // Validate: no open PR (checkout may store number before/without URL)
+    if worktree.pr_number.is_some() || worktree.pr_url.is_some() {
         return Err(
             "Cannot merge locally while a PR is open. Close or merge the PR on GitHub first."
                 .to_string(),
@@ -11332,12 +11973,17 @@ pub async fn merge_worktree_to_base(
         }
     }
 
-    // Perform the merge in main repo
+    // Merge into the worktree's base branch (not always the project default)
+    let base_branch = select_target_branch(
+        None,
+        worktree.base_branch.as_deref(),
+        &project.default_branch,
+    );
     let merge_result = git::merge_branch_to_base(
         &project.path,
         &worktree.path,
         &worktree.branch,
-        &project.default_branch,
+        &base_branch,
         merge_type,
     );
 
@@ -12310,8 +12956,7 @@ pub async fn fetch_worktrees_status(app: AppHandle, project_id: String) -> Resul
                 }
             };
 
-            let base_branch =
-                resolve_worktree_status_base(&worktree, &project_default_branch);
+            let base_branch = resolve_worktree_status_base(&worktree, &project_default_branch);
 
             let info = ActiveWorktreeInfo {
                 worktree_id: worktree.id.clone(),
@@ -12575,12 +13220,25 @@ fn get_home_dir() -> Option<std::path::PathBuf> {
     })
 }
 
-/// Collect skills from a directory into a map (later inserts override earlier ones)
+const MAX_SKILL_DIRECTORY_DEPTH: usize = 8;
+
+/// Collect skills from a directory into a map (later inserts override earlier ones).
+///
+/// Category directories are traversed recursively, but a directory containing a
+/// `SKILL.md` is treated as a skill root and its children are not visited.
 fn collect_skills_from_dir(
     dir: &std::path::Path,
     skills: &mut std::collections::HashMap<String, ClaudeSkill>,
 ) {
-    if !dir.exists() {
+    collect_skills_from_dir_inner(dir, skills, 0);
+}
+
+fn collect_skills_from_dir_inner(
+    dir: &std::path::Path,
+    skills: &mut std::collections::HashMap<String, ClaudeSkill>,
+    depth: usize,
+) {
+    if depth > MAX_SKILL_DIRECTORY_DEPTH {
         return;
     }
 
@@ -12592,22 +13250,48 @@ fn collect_skills_from_dir(
         }
     };
 
+    let mut entries: Vec<_> = entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                log::warn!("Failed to read directory entry in {dir:?}: {error}");
+                None
+            }
+        })
+        .collect();
+    entries.sort_by_key(|entry| entry.file_name());
+
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("Failed to read directory entry: {e}");
+        let entry_depth = depth + 1;
+        if entry_depth > MAX_SKILL_DIRECTORY_DEPTH {
+            continue;
+        }
+
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                log::warn!("Failed to read file type for {:?}: {error}", entry.path());
                 continue;
             }
         };
-
         let path = entry.path();
-        if !path.is_dir() {
+        if !file_type.is_dir() || file_type.is_symlink() {
             continue;
         }
 
         let skill_file = path.join("SKILL.md");
-        if !skill_file.exists() {
+        let is_skill_file = match std::fs::symlink_metadata(&skill_file) {
+            Ok(metadata) => metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                log::warn!("Failed to inspect skill file {skill_file:?}: {error}");
+                false
+            }
+        };
+        if !is_skill_file {
+            if entry_depth < MAX_SKILL_DIRECTORY_DEPTH {
+                collect_skills_from_dir_inner(&path, skills, entry_depth);
+            }
             continue;
         }
 
@@ -12722,22 +13406,36 @@ pub async fn list_claude_skills(worktree_path: Option<String>) -> Result<Vec<Cla
     Ok(skills)
 }
 
-/// List Codex CLI skills from ~/.codex/skills/
-pub async fn list_codex_skills() -> Result<Vec<ClaudeSkill>, String> {
-    log::trace!("Listing Codex CLI skills");
-
+fn collect_codex_skills(home: &Path, worktree: Option<&Path>) -> Vec<ClaudeSkill> {
     let mut skills_map = std::collections::HashMap::new();
 
-    if let Some(home) = get_home_dir() {
-        collect_skills_from_dir(&home.join(".codex").join("skills"), &mut skills_map);
-        collect_skills_from_dir(
-            &jean_global_backend_skills_dir(&home, "codex"),
-            &mut skills_map,
-        );
+    // Current Agents Skills locations (user + project)
+    collect_skills_from_dir(&home.join(".agents").join("skills"), &mut skills_map);
+    // Legacy Codex user location
+    collect_skills_from_dir(&home.join(".codex").join("skills"), &mut skills_map);
+    // Jean-managed mirror used for cross-backend installs
+    collect_skills_from_dir(
+        &jean_global_backend_skills_dir(home, "codex"),
+        &mut skills_map,
+    );
+    if let Some(worktree) = worktree {
+        collect_skills_from_dir(&worktree.join(".agents").join("skills"), &mut skills_map);
+        // Some projects still keep Codex skills under .codex/skills
+        collect_skills_from_dir(&worktree.join(".codex").join("skills"), &mut skills_map);
     }
 
     let mut skills: Vec<ClaudeSkill> = skills_map.into_values().collect();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+/// List Codex CLI skills from the current Codex and legacy Jean locations.
+pub async fn list_codex_skills(worktree_path: Option<String>) -> Result<Vec<ClaudeSkill>, String> {
+    log::trace!("Listing Codex CLI skills");
+
+    let skills = get_home_dir()
+        .map(|home| collect_codex_skills(&home, worktree_path.as_deref().map(Path::new)))
+        .unwrap_or_default();
     log::trace!("Found {} Codex CLI skills", skills.len());
     Ok(skills)
 }
@@ -13203,6 +13901,161 @@ mod tests {
     use crate::chat::types::Backend;
     use std::path::Path;
 
+    #[test]
+    fn codex_skills_include_agents_user_and_project_directories() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path().join("home");
+        let worktree = temp.path().join("repo");
+        let user_skill = home.join(".agents/skills/user-skill");
+        let project_skill = worktree.join(".agents/skills/project-skill");
+        let project_legacy_skill = worktree.join(".codex/skills/legacy-project-skill");
+        std::fs::create_dir_all(&user_skill).expect("user skill dir");
+        std::fs::create_dir_all(&project_skill).expect("project skill dir");
+        std::fs::create_dir_all(&project_legacy_skill).expect("legacy project skill dir");
+        std::fs::write(user_skill.join("SKILL.md"), "# User skill\n").expect("user skill");
+        std::fs::write(project_skill.join("SKILL.md"), "# Project skill\n").expect("project skill");
+        std::fs::write(
+            project_legacy_skill.join("SKILL.md"),
+            "# Legacy project skill\n",
+        )
+        .expect("legacy project skill");
+
+        let skills = collect_codex_skills(&home, Some(&worktree));
+        let names: Vec<_> = skills.into_iter().map(|skill| skill.name).collect();
+
+        assert_eq!(
+            names,
+            vec!["legacy-project-skill", "project-skill", "user-skill"]
+        );
+    }
+
+    fn collect_test_skills(root: &Path) -> std::collections::HashMap<String, ClaudeSkill> {
+        let mut skills = std::collections::HashMap::new();
+        collect_skills_from_dir(root, &mut skills);
+        skills
+    }
+
+    #[test]
+    fn skill_discovery_finds_flat_and_nested_skills() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("skills");
+        let flat = root.join("flat");
+        let nested = root.join("engineering/testing/tdd");
+        std::fs::create_dir_all(&flat).expect("flat skill dir");
+        std::fs::create_dir_all(&nested).expect("nested skill dir");
+        std::fs::write(flat.join("SKILL.md"), "# Flat skill\n").expect("flat skill");
+        std::fs::write(nested.join("SKILL.md"), "# Test-driven development\n")
+            .expect("nested skill");
+        std::fs::write(root.join("README.md"), "not a skill\n").expect("readme");
+        std::fs::create_dir_all(root.join("empty-category")).expect("empty category");
+
+        let skills = collect_test_skills(&root);
+
+        assert_eq!(skills.len(), 2);
+        assert_eq!(
+            skills
+                .get("flat")
+                .and_then(|skill| skill.description.as_deref()),
+            Some("Flat skill")
+        );
+        assert_eq!(
+            skills
+                .get("tdd")
+                .map(|skill| std::path::PathBuf::from(&skill.path)),
+            Some(nested.join("SKILL.md"))
+        );
+
+        assert!(collect_test_skills(&root.join("missing")).is_empty());
+    }
+
+    #[test]
+    fn skill_discovery_stops_descending_at_a_skill_root() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("skills");
+        let parent = root.join("parent-skill");
+        let child = parent.join("nested/child-skill");
+        std::fs::create_dir_all(&child).expect("child skill dir");
+        std::fs::write(parent.join("SKILL.md"), "# Parent\n").expect("parent skill");
+        std::fs::write(child.join("SKILL.md"), "# Child\n").expect("child skill");
+
+        let skills = collect_test_skills(&root);
+
+        assert_eq!(skills.len(), 1);
+        assert!(skills.contains_key("parent-skill"));
+        assert!(!skills.contains_key("child-skill"));
+    }
+
+    #[test]
+    fn skill_discovery_respects_the_directory_depth_limit() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("skills");
+
+        let mut at_limit = root.clone();
+        for index in 1..MAX_SKILL_DIRECTORY_DEPTH {
+            at_limit.push(format!("category-{index}"));
+        }
+        at_limit.push("at-limit");
+        std::fs::create_dir_all(&at_limit).expect("skill at limit dir");
+        std::fs::write(at_limit.join("SKILL.md"), "# At limit\n").expect("skill at limit");
+
+        let mut beyond_limit = root.clone();
+        for index in 1..=MAX_SKILL_DIRECTORY_DEPTH {
+            beyond_limit.push(format!("deep-category-{index}"));
+        }
+        beyond_limit.push("beyond-limit");
+        std::fs::create_dir_all(&beyond_limit).expect("skill beyond limit dir");
+        std::fs::write(beyond_limit.join("SKILL.md"), "# Beyond limit\n")
+            .expect("skill beyond limit");
+
+        let skills = collect_test_skills(&root);
+
+        assert!(skills.contains_key("at-limit"));
+        assert!(!skills.contains_key("beyond-limit"));
+    }
+
+    #[test]
+    fn skill_discovery_resolves_duplicate_leaf_names_deterministically() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("skills");
+        let first = root.join("a-category/shared");
+        let last = root.join("z-category/shared");
+        std::fs::create_dir_all(&first).expect("first skill dir");
+        std::fs::create_dir_all(&last).expect("last skill dir");
+        std::fs::write(first.join("SKILL.md"), "# First\n").expect("first skill");
+        std::fs::write(last.join("SKILL.md"), "# Last\n").expect("last skill");
+
+        let skills = collect_test_skills(&root);
+
+        assert_eq!(
+            skills
+                .get("shared")
+                .and_then(|skill| skill.description.as_deref()),
+            Some("Last")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_discovery_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("skills");
+        let outside = temp.path().join("outside-skill");
+        let linked_file_skill = root.join("linked-file-skill");
+        std::fs::create_dir_all(&root).expect("skills root");
+        std::fs::create_dir_all(&outside).expect("outside skill dir");
+        std::fs::create_dir_all(&linked_file_skill).expect("linked file skill dir");
+        std::fs::write(outside.join("SKILL.md"), "# Outside\n").expect("outside skill");
+        symlink(&outside, root.join("linked-directory")).expect("directory symlink");
+        symlink(outside.join("SKILL.md"), linked_file_skill.join("SKILL.md"))
+            .expect("skill file symlink");
+
+        let skills = collect_test_skills(&root);
+
+        assert!(skills.is_empty());
+    }
+
     fn run_test_git(repo: &Path, args: &[&str]) {
         let output = silent_command("git")
             .args(args)
@@ -13218,6 +14071,28 @@ mod tests {
     }
 
     #[test]
+    fn changing_default_branch_checks_out_branch_in_project_repository() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo dir");
+        run_test_git(&repo, &["init", "-b", "main"]);
+        run_test_git(&repo, &["config", "user.email", "test@example.com"]);
+        run_test_git(&repo, &["config", "user.name", "Test User"]);
+        std::fs::write(repo.join("README.md"), "test\n").expect("write file");
+        run_test_git(&repo, &["add", "."]);
+        run_test_git(&repo, &["commit", "-m", "initial"]);
+        run_test_git(&repo, &["branch", "v4.x"]);
+
+        checkout_project_default_branch(repo.to_str().unwrap(), "v4.x")
+            .expect("checkout default branch");
+
+        assert_eq!(
+            git::get_current_branch(repo.to_str().unwrap()).unwrap(),
+            "v4.x"
+        );
+    }
+
+    #[test]
     fn format_open_error_uses_friendly_vscodium_name() {
         let not_found = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         assert_eq!(
@@ -13226,7 +14101,148 @@ mod tests {
         );
 
         let other = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        assert!(format_open_error("vscodium", &other).starts_with("Failed to open VSCodium ('codium'):"));
+        assert!(format_open_error("vscodium", &other)
+            .starts_with("Failed to open VSCodium ('codium'):"));
+    }
+
+    #[test]
+    fn is_skipped_file_browser_dir_covers_heavy_trees() {
+        assert!(is_skipped_file_browser_dir(".git"));
+        assert!(is_skipped_file_browser_dir("node_modules"));
+        assert!(is_skipped_file_browser_dir("target"));
+        assert!(is_skipped_file_browser_dir("vendor"));
+        assert!(is_skipped_file_browser_dir("Pods"));
+        assert!(!is_skipped_file_browser_dir(".env"));
+        assert!(!is_skipped_file_browser_dir("src"));
+        assert!(!is_skipped_file_browser_dir("app"));
+    }
+
+    #[tokio::test]
+    async fn list_worktree_files_includes_gitignored_env_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+
+        std::fs::write(root.join(".gitignore"), ".env\nnode_modules/\nvendor/\n")
+            .expect("gitignore");
+        std::fs::write(root.join(".env"), "SECRET=1\n").expect(".env");
+        std::fs::write(root.join(".env.example"), "SECRET=\n").expect(".env.example");
+        std::fs::write(root.join("README.md"), "hi\n").expect("readme");
+        std::fs::create_dir_all(root.join("node_modules/pkg")).expect("node_modules");
+        std::fs::write(root.join("node_modules/pkg/index.js"), "module.exports=1\n")
+            .expect("nested node_modules file");
+        std::fs::create_dir_all(root.join("vendor/pkg")).expect("vendor");
+        std::fs::write(root.join("vendor/pkg/autoload.php"), "<?php\n").expect("vendor file");
+        std::fs::create_dir_all(root.join("src")).expect("src");
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("main");
+
+        let files = list_worktree_files(root.to_string_lossy().to_string(), None, None)
+            .await
+            .expect("list files");
+        let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+
+        assert!(
+            paths.contains(&".env"),
+            "gitignored .env should be listed: {paths:?}"
+        );
+        assert!(
+            paths.contains(&".env.example"),
+            "hidden .env.example should be listed: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"README.md"),
+            "tracked file missing: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"src/main.rs"),
+            "nested file missing: {paths:?}"
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|p| *p == "node_modules" || p.starts_with("node_modules/")),
+            "node_modules should be pruned: {paths:?}"
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|p| *p == "vendor" || p.starts_with("vendor/")),
+            "vendor should be pruned: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| *p == ".git" || p.starts_with(".git/")),
+            ".git directory should be pruned: {paths:?}"
+        );
+        assert!(
+            paths.contains(&".gitignore"),
+            ".gitignore itself should still be listed: {paths:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_worktree_files_respects_max_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        for i in 0..10 {
+            std::fs::write(root.join(format!("f{i}.txt")), "x\n").expect("write file");
+        }
+
+        let files = list_worktree_files(root.to_string_lossy().to_string(), Some(3), None)
+            .await
+            .expect("list files");
+        assert_eq!(files.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn list_worktree_files_bfs_keeps_top_level_when_capped() {
+        // Regression: DFS into a deep heavy tree used to exhaust max_files and
+        // hide sibling top-level dirs (file browser looked nearly empty).
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+
+        std::fs::create_dir_all(root.join("app/deep/nested")).expect("app");
+        std::fs::write(root.join("app/deep/nested/leaf.php"), "<?php\n").expect("leaf");
+        std::fs::create_dir_all(root.join("bootstrap")).expect("bootstrap");
+        std::fs::write(root.join("bootstrap/app.php"), "<?php\n").expect("bootstrap file");
+        // Many files under a late-alphabet deep tree (would dominate a DFS budget)
+        std::fs::create_dir_all(root.join("zzz/deep")).expect("zzz");
+        for i in 0..50 {
+            std::fs::write(root.join("zzz/deep").join(format!("f{i}.txt")), "x\n")
+                .expect("zzz file");
+        }
+        std::fs::write(root.join("README.md"), "hi\n").expect("readme");
+
+        let files = list_worktree_files(root.to_string_lossy().to_string(), Some(8), None)
+            .await
+            .expect("list files");
+        let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+
+        assert!(
+            paths.iter().any(|p| *p == "app" || p.starts_with("app/")),
+            "top-level app should appear under cap: {paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| *p == "bootstrap" || p.starts_with("bootstrap/")),
+            "top-level bootstrap should appear under cap: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"README.md"),
+            "top-level README should appear under cap: {paths:?}"
+        );
+        assert_eq!(files.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn list_worktree_files_missing_path_returns_empty() {
+        let files = list_worktree_files(
+            "/tmp/jean-file-browser-path-that-does-not-exist-xyz".to_string(),
+            Some(10),
+            None,
+        )
+        .await
+        .expect("missing path should not error");
+        assert!(files.is_empty());
     }
 
     #[test]
@@ -13240,6 +14256,36 @@ mod tests {
         assert_eq!(response.pr_number, 42);
         assert_eq!(response.pr_url, "https://github.com/acme/app/pull/42");
         assert_eq!(response.title, "Ship it");
+    }
+
+    #[test]
+    fn parse_pr_view_link_returns_number_url_and_title() {
+        let response = parse_pr_view_link(
+            br#"{"number":99,"url":"https://github.com/acme/app/pull/99","title":"Checkout fix"}"#,
+        )
+        .expect("parse response")
+        .expect("pr link");
+
+        assert_eq!(response.pr_number, 99);
+        assert_eq!(response.pr_url, "https://github.com/acme/app/pull/99");
+        assert_eq!(response.title, "Checkout fix");
+    }
+
+    #[test]
+    fn parse_pr_view_link_rejects_missing_url() {
+        let response = parse_pr_view_link(br#"{"number":99,"url":"","title":"No url"}"#)
+            .expect("parse response");
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn generate_pr_worktree_name_prefers_pr_number_prefix() {
+        assert_eq!(
+            generate_pr_worktree_name(42, "feature/cool-thing"),
+            "pr-42-feature_cool-thing"
+        );
+        assert_eq!(generate_pr_worktree_name(7, "main"), "pr-7-main");
+        assert_eq!(generate_pr_worktree_name(7, ""), "pr-7");
     }
 
     #[test]
@@ -13349,24 +14395,30 @@ mod tests {
     }
 
     #[test]
-    fn review_target_branch_prefers_linked_pr_base() {
+    fn target_branch_prefers_linked_pr_base() {
         assert_eq!(
-            select_review_target_branch(Some("v4.x"), Some("develop"), "next"),
+            select_target_branch(Some("v4.x"), Some("develop"), "next"),
             "v4.x"
         );
     }
 
     #[test]
-    fn review_target_branch_falls_back_to_worktree_base() {
+    fn target_branch_falls_back_to_worktree_base() {
         assert_eq!(
-            select_review_target_branch(None, Some("develop"), "next"),
+            select_target_branch(None, Some("develop"), "next"),
             "develop"
         );
     }
 
     #[test]
-    fn review_target_branch_falls_back_to_project_default() {
-        assert_eq!(select_review_target_branch(None, None, "next"), "next");
+    fn target_branch_falls_back_to_project_default() {
+        assert_eq!(select_target_branch(None, None, "next"), "next");
+    }
+
+    #[test]
+    fn target_branch_ignores_empty_worktree_base() {
+        assert_eq!(select_target_branch(None, Some("  "), "main"), "main");
+        assert_eq!(select_target_branch(None, Some(""), "main"), "main");
     }
 
     #[test]
@@ -13796,9 +14848,9 @@ mod tests {
             worktrees_dir: None,
             linear_api_key: None,
             linear_team_id: None,
-        linear_project_id: None,
-        outline_api_key: None,
-        outline_collection_id: None,
+            linear_project_id: None,
+            outline_api_key: None,
+            outline_collection_id: None,
             sentry_auth_token: None,
             sentry_organization_slug: None,
             sentry_project_slug: None,

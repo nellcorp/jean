@@ -4,6 +4,7 @@ import {
   type ClaudeModel,
 } from '@/types/preferences'
 import type { EffortLevel, ThinkingLevel } from '@/types/chat'
+import { isGeminiModel } from '@/lib/model-utils'
 
 export const MODEL_OPTIONS: { value: ClaudeModel; label: string }[] =
   modelOptions.map(option => ({
@@ -93,11 +94,20 @@ export const PI_MODEL_OPTIONS: { value: string; label: string }[] = [
 ]
 
 export const GROK_MODEL_OPTIONS: { value: string; label: string }[] = [
+  { value: 'grok/grok-4.6', label: 'Grok 4.6' },
   { value: 'grok/grok-4.5', label: 'Grok 4.5' },
 ]
 
 export const KIMI_MODEL_OPTIONS: { value: string; label: string }[] = [
   { value: 'kimi/default', label: 'Configured default' },
+]
+
+export const ANTIGRAVITY_MODEL_OPTIONS: { value: string; label: string }[] = [
+  { value: 'antigravity/auto', label: 'Auto' },
+  { value: 'antigravity/gemini-3.6-flash-high', label: 'Gemini 3.6 Flash (High)' },
+  { value: 'antigravity/gemini-3.6-flash-medium', label: 'Gemini 3.6 Flash (Medium)' },
+  { value: 'antigravity/gemini-3.5-flash-medium', label: 'Gemini 3.5 Flash (Medium)' },
+  { value: 'antigravity/gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' },
 ]
 
 export const KIMI_EFFORT_LEVEL_OPTIONS: {
@@ -108,6 +118,16 @@ export const KIMI_EFFORT_LEVEL_OPTIONS: {
   { value: 'off', label: 'Thinking Off', description: 'Disable thinking' },
   { value: 'high', label: 'Thinking On', description: 'Enable thinking' },
 ]
+
+export const ADAPTIVE_EFFORT_OPTION: {
+  value: EffortLevel
+  label: string
+  description: string
+} = {
+  value: 'adaptive',
+  label: 'Adaptive/Default',
+  description: 'Model default (no forced level)',
+}
 
 export const THINKING_LEVEL_OPTIONS: {
   value: ThinkingLevel
@@ -137,6 +157,14 @@ export const EFFORT_LEVEL_OPTIONS: {
   },
 ]
 
+/** Exact values accepted by Antigravity CLI 1.1.x: --effort low|medium|high. */
+export const ANTIGRAVITY_EFFORT_LEVEL_OPTIONS = [
+  ADAPTIVE_EFFORT_OPTION,
+  ...EFFORT_LEVEL_OPTIONS.filter(option =>
+    ['low', 'medium', 'high'].includes(option.value)
+  ),
+]
+
 export const CODEX_EFFORT_LEVEL_OPTIONS = EFFORT_LEVEL_OPTIONS.filter(
   option => option.value !== 'max' && option.value !== 'ultracode'
 )
@@ -153,6 +181,21 @@ export const PI_EFFORT_LEVEL_OPTIONS: {
   { value: 'high', label: 'High', description: 'High' },
   { value: 'xhigh', label: 'xHigh', description: 'Extra high' },
 ]
+
+/**
+ * Prepend Adaptive/Default only for Antigravity models (native adaptive thinking
+ * when no level is forced). Non-Antigravity levels are returned unchanged.
+ */
+export function withAdaptiveEffortOption<
+  T extends { value: string; label: string; description?: string },
+>(
+  levels: T[],
+  model?: string | null
+): (T | typeof ADAPTIVE_EFFORT_OPTION)[] {
+  if (!isGeminiModel(model)) return levels
+  if (levels.some(level => level.value === 'adaptive')) return levels
+  return [ADAPTIVE_EFFORT_OPTION, ...levels]
+}
 
 // Grok supports low/medium/high/xhigh/max natively. ultracode is a Jean
 // main-loop concept (xHigh + workflows), not a Grok CLI effort level.

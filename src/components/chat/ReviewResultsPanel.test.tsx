@@ -4,8 +4,13 @@ import userEvent from '@testing-library/user-event'
 import { useChatStore } from '@/store/chat-store'
 import { ReviewResultsPanel } from './ReviewResultsPanel'
 import type { ReviewResponse } from '@/types/projects'
+import {
+  DEFAULT_MAGIC_PROMPT_MODES,
+  defaultPreferences,
+} from '@/types/preferences'
 
 let isMobile = false
+let preferencesMock = { ...defaultPreferences }
 
 vi.mock('@/hooks/use-mobile', () => ({
   useIsMobile: () => isMobile,
@@ -15,9 +20,17 @@ vi.mock('@/lib/environment', () => ({
   isNativeApp: () => true,
 }))
 
+vi.mock('@/services/preferences', () => ({
+  usePreferences: () => ({ data: preferencesMock }),
+}))
+
 describe('ReviewResultsPanel', () => {
   beforeEach(() => {
     isMobile = false
+    preferencesMock = {
+      ...defaultPreferences,
+      magic_prompt_modes: { ...DEFAULT_MAGIC_PROMPT_MODES },
+    }
     Element.prototype.scrollIntoView = vi.fn()
     Element.prototype.hasPointerCapture ??= vi.fn(() => false)
     Element.prototype.setPointerCapture ??= vi.fn()
@@ -55,9 +68,12 @@ describe('ReviewResultsPanel', () => {
 
     render(<ReviewResultsPanel sessionId="session-1" />)
 
-    // Collapsed by default — expand to see details
+    // Collapsed by default — expand via the title control inside the row
+    const row = screen.getByTestId('review-finding-row-0')
     await userEvent.click(
-      screen.getByRole('button', { name: /null access after guard removal/i })
+      within(row).getByRole('button', {
+        name: /null access after guard removal/i,
+      })
     )
 
     expect(screen.getByText('Correctness')).toBeInTheDocument()
@@ -251,6 +267,12 @@ describe('ReviewResultsPanel', () => {
     expect(
       screen.getByRole('button', { name: /send separately/i })
     ).toBeInTheDocument()
+    expect(
+      screen.getAllByRole('button', { name: /send (to chat|separately)/i })
+    ).toEqual([
+      screen.getByRole('button', { name: /send to chat/i }),
+      screen.getByRole('button', { name: /send separately/i }),
+    ])
   })
 
   it('sends selected findings combined or separately', async () => {
@@ -310,6 +332,167 @@ describe('ReviewResultsPanel', () => {
     // Sorted by severity: critical (Second) before warning (First)
     expect(separateMessages[0]).toContain('Second finding')
     expect(separateMessages[1]).toContain('First finding')
+    expect(separateCall?.[1]).toBe('plan')
+  })
+
+  it('uses cmd+enter for separate chats and shift+cmd+enter for one chat', async () => {
+    const onSendFix = vi.fn()
+    useChatStore.getState().setReviewResults('session-1', {
+      summary: 'Two issues found.',
+      approval_status: 'changes_requested',
+      findings: [
+        {
+          severity: 'warning',
+          file: 'src/first.ts',
+          title: 'First',
+          description: 'First details.',
+        },
+        {
+          severity: 'warning',
+          file: 'src/second.ts',
+          title: 'Second',
+          description: 'Second details.',
+        },
+      ],
+    })
+
+    render(<ReviewResultsPanel sessionId="session-1" onSendFix={onSendFix} />)
+
+    screen.getByRole('region', { name: /review findings/i }).focus()
+    await userEvent.keyboard('{Meta>}{Enter}{/Meta}')
+    expect(Array.isArray(onSendFix.mock.calls[0]?.[0])).toBe(true)
+
+    onSendFix.mockClear()
+    await userEvent.keyboard('{Shift>}{Meta>}{Enter}{/Meta}{/Shift}')
+    expect(typeof onSendFix.mock.calls[0]?.[0]).toBe('string')
+  })
+
+  it('uses the selected reviewer fix_mode when sending findings', async () => {
+    preferencesMock = {
+      ...defaultPreferences,
+      magic_prompt_modes: {
+        ...DEFAULT_MAGIC_PROMPT_MODES,
+        code_review_fix_mode: 'plan',
+      },
+      magic_code_review_configs: [
+        {
+          backend: 'claude',
+          model: 'claude-fable-5',
+          fix_mode: 'plan',
+        },
+        {
+          backend: 'codex',
+          model: 'gpt-5.6-sol',
+          fix_mode: 'yolo',
+        },
+      ],
+    }
+    const onSendFix = vi.fn()
+    useChatStore.getState().setReviewResults('session-1', {
+      reviews: [
+        {
+          backend: 'claude',
+          model: 'claude-fable-5',
+          status: 'completed',
+          result: {
+            summary: 'Claude findings.',
+            approval_status: 'changes_requested',
+            findings: [
+              {
+                severity: 'warning',
+                file: 'src/App.tsx',
+                title: 'Claude finding',
+                description: 'Details.',
+                suggestion: 'Fix it',
+              },
+            ],
+          },
+        },
+        {
+          backend: 'codex',
+          model: 'gpt-5.6-sol',
+          status: 'completed',
+          result: {
+            summary: 'Codex findings.',
+            approval_status: 'changes_requested',
+            findings: [
+              {
+                severity: 'warning',
+                file: 'src/lib.ts',
+                title: 'Codex finding',
+                description: 'Details.',
+                suggestion: 'Fix it',
+              },
+            ],
+          },
+        },
+      ],
+    } as never)
+
+    render(<ReviewResultsPanel sessionId="session-1" onSendFix={onSendFix} />)
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /send to chat \(1\)/i })
+    )
+    expect(onSendFix).toHaveBeenCalledWith(expect.any(String), 'plan', {
+      backend: 'claude',
+      model: 'claude-fable-5',
+    })
+
+    onSendFix.mockClear()
+    await userEvent.click(screen.getByRole('combobox'))
+    await userEvent.click(
+      screen.getByRole('option', { name: 'Codex · gpt-5.6-sol' })
+    )
+    await userEvent.click(
+      screen.getByRole('button', { name: /send to chat \(1\)/i })
+    )
+    expect(onSendFix).toHaveBeenCalledWith(expect.any(String), 'yolo', {
+      backend: 'codex',
+      model: 'gpt-5.6-sol',
+    })
+  })
+
+  it('falls back to global code_review_fix_mode when reviewer has no fix_mode', async () => {
+    preferencesMock = {
+      ...defaultPreferences,
+      magic_prompt_modes: {
+        ...DEFAULT_MAGIC_PROMPT_MODES,
+        code_review_fix_mode: 'yolo',
+      },
+      magic_code_review_configs: [
+        {
+          backend: 'claude',
+          model: 'claude-fable-5',
+        },
+      ],
+    }
+    const onSendFix = vi.fn()
+    const reviewResults: ReviewResponse = {
+      summary: 'One issue found.',
+      approval_status: 'changes_requested',
+      findings: [
+        {
+          severity: 'warning',
+          file: 'src/App.tsx',
+          title: 'Finding',
+          description: 'Details.',
+          suggestion: 'Fix it',
+        },
+      ],
+    }
+
+    useChatStore.getState().setReviewResults('session-1', reviewResults)
+    render(<ReviewResultsPanel sessionId="session-1" onSendFix={onSendFix} />)
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /send to chat \(1\)/i })
+    )
+    expect(onSendFix).toHaveBeenCalledWith(
+      expect.any(String),
+      'yolo',
+      undefined
+    )
   })
 
   it('supports select all / deselect all', async () => {

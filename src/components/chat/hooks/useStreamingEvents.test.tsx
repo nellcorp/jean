@@ -898,6 +898,71 @@ describe('useStreamingEvents cancellation sanitization', () => {
     expect(useChatStore.getState().isSessionReviewing('session-1')).toBe(true)
   })
 
+  it('does not restore input when cancelling an already-running prompt with no streamed content yet', async () => {
+    const queryClient = createQueryClient()
+    const wrapper = createWrapper(queryClient)
+
+    queryClient.setQueryData(['chat', 'session', 'session-1'], {
+      id: 'session-1',
+      name: 'Test',
+      order: 0,
+      created_at: 1,
+      updated_at: 1,
+      messages: [
+        {
+          id: 'current-user',
+          session_id: 'session-1',
+          role: 'user',
+          content: 'already running',
+          timestamp: 3,
+          tool_calls: [],
+        },
+      ],
+    })
+
+    useChatStore.setState({
+      streamingContents: {},
+      streamingContentBlocks: {},
+      streamingThinkingContent: {},
+      activeToolCalls: {},
+      sendingSessionIds: { 'session-1': true },
+      sendStartedAt: { 'session-1': 1000 },
+      sessionWorktreeMap: { 'session-1': 'worktree-1' },
+      worktreePaths: { 'worktree-1': '/tmp/worktree' },
+      lastSentMessages: { 'session-1': 'already running' },
+      inputDrafts: { 'session-1': '' },
+    })
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:cancelled')).toBe(true)
+    )
+
+    registeredListeners.get('chat:cancelled')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        undo_send: false,
+        emitted_at_ms: 2000,
+      },
+    })
+
+    const session = queryClient.getQueryData<{
+      messages: { id: string; role: string; content: string }[]
+    }>(['chat', 'session', 'session-1'])
+
+    // Prompt already started — keep the user message, do not put it back in input.
+    expect(session?.messages.map(message => message.id)).toEqual([
+      'current-user',
+      'cancelled-session-1-2000',
+    ])
+    expect(useChatStore.getState().inputDrafts['session-1']).toBe('')
+    expect(useChatStore.getState().lastSentMessages['session-1']).toBe(
+      undefined
+    )
+  })
+
   it('restores an instant-cancelled prompt while keeping prior history visible', async () => {
     const queryClient = createQueryClient()
     const wrapper = createWrapper(queryClient)
@@ -983,7 +1048,7 @@ describe('useStreamingEvents cancellation sanitization', () => {
     )
   })
 
-  it('hydrates persisted cancelled assistant output when no streaming state remains', async () => {
+  it('hydrates persisted cancelled output without clearing a newer input draft', async () => {
     const queryClient = createQueryClient()
     const wrapper = createWrapper(queryClient)
 
@@ -1086,7 +1151,7 @@ describe('useStreamingEvents cancellation sanitization', () => {
       lastSentMessages: {
         'session-1': 'cancel this after output persisted',
       },
-      inputDrafts: { 'session-1': '' },
+      inputDrafts: { 'session-1': 'keep this draft' },
     })
 
     renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
@@ -1133,7 +1198,9 @@ describe('useStreamingEvents cancellation sanitization', () => {
       expect(session?.messages[3]?.cancelled).toBe(true)
     })
 
-    expect(useChatStore.getState().inputDrafts['session-1']).toBeUndefined()
+    expect(useChatStore.getState().inputDrafts['session-1']).toBe(
+      'keep this draft'
+    )
   })
 
   it('ignores late chunks from a cancelled run after the same session starts a new run', async () => {
@@ -1534,6 +1601,65 @@ describe('useStreamingEvents replay dedupe', () => {
     expect(
       useChatStore.getState().streamingReplayContentBlocks['session-1']
     ).toBeUndefined()
+  })
+
+  it('does not double snapshot content when Grok re-emits tool_block for the same id', async () => {
+    // Reproduces web reconnect while Grok is mid-turn: the running snapshot is
+    // hydrated with dedupe blocks, then the WS buffer replays tool_use/tool_block
+    // pairs — including a second tool_block for the same id from tool_call_update.
+    const queryClient = createQueryClient()
+    const wrapper = createWrapper(queryClient)
+
+    renderHook(() => useStreamingEvents({ queryClient }), { wrapper })
+
+    await waitFor(() =>
+      expect(registeredListeners.has('chat:tool_block')).toBe(true)
+    )
+
+    registeredListeners.get('chat:chunk')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'Before tool. ',
+      },
+    })
+    registeredListeners.get('chat:tool_block')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        tool_call_id: 'tool-1',
+      },
+    })
+    // Grok ACP tool_call_update re-emits the same tool_block.
+    registeredListeners.get('chat:tool_block')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        tool_call_id: 'tool-1',
+      },
+    })
+    registeredListeners.get('chat:chunk')?.({
+      payload: {
+        session_id: 'session-1',
+        worktree_id: 'worktree-1',
+        content: 'After tool.',
+      },
+    })
+
+    expect(useChatStore.getState().streamingContents['session-1']).toBe(
+      'Before tool. After tool.'
+    )
+    expect(useChatStore.getState().streamingContentBlocks['session-1']).toEqual(
+      [
+        { type: 'text', text: 'Before tool. ' },
+        { type: 'tool_use', tool_call_id: 'tool-1' },
+        { type: 'text', text: 'After tool.' },
+      ]
+    )
+    // Must not become: Before, tool, After, Before, tool, After
+    const blocks = useChatStore.getState().streamingContentBlocks['session-1']
+    const textBlocks = blocks?.filter(b => b.type === 'text') ?? []
+    expect(textBlocks).toHaveLength(2)
   })
 
   it('keeps deduplicating snapshot output when replay contains unpersisted thinking', async () => {

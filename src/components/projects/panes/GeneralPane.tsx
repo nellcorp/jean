@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useMemo } from 'react'
 import {
   Check,
   ChevronsUpDown,
@@ -6,7 +6,6 @@ import {
   GitBranch,
   ImageIcon,
   Loader2,
-  RefreshCw,
   RotateCcw,
   X,
 } from 'lucide-react'
@@ -41,17 +40,6 @@ import {
   useRemoveProjectAvatar,
 } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
-import {
-  useLinearTeams,
-  useLinearProjects,
-  linearQueryKeys,
-} from '@/services/linear'
-import {
-  useOutlineCollections,
-  useHasOutlineAccess,
-  outlineQueryKeys,
-} from '@/services/outline'
-import { useQueryClient } from '@tanstack/react-query'
 import {
   Select,
   SelectContent,
@@ -107,8 +95,12 @@ export function GeneralPane({
 
   const { data: preferences } = usePreferences()
   const profiles = preferences?.custom_cli_profiles ?? []
-  // Only show backends the user is logged into (installed + authenticated).
+  // Show all installed backends (auth is checked at send time / backend settings).
   const { installedBackends } = useInstalledBackends()
+  const installedBackendsSet = useMemo(
+    () => new Set(installedBackends),
+    [installedBackends]
+  )
 
   const updateSettings = useUpdateProjectSettings()
   const { data: appDataDir = '' } = useAppDataDir()
@@ -123,43 +115,7 @@ export function GeneralPane({
   const [localWorktreesDir, setLocalWorktreesDir] = useState<string | null>(
     null
   )
-  const [localLinearApiKey, setLocalLinearApiKey] = useState<string | null>(
-    null
-  )
-  const [showLinearApiKey, setShowLinearApiKey] = useState(false)
-  const [localOutlineApiKey, setLocalOutlineApiKey] = useState<string | null>(
-    null
-  )
-  const [showOutlineApiKey, setShowOutlineApiKey] = useState(false)
   const [worktreesBrowserOpen, setWorktreesBrowserOpen] = useState(false)
-
-  // Linear has access if either project key or global key is set
-  const hasLinearAccess =
-    !!project?.linear_api_key || !!preferences?.linear_api_key
-
-  const hasOutlineAccess = useHasOutlineAccess(projectId)
-
-  const queryClient = useQueryClient()
-  const { data: linearTeams = [], isLoading: teamsLoading } = useLinearTeams(
-    projectId,
-    { enabled: hasLinearAccess }
-  )
-  const { data: linearProjects = [], isLoading: projectsLoading } =
-    useLinearProjects(projectId, { enabled: hasLinearAccess })
-  const { data: outlineCollections = [], isLoading: collectionsLoading } =
-    useOutlineCollections(projectId, { enabled: hasOutlineAccess })
-
-  const handleRefreshTeams = useCallback(() => {
-    queryClient.invalidateQueries({
-      queryKey: linearQueryKeys.teams(projectId),
-    })
-  }, [projectId, queryClient])
-
-  const handleRefreshProjects = useCallback(() => {
-    queryClient.invalidateQueries({
-      queryKey: linearQueryKeys.projects(projectId),
-    })
-  }, [projectId, queryClient])
 
   // Track image load errors
   const avatarKey = project?.avatar_path ?? project?.default_avatar_path ?? null
@@ -252,118 +208,6 @@ export function GeneralPane({
       { onSuccess: () => setLocalWorktreesDir(null) }
     )
   }, [projectId, updateSettings])
-
-  const displayedLinearApiKey =
-    localLinearApiKey ?? project?.linear_api_key ?? ''
-
-  const linearApiKeyChanged =
-    localLinearApiKey !== null &&
-    localLinearApiKey !== (project?.linear_api_key ?? '')
-
-  const handleSaveLinearApiKey = useCallback(() => {
-    if (localLinearApiKey === null) return
-    updateSettings.mutate(
-      { projectId, linearApiKey: localLinearApiKey.trim() },
-      { onSuccess: () => setLocalLinearApiKey(null) }
-    )
-  }, [localLinearApiKey, projectId, updateSettings])
-
-  const handleClearLinearApiKey = useCallback(() => {
-    updateSettings.mutate(
-      { projectId, linearApiKey: '' },
-      { onSuccess: () => setLocalLinearApiKey(null) }
-    )
-  }, [projectId, updateSettings])
-
-  const handleTeamChange = useCallback(
-    (value: string) => {
-      // Switching team clears the project filter, since projects are team-scoped.
-      updateSettings.mutate(
-        {
-          projectId,
-          linearTeamId: value === 'all' ? '' : value,
-          linearProjectId: '',
-        },
-        {
-          onSuccess: () => {
-            queryClient.invalidateQueries({
-              queryKey: linearQueryKeys.issues(projectId),
-            })
-            queryClient.invalidateQueries({
-              queryKey: ['linear', 'issue-search', projectId],
-            })
-            queryClient.invalidateQueries({
-              queryKey: linearQueryKeys.projects(projectId),
-            })
-          },
-        }
-      )
-    },
-    [projectId, updateSettings, queryClient]
-  )
-
-  const handleProjectChange = useCallback(
-    (value: string) => {
-      updateSettings.mutate(
-        { projectId, linearProjectId: value === 'all' ? '' : value },
-        {
-          onSuccess: () => {
-            queryClient.invalidateQueries({
-              queryKey: linearQueryKeys.issues(projectId),
-            })
-            queryClient.invalidateQueries({
-              queryKey: ['linear', 'issue-search', projectId],
-            })
-          },
-        }
-      )
-    },
-    [projectId, updateSettings, queryClient]
-  )
-
-  const displayedOutlineApiKey =
-    localOutlineApiKey ?? project?.outline_api_key ?? ''
-
-  const outlineApiKeyChanged =
-    localOutlineApiKey !== null &&
-    localOutlineApiKey !== (project?.outline_api_key ?? '')
-
-  const handleSaveOutlineApiKey = useCallback(() => {
-    if (localOutlineApiKey === null) return
-    updateSettings.mutate(
-      { projectId, outlineApiKey: localOutlineApiKey.trim() },
-      { onSuccess: () => setLocalOutlineApiKey(null) }
-    )
-  }, [localOutlineApiKey, projectId, updateSettings])
-
-  const handleClearOutlineApiKey = useCallback(() => {
-    updateSettings.mutate(
-      { projectId, outlineApiKey: '' },
-      { onSuccess: () => setLocalOutlineApiKey(null) }
-    )
-  }, [projectId, updateSettings])
-
-  const handleRefreshCollections = useCallback(() => {
-    queryClient.invalidateQueries({
-      queryKey: outlineQueryKeys.collections(projectId),
-    })
-  }, [projectId, queryClient])
-
-  const handleCollectionChange = useCallback(
-    (value: string) => {
-      updateSettings.mutate(
-        { projectId, outlineCollectionId: value === 'all' ? '' : value },
-        {
-          onSuccess: () => {
-            queryClient.invalidateQueries({
-              queryKey: outlineQueryKeys.documents(projectId),
-            })
-          },
-        }
-      )
-    },
-    [projectId, updateSettings, queryClient]
-  )
 
   const handleBrowseWorktreesDir = useCallback(async () => {
     // Remote backends must browse the server filesystem — the native OS
@@ -594,16 +438,18 @@ export function GeneralPane({
                     'commandcode',
                     'grok',
                     'kimi',
+                    'antigravity',
                   ] as CliBackend[]
                 )
-                  .filter(backend => installedBackends.includes(backend))
+                  .filter(backend => installedBackendsSet.has(backend))
                   .map(backend => (
                     <SelectItem key={backend} value={backend}>
                       {backend === 'cursor' ||
                       backend === 'pi' ||
                       backend === 'commandcode' ||
                       backend === 'grok' ||
-                      backend === 'kimi' ? (
+                      backend === 'kimi' ||
+                      backend === 'antigravity' ? (
                         <BackendLabel backend={backend} />
                       ) : backend === 'claude' ? (
                         'Claude'
@@ -672,225 +518,6 @@ export function GeneralPane({
             </div>
           </InlineField>
         </SettingsSection>
-
-      <SettingsSection title="Linear Integration">
-        <InlineField
-          label="Project API Key Override"
-          description="Overrides the global key from Settings → Integrations for this project only. Leave empty to use the global key."
-        >
-          <div className="flex items-center gap-2">
-            <Input
-              type={showLinearApiKey ? 'text' : 'password'}
-              placeholder="lin_api_..."
-              value={displayedLinearApiKey}
-              onChange={e => setLocalLinearApiKey(e.target.value)}
-              className="flex-1 text-base md:text-sm font-mono"
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowLinearApiKey(!showLinearApiKey)}
-            >
-              {showLinearApiKey ? 'Hide' : 'Show'}
-            </Button>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              onClick={handleSaveLinearApiKey}
-              disabled={!linearApiKeyChanged || updateSettings.isPending}
-            >
-              {updateSettings.isPending && (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              )}
-              Save
-            </Button>
-            {project?.linear_api_key && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleClearLinearApiKey}
-                disabled={updateSettings.isPending}
-              >
-                <RotateCcw className="h-4 w-4" />
-                Remove
-              </Button>
-            )}
-          </div>
-        </InlineField>
-
-        {hasLinearAccess && (
-          <InlineField
-            label="Team Filter"
-            description="Restrict Linear issues to a specific team. Leave as 'All teams' to see everything across the workspace."
-          >
-            <div className="flex items-center gap-2">
-              <Select
-                value={project?.linear_team_id ?? 'all'}
-                onValueChange={handleTeamChange}
-                disabled={teamsLoading}
-              >
-                <SelectTrigger className="flex-1">
-                  <SelectValue
-                    placeholder={
-                      teamsLoading ? 'Loading teams...' : 'All teams'
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All teams</SelectItem>
-                  {linearTeams.map(team => (
-                    <SelectItem key={team.id} value={team.id}>
-                      {team.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRefreshTeams}
-                disabled={teamsLoading}
-              >
-                <RefreshCw
-                  className={cn('h-4 w-4', teamsLoading && 'animate-spin')}
-                />
-              </Button>
-            </div>
-          </InlineField>
-        )}
-
-        {hasLinearAccess && (
-          <InlineField
-            label="Project Filter"
-            description="Restrict Linear issues to a specific project. Leave as 'All projects' to see everything in the team."
-          >
-            <div className="flex items-center gap-2">
-              <Select
-                value={project?.linear_project_id ?? 'all'}
-                onValueChange={handleProjectChange}
-                disabled={projectsLoading}
-              >
-                <SelectTrigger className="flex-1">
-                  <SelectValue
-                    placeholder={
-                      projectsLoading ? 'Loading projects...' : 'All projects'
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All projects</SelectItem>
-                  {linearProjects.map(linearProject => (
-                    <SelectItem key={linearProject.id} value={linearProject.id}>
-                      {linearProject.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRefreshProjects}
-                disabled={projectsLoading}
-              >
-                <RefreshCw
-                  className={cn('h-4 w-4', projectsLoading && 'animate-spin')}
-                />
-              </Button>
-            </div>
-          </InlineField>
-        )}
-      </SettingsSection>
-
-      <SettingsSection title="Outline Integration">
-        <InlineField
-          label="Project API Token Override"
-          description="Overrides the global token from Settings → Integrations for this project only. Leave empty to use the global token."
-        >
-          <div className="flex items-center gap-2">
-            <Input
-              type={showOutlineApiKey ? 'text' : 'password'}
-              placeholder="ol_api_..."
-              value={displayedOutlineApiKey}
-              onChange={e => setLocalOutlineApiKey(e.target.value)}
-              className="flex-1 text-base md:text-sm font-mono"
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowOutlineApiKey(!showOutlineApiKey)}
-            >
-              {showOutlineApiKey ? 'Hide' : 'Show'}
-            </Button>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              onClick={handleSaveOutlineApiKey}
-              disabled={!outlineApiKeyChanged || updateSettings.isPending}
-            >
-              {updateSettings.isPending && (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              )}
-              Save
-            </Button>
-            {project?.outline_api_key && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleClearOutlineApiKey}
-                disabled={updateSettings.isPending}
-              >
-                <RotateCcw className="h-4 w-4" />
-                Remove
-              </Button>
-            )}
-          </div>
-        </InlineField>
-
-        {hasOutlineAccess && (
-          <InlineField
-            label="Collection"
-            description="Scope Outline documents to a specific collection. Leave as 'All collections' to see everything."
-          >
-            <div className="flex items-center gap-2">
-              <Select
-                value={project?.outline_collection_id ?? 'all'}
-                onValueChange={handleCollectionChange}
-                disabled={collectionsLoading}
-              >
-                <SelectTrigger className="flex-1">
-                  <SelectValue
-                    placeholder={
-                      collectionsLoading
-                        ? 'Loading collections...'
-                        : 'All collections'
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All collections</SelectItem>
-                  {outlineCollections.map(collection => (
-                    <SelectItem key={collection.id} value={collection.id}>
-                      {collection.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRefreshCollections}
-                disabled={collectionsLoading}
-              >
-                <RefreshCw
-                  className={cn('h-4 w-4', collectionsLoading && 'animate-spin')}
-                />
-              </Button>
-            </div>
-          </InlineField>
-        )}
-      </SettingsSection>
 
         <SettingsSection title="System Prompt">
           <InlineField

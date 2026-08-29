@@ -13,16 +13,19 @@ interface PortInfo {
   host?: string | null
 }
 
-const usePortsMock = vi.fn(() => ({ data: [] as PortInfo[] }))
-const useWorktreeMock = vi.fn(() => ({
-  data: {
-    id: 'worktree-1',
-    path: '/repo/worktree',
-    branch: 'feature',
-    project_id: 'project-1',
-    base_branch: 'main',
-  },
-}))
+const { usePortsMock, useWorktreeMock } = vi.hoisted(() => {
+  const usePortsMock = vi.fn(() => ({ data: [] as PortInfo[] }))
+  const useWorktreeMock = vi.fn(() => ({
+    data: {
+      id: 'worktree-1',
+      path: '/repo/worktree',
+      branch: 'feature',
+      project_id: 'project-1',
+      base_branch: 'main',
+    },
+  }))
+  return { usePortsMock, useWorktreeMock }
+})
 
 vi.mock('@/services/projects', async importOriginal => {
   const actual = await importOriginal<typeof ProjectsService>()
@@ -30,7 +33,9 @@ vi.mock('@/services/projects', async importOriginal => {
     ...actual,
     useWorktree: useWorktreeMock as unknown as typeof actual.useWorktree,
     useProjects: () => ({
-      data: [{ id: 'project-1', path: '/repo', name: 'app', default_branch: 'main' }],
+      data: [
+        { id: 'project-1', path: '/repo', name: 'app', default_branch: 'main' },
+      ],
     }),
     usePorts: usePortsMock as unknown as typeof actual.usePorts,
   }
@@ -55,6 +60,11 @@ beforeEach(() => {
       base_branch: 'main',
     },
   })
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: 1280,
+  })
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation(() => ({
@@ -78,6 +88,7 @@ beforeEach(() => {
 const baseProps = {
   isDisabled: false,
   selectedBackend: 'claude' as const,
+  selectedModel: 'claude-sonnet-4-6',
   selectedProvider: null,
   backendModelLabel: 'Claude · Sonnet',
   backendModelLabelText: 'Claude · Sonnet',
@@ -96,12 +107,14 @@ const baseProps = {
   loadedSecurityContexts: [],
   loadedAdvisoryContexts: [],
   loadedLinearContexts: [],
+  loadedSentryContexts: [],
   attachedSavedContexts: [],
   handleViewIssue: vi.fn(),
   handleViewPR: vi.fn(),
   handleViewSecurityAlert: vi.fn(),
   handleViewAdvisory: vi.fn(),
   handleViewLinear: vi.fn(),
+  handleViewSentry: vi.fn(),
   handleViewSavedContext: vi.fn(),
   availableMcpServers: [],
   enabledMcpServers: [],
@@ -427,9 +440,7 @@ describe('MobileSettingsMenu', () => {
       ],
     })
 
-    render(
-      <MobileSettingsMenu {...baseProps} worktreeId="worktree-1" />
-    )
+    render(<MobileSettingsMenu {...baseProps} worktreeId="worktree-1" />)
 
     await user.click(screen.getByRole('button', { name: /settings/i }))
 
@@ -622,5 +633,133 @@ describe('MobileSettingsMenu', () => {
     await user.click(screen.getByText('Effort'))
 
     expect(screen.getAllByText('Ultracode').length).toBeGreaterThan(0)
+  })
+
+  it('keeps the gear menu open when selecting an effort from the submenu', async () => {
+    const user = userEvent.setup()
+    const handleEffortLevelChange = vi.fn()
+    // Force non-mobile so Effort uses the submenu (not bottom sheet).
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 1280,
+    })
+
+    render(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking
+        handleEffortLevelChange={handleEffortLevelChange}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: /settings/i }))
+    await user.click(screen.getByText('Effort'))
+    const highItem = screen
+      .getAllByRole('menuitemradio', { name: /high/i })
+      .find(item => item.textContent?.startsWith('High'))
+    expect(highItem).toBeDefined()
+    if (!highItem) return
+    fireEvent.click(highItem)
+
+    expect(handleEffortLevelChange).toHaveBeenCalledWith('high')
+    // Menu should remain open so further settings can be changed without reopening.
+    expect(screen.getByText('Model')).toBeInTheDocument()
+    expect(screen.getByText('Effort')).toBeInTheDocument()
+  })
+
+  it('auto-opens the effort sheet when openReasoningSheetSignal bumps', async () => {
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    })
+
+    const { rerender } = render(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking
+        openReasoningSheetSignal={0}
+      />
+    )
+
+    expect(
+      screen.queryByRole('dialog', { name: 'Select effort' })
+    ).not.toBeInTheDocument()
+
+    rerender(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking
+        openReasoningSheetSignal={1}
+      />
+    )
+
+    expect(
+      await screen.findByRole('dialog', { name: 'Select effort' })
+    ).toBeInTheDocument()
+  })
+
+  it('auto-opens the thinking sheet for non-effort backends when signal bumps', async () => {
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    })
+
+    const { rerender } = render(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking={false}
+        isCodex={false}
+        selectedBackend="claude"
+        openReasoningSheetSignal={0}
+      />
+    )
+
+    rerender(
+      <MobileSettingsMenu
+        {...baseProps}
+        useAdaptiveThinking={false}
+        isCodex={false}
+        selectedBackend="claude"
+        openReasoningSheetSignal={1}
+      />
+    )
+
+    expect(
+      await screen.findByRole('dialog', { name: 'Select thinking' })
+    ).toBeInTheDocument()
+  })
+
+  it('does not open a reasoning sheet when signal bumps for commandcode', async () => {
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    })
+
+    const { rerender } = render(
+      <MobileSettingsMenu
+        {...baseProps}
+        selectedBackend="commandcode"
+        useAdaptiveThinking={false}
+        isCodex={false}
+        openReasoningSheetSignal={0}
+      />
+    )
+
+    rerender(
+      <MobileSettingsMenu
+        {...baseProps}
+        selectedBackend="commandcode"
+        useAdaptiveThinking={false}
+        isCodex={false}
+        openReasoningSheetSignal={1}
+      />
+    )
+
+    expect(
+      screen.queryByRole('dialog', { name: 'Select effort' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('dialog', { name: 'Select thinking' })
+    ).not.toBeInTheDocument()
   })
 })

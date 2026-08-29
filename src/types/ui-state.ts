@@ -28,6 +28,7 @@ export interface PersistedTerminalInstance {
   command_args?: string[] | null
   label: string
   kind?: 'panel' | 'session'
+  session_id?: string | null
 }
 
 export interface BrowserTabPersisted {
@@ -67,6 +68,12 @@ export interface UIState {
   left_sidebar_size?: number
   /** Left sidebar visibility, defaults to false */
   left_sidebar_visible?: boolean
+  /** File browser sidebar width in pixels, defaults to 280 */
+  file_browser_size?: number
+  /** File browser sidebar visibility, defaults to false */
+  file_browser_visible?: boolean
+  /** Whether the session chat is using the reduced-chrome zen layout */
+  zen_mode?: boolean
   /** Active session ID per worktree (for restoring open tabs) */
   active_session_ids: Record<string, string>
   /** Unsent chat textarea content per session */
@@ -81,6 +88,8 @@ export interface UIState {
    * Content is optional in persistence; restore re-reads from disk when missing.
    */
   pending_text_files?: Record<string, PendingTextFileDraft[]>
+  /** Worktrees whose setup-script status card was dismissed */
+  dismissed_setup_scripts?: string[]
   /** Whether the review sidebar is visible */
   review_sidebar_visible?: boolean
   /** Modal terminal drawer open state per worktree */
@@ -140,6 +149,11 @@ export interface UIState {
     string,
     { worktree_id: string; session_id: string }
   >
+  /**
+   * GitHub Actions workflow run database IDs the user has already opened
+   * (failed-run badges only count runs not in this list).
+   */
+  seen_failed_workflow_run_ids?: number[]
   version: number
 }
 
@@ -152,10 +166,14 @@ export const defaultUIState: UIState = {
   expanded_folder_ids: [],
   left_sidebar_size: 250,
   left_sidebar_visible: false,
+  file_browser_size: 280,
+  file_browser_visible: false,
+  zen_mode: false,
   active_session_ids: {},
   input_drafts: {},
   pending_images: {},
   pending_text_files: {},
+  dismissed_setup_scripts: [],
   modal_terminal_open: {},
   modal_terminal_dock_mode: 'floating',
   modal_terminal_width: 400,
@@ -179,5 +197,6 @@ export const defaultUIState: UIState = {
   browser_bottom_panel_open: {},
   browser_bottom_panel_height: 360,
   github_dashboard_favorite_project_ids: [],
+  seen_failed_workflow_run_ids: [],
   version: 1,
 }

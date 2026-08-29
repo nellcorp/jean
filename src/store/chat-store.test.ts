@@ -54,6 +54,7 @@ describe('ChatStore', () => {
       errors: {},
       lastSentMessages: {},
       setupScriptResults: {},
+      dismissedSetupScripts: {},
       pendingImages: {},
       pendingFiles: {},
       pendingTextFiles: {},
@@ -72,6 +73,14 @@ describe('ChatStore', () => {
       sessionLabels: {},
       savingContext: {},
       skippedQuestionSessions: {},
+    })
+  })
+
+  it('persists setup-script dismissal per worktree in store state', () => {
+    useChatStore.getState().dismissSetupScript('worktree-1')
+
+    expect(useChatStore.getState().dismissedSetupScripts).toEqual({
+      'worktree-1': true,
     })
   })
 
@@ -505,6 +514,81 @@ describe('ChatStore', () => {
       expect(toolCalls?.[0]?.output).toBe('file contents')
     })
 
+    it('keeps tool_result when it arrives before tool_use (issue #572)', () => {
+      const { addToolCall, updateToolCallOutput } = useChatStore.getState()
+
+      // Result first (out-of-order) — must not drop stdout
+      updateToolCallOutput('session-1', 'tool-bash-1', 'exit: 0\nhello\n')
+
+      let toolCalls = useChatStore.getState().activeToolCalls['session-1']
+      expect(toolCalls).toHaveLength(1)
+      expect(toolCalls?.[0]?.id).toBe('tool-bash-1')
+      expect(toolCalls?.[0]?.output).toBe('exit: 0\nhello\n')
+
+      // Later tool_use enriches name/input without wiping output
+      addToolCall('session-1', {
+        id: 'tool-bash-1',
+        name: 'Bash',
+        input: { command: 'echo hello' },
+      })
+
+      toolCalls = useChatStore.getState().activeToolCalls['session-1']
+      expect(toolCalls).toHaveLength(1)
+      expect(toolCalls?.[0]?.name).toBe('Bash')
+      expect(toolCalls?.[0]?.input).toEqual({ command: 'echo hello' })
+      expect(toolCalls?.[0]?.output).toBe('exit: 0\nhello\n')
+    })
+
+    it('filters a large Read result that arrives before tool_use', () => {
+      const { addToolCall, updateToolCallOutput } = useChatStore.getState()
+      const largeFileContents = 'file contents\n'.repeat(10_000)
+
+      updateToolCallOutput('session-1', 'tool-read-1', largeFileContents)
+      addToolCall('session-1', {
+        id: 'tool-read-1',
+        name: 'Read',
+        input: { file_path: '/large-file.txt' },
+      })
+
+      const toolCall =
+        useChatStore.getState().activeToolCalls['session-1']?.[0]
+      expect(toolCall?.name).toBe('Read')
+      expect(toolCall?.input).toEqual({ file_path: '/large-file.txt' })
+      expect(toolCall?.output).toBe('')
+    })
+
+    it('removes a Monitor result that arrives before tool_use', () => {
+      const { addToolCall, updateToolCallOutput } = useChatStore.getState()
+
+      updateToolCallOutput('session-1', 'tool-monitor-1', 'duplicate output')
+      addToolCall('session-1', {
+        id: 'tool-monitor-1',
+        name: 'Monitor',
+        input: {},
+      })
+
+      const toolCall =
+        useChatStore.getState().activeToolCalls['session-1']?.[0]
+      expect(toolCall?.name).toBe('Monitor')
+      expect(toolCall?.output).toBeUndefined()
+    })
+
+    it('keeps an early question result until answer handling replaces it', () => {
+      const { addToolCall, updateToolCallOutput } = useChatStore.getState()
+
+      updateToolCallOutput('session-1', 'tool-question-1', 'Answer questions?')
+      addToolCall('session-1', {
+        id: 'tool-question-1',
+        name: 'question',
+        input: { questions: [{ question: 'Continue?' }] },
+      })
+
+      const toolCall =
+        useChatStore.getState().activeToolCalls['session-1']?.[0]
+      expect(toolCall?.name).toBe('question')
+      expect(toolCall?.output).toBe('Answer questions?')
+    })
+
     it('clears tool calls', () => {
       const { addToolCall, clearToolCalls } = useChatStore.getState()
 
@@ -707,6 +791,37 @@ describe('ChatStore', () => {
         useChatStore.getState().streamingReplayContentBlocks['session-1']
       ).toBeUndefined()
     })
+
+    it('keeps snapshot dedupe when a tool is re-emitted after already being consumed', () => {
+      // Grok ACP emits tool_use/tool_block again on tool_call_update. The
+      // second emission must not abandon remaining snapshot dedupe.
+      const store = useChatStore.getState()
+
+      store.addTextBlock('session-1', 'Before tool. ')
+      store.addToolBlock('session-1', 'tool-1')
+      store.addTextBlock('session-1', 'After tool.')
+      store.setStreamingReplayContentBlocks('session-1', replayBlocks)
+
+      expect(store.consumeStreamingReplayText('session-1', 'Before tool. ')).toBe(
+        ''
+      )
+      expect(store.consumeStreamingReplayToolBlock('session-1', 'tool-1')).toBe(
+        true
+      )
+      // Re-emitted tool_block for the same id (already past in the cursor).
+      expect(store.consumeStreamingReplayToolBlock('session-1', 'tool-1')).toBe(
+        true
+      )
+      expect(store.consumeStreamingReplayText('session-1', 'After tool.')).toBe(
+        ''
+      )
+      expect(
+        useChatStore.getState().getStreamingContentBlocks('session-1')
+      ).toEqual(replayBlocks)
+      expect(
+        useChatStore.getState().streamingReplayContentBlocks['session-1']
+      ).toBeUndefined()
+    })
   })
 
   describe('execution mode', () => {
@@ -776,6 +891,18 @@ describe('ChatStore', () => {
       const { isQuestionAnswered } = useChatStore.getState()
 
       expect(isQuestionAnswered('session-1', 'tool-1')).toBe(false)
+    })
+
+    it('rolls back an answered question when submitting the backend response fails', () => {
+      const store = useChatStore.getState()
+      store.markQuestionAnswered('session-1', 'tool-1', [
+        { questionIndex: 0, selectedOptions: [1] },
+      ])
+
+      store.clearQuestionAnswer('session-1', 'tool-1')
+
+      expect(store.isQuestionAnswered('session-1', 'tool-1')).toBe(false)
+      expect(store.getSubmittedAnswers('session-1', 'tool-1')).toBeUndefined()
     })
 
     it('tracks question skipping', () => {
@@ -1511,6 +1638,38 @@ describe('ChatStore', () => {
 
       setSessionReviewing('session-1', false)
       expect(isSessionReviewing('session-1')).toBe(false)
+    })
+  })
+
+  describe('session status override', () => {
+    it('sets manual status overrides and keeps review flag in sync', () => {
+      const {
+        setSessionStatusOverride,
+        getSessionStatusOverride,
+        isSessionReviewing,
+      } = useChatStore.getState()
+
+      expect(getSessionStatusOverride('session-1')).toBeNull()
+
+      setSessionStatusOverride('session-1', 'review')
+      expect(getSessionStatusOverride('session-1')).toBe('review')
+      expect(isSessionReviewing('session-1')).toBe(true)
+
+      setSessionStatusOverride('session-1', 'completed')
+      expect(getSessionStatusOverride('session-1')).toBe('completed')
+      expect(isSessionReviewing('session-1')).toBe(false)
+
+      setSessionStatusOverride('session-1', null)
+      expect(getSessionStatusOverride('session-1')).toBeNull()
+    })
+
+    it('is a no-op when setting the same override again', () => {
+      const { setSessionStatusOverride } = useChatStore.getState()
+      setSessionStatusOverride('session-1', 'idle')
+      const first = useChatStore.getState().sessionStatusOverrides
+
+      setSessionStatusOverride('session-1', 'idle')
+      expect(useChatStore.getState().sessionStatusOverrides).toBe(first)
     })
   })
 

@@ -273,6 +273,7 @@ pub async fn install_jean_mcp_config_impl(
             "cursor".to_string(),
             "grok".to_string(),
             "kimi".to_string(),
+            "antigravity".to_string(),
         ]
     });
 
@@ -285,6 +286,7 @@ pub async fn install_jean_mcp_config_impl(
             "cursor" => install_cursor(&entry),
             "grok" => install_grok(&entry),
             "kimi" => install_kimi(&entry),
+            "antigravity" => install_antigravity(&entry),
             other => Err(format!("Unsupported MCP config backend: {other}")),
         };
         results.push(match result {
@@ -349,6 +351,21 @@ fn install_kimi(entry: &JeanMcpEntry) -> Result<(PathBuf, Option<PathBuf>), Stri
     )
 }
 
+fn install_antigravity(entry: &JeanMcpEntry) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let home = dirs::home_dir().ok_or_else(|| "Home directory unavailable".to_string())?;
+    install_antigravity_at(
+        home.join(".gemini").join("config").join("mcp_config.json"),
+        entry,
+    )
+}
+
+fn install_antigravity_at(
+    path: PathBuf,
+    entry: &JeanMcpEntry,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    install_jsonc_server(path, "mcpServers", entry, JeanMcpEntry::claude_server_json)
+}
+
 fn install_jsonc_server(
     path: PathBuf,
     container_key: &str,
@@ -389,12 +406,7 @@ fn install_grok(entry: &JeanMcpEntry) -> Result<(PathBuf, Option<PathBuf>), Stri
     // Grok also gates servers via top-level `disabled_mcp_servers`. Jean rewrites
     // that list during turns; clear our name on install so Grok TUI + discovery
     // don't keep Jean MCP hidden after a prior session disabled it.
-    install_toml_mcp_server(
-        home.join(".grok").join("config.toml"),
-        entry,
-        "Grok",
-        true,
-    )
+    install_toml_mcp_server(home.join(".grok").join("config.toml"), entry, "Grok", true)
 }
 
 fn install_toml_mcp_server(
@@ -466,6 +478,37 @@ fn find_opencode_config_path(home: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod antigravity_tests {
+    use super::*;
+
+    #[test]
+    fn installs_jean_server_in_antigravity_global_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("mcp_config.json");
+        let entry = JeanMcpEntry {
+            mode: JeanMcpInstallMode::Dev,
+            server_name: "jean-dev".to_string(),
+            command: "/Applications/Jean.app/jean".to_string(),
+            socket: "/tmp/jean.sock".to_string(),
+            token: "secret".to_string(),
+        };
+
+        install_antigravity_at(path.clone(), &entry).expect("install");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json");
+        assert_eq!(
+            value["mcpServers"]["jean-dev"]["command"],
+            "/Applications/Jean.app/jean"
+        );
+        assert_eq!(
+            value["mcpServers"]["jean-dev"]["args"][0],
+            "--jean-mcp-stdio"
+        );
+    }
 }
 
 fn with_config_lock<T>(path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -1214,8 +1257,7 @@ installer = "npm"
         .unwrap();
 
         let prod = test_entry(JeanMcpInstallMode::Prod);
-        let (written, backup) =
-            install_toml_mcp_server(path.clone(), &prod, "Grok", true).unwrap();
+        let (written, backup) = install_toml_mcp_server(path.clone(), &prod, "Grok", true).unwrap();
         assert_eq!(written, path);
         assert!(backup.is_some());
 

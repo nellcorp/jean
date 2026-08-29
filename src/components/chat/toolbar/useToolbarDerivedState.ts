@@ -9,6 +9,7 @@ import {
   COMMANDCODE_MODEL_OPTIONS,
   GROK_MODEL_OPTIONS,
   KIMI_MODEL_OPTIONS,
+  ANTIGRAVITY_MODEL_OPTIONS,
   OPENCODE_MODEL_OPTIONS,
   PI_MODEL_OPTIONS,
 } from '@/components/chat/toolbar/toolbar-options'
@@ -36,6 +37,24 @@ interface UseToolbarDerivedStateArgs {
   availableMcpServers?: { name: string; backend?: string; disabled?: boolean }[]
   enabledMcpServers?: string[]
 }
+
+/** Stable defaults so omit/undefined doesn't allocate a new [] each call. */
+const EMPTY_MCP_SERVERS: {
+  name: string
+  backend?: string
+  disabled?: boolean
+}[] = []
+const EMPTY_ENABLED_MCP_SERVERS: string[] = []
+const DEFAULT_INSTALLED_BACKENDS: CliBackend[] = [
+  'claude',
+  'codex',
+  'opencode',
+  'cursor',
+  'pi',
+  'commandcode',
+  'grok',
+  'kimi',
+]
 
 function mergeCatalogOptions(
   catalog: Parameters<typeof getCatalogModelOptions>[0],
@@ -116,6 +135,12 @@ export function buildBackendModelSections({
         label: 'Kimi Code',
         options: kimiModelOptions ?? KIMI_MODEL_OPTIONS,
       })
+    } else if (backend === 'antigravity') {
+      sections.push({
+        backend,
+        label: 'Antigravity CLI',
+        options: ANTIGRAVITY_MODEL_OPTIONS,
+      })
     }
   }
 
@@ -133,18 +158,9 @@ export function useToolbarDerivedState({
   customCliProfiles,
   grokModelOptions,
   kimiModelOptions,
-  installedBackends = [
-    'claude',
-    'codex',
-    'opencode',
-    'cursor',
-    'pi',
-    'commandcode',
-    'grok',
-    'kimi',
-  ],
-  availableMcpServers = [],
-  enabledMcpServers = [],
+  installedBackends = DEFAULT_INSTALLED_BACKENDS,
+  availableMcpServers = EMPTY_MCP_SERVERS,
+  enabledMcpServers = EMPTY_ENABLED_MCP_SERVERS,
 }: UseToolbarDerivedStateArgs) {
   const isCodex = selectedBackend === 'codex'
   const isOpencode = selectedBackend === 'opencode'

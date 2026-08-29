@@ -25,13 +25,13 @@ import {
   useOpenWorktreeInTerminal,
   useOpenWorktreeInFinder,
   useOpenBranchOnGitHub,
+  useWebEditorUrl,
 } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { getOpenInDefaultLabel } from '@/types/preferences'
 import {
   canOpenInEditor,
   canOpenNativeApps,
-  isNativeApp,
 } from '@/lib/environment'
 import { useUIStore } from '@/store/ui-store'
 
@@ -57,7 +57,7 @@ export function OpenInButton({
   const canEditor = canOpenInEditor()
   // In a browser (web access / remote client), the browser-based editor is
   // always reachable via a `/code` URL — independent of native-open capability.
-  const canWebEditor = !isNativeApp()
+  const canWebEditor = useWebEditorUrl() !== null
 
   const openAction = useCallback(
     (target: string) => {

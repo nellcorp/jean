@@ -153,9 +153,14 @@ export function useAvailableGrokModels(options?: { enabled?: boolean }) {
       if (!isTauri()) {
         return [
           {
+            id: 'grok-4.6',
+            label: 'Grok 4.6',
+            isDefault: true,
+          },
+          {
             id: 'grok-4.5',
             label: 'Grok 4.5',
-            isDefault: true,
+            isDefault: false,
           },
         ]
       }
@@ -165,9 +170,14 @@ export function useAvailableGrokModels(options?: { enabled?: boolean }) {
         logger.error('Failed to list Grok models', { error })
         return [
           {
+            id: 'grok-4.6',
+            label: 'Grok 4.6',
+            isDefault: true,
+          },
+          {
             id: 'grok-4.5',
             label: 'Grok 4.5',
-            isDefault: true,
+            isDefault: false,
           },
         ]
       }
@@ -230,6 +240,10 @@ export function useInstallGrokCli() {
   })
 }
 
+function checkManualVersion(version: string) {
+  return invoke<boolean>('check_grok_cli_version_exists', { version })
+}
+
 export function useGrokCliSetup() {
   const status = useGrokCliStatus()
   const versions = useAvailableGrokVersions()
@@ -245,8 +259,6 @@ export function useGrokCliSetup() {
     })
   }
 
-  const checkManualVersion = (version: string) =>
-    invoke<boolean>('check_grok_cli_version_exists', { version })
 
   return {
     status: status.data,

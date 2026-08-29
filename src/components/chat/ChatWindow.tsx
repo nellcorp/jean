@@ -2,6 +2,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -65,12 +66,15 @@ import {
   useAttachedSavedContexts,
 } from '@/services/github'
 import { useLoadedLinearIssueContexts } from '@/services/linear'
+import { useLoadedSentryContexts } from '@/services/sentry'
 import { useChatStore, DEFAULT_THINKING_LEVEL } from '@/store/chat-store'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import { getLabelTextColor } from '@/lib/label-colors'
 import {
+  DEFAULT_PARALLEL_EXECUTION_PROMPT,
   PREDEFINED_CLI_PROFILES,
   resolveMagicPromptBackend,
+  resolveMagicPromptProvider,
   type CliBackend,
 } from '@/types/preferences'
 import type {
@@ -84,6 +88,7 @@ import type {
   PendingSkill,
   CodexCommandApprovalRequest,
   CodexPermissionRequest,
+  OpenCodePermissionRequest,
   CodexUserInputRequest,
   CodexMcpElicitationRequest,
   CodexDynamicToolCallRequest,
@@ -100,25 +105,29 @@ import {
   normalizeCodexQuestions,
 } from '@/types/chat'
 import { getFilename, normalizePath } from '@/lib/path-utils'
+import { registerChatComposer } from '@/lib/chat-composer-metrics'
 import { cn } from '@/lib/utils'
 import { PermissionApproval } from './PermissionApproval'
 import { AskUserQuestion } from './AskUserQuestion'
 import { CodexCommandApprovalRequestCard } from './CodexCommandApprovalRequest'
+import { resolveCodexYoloDecision } from './codex-command-approval-utils'
 import { CodexPermissionsRequest } from './CodexPermissionsRequest'
+import { OpenCodePermissionsRequest } from './OpenCodePermissionsRequest'
 import { CodexMcpElicitationRequest as CodexMcpElicitationRequestCard } from './CodexMcpElicitationRequest'
 import { CodexDynamicToolCallRequest as CodexDynamicToolCallRequestCard } from './CodexDynamicToolCallRequest'
 import { SetupScriptOutput } from './SetupScriptOutput'
+import { isFirstWorktreeSession } from './setup-script-visibility'
 import { TodoWidget } from './TodoWidget'
 import { AgentWidget } from './AgentWidget'
 import { normalizeTodosForDisplay } from './tool-call-utils'
 import { ImagePreview } from './ImagePreview'
 import { TextFilePreview } from './TextFilePreview'
 import { SkillBadge } from './SkillBadge'
-import { FileContentModal } from './FileContentModal'
 import { FilePreview } from './FilePreview'
 import { ChatInput } from './ChatInput'
 import { SessionDebugPanel } from './SessionDebugPanel'
 import { ChatToolbar } from './ChatToolbar'
+import { SendCancelButton } from './toolbar/SendCancelButton'
 import { ReviewResultsPanel } from './ReviewResultsPanel'
 import { ReviewMethodModal } from './ReviewMethodModal'
 import { QueuedPromptsPanel } from './QueuedPromptsPanel'
@@ -139,8 +148,11 @@ import { StreamingStatusBar } from './StreamingStatusBar'
 import { ChatErrorFallback } from './ChatErrorFallback'
 import { logger } from '@/lib/logger'
 import { saveCrashState } from '@/lib/recovery'
-import { resolveDefaultModelForBackend } from '@/lib/session-defaults'
-import { isBackendAutoSteerEnabled } from '@/lib/backend-auto-steer'
+import { resolveSelectedModelForBackend } from '@/lib/session-defaults'
+import {
+  isBackendAutoSteerEnabled,
+  isSteerCapableBackend,
+} from '@/lib/backend-auto-steer'
 import { ErrorBanner } from './ErrorBanner'
 import {
   VirtualizedMessageList,
@@ -238,10 +250,15 @@ const EMPTY_CONTENT_BLOCKS: ContentBlock[] = []
 const EMPTY_PENDING_IMAGES: PendingImage[] = []
 const EMPTY_PENDING_TEXT_FILES: PendingTextFile[] = []
 const EMPTY_PENDING_FILES: PendingFile[] = []
+
+// Process-wide count so remount races cannot leave reviewSurfaceMounted stuck true
+// (or false while another full-width review surface is still mounted).
+let reviewSurfaceMountCount = 0
 const EMPTY_PENDING_SKILLS: PendingSkill[] = []
 const EMPTY_QUEUED_MESSAGES: QueuedMessage[] = []
 const EMPTY_PERMISSION_DENIALS: PermissionDenial[] = []
 const EMPTY_CODEX_PERMISSION_REQUESTS: CodexPermissionRequest[] = []
+const EMPTY_OPENCODE_PERMISSION_REQUESTS: OpenCodePermissionRequest[] = []
 const EMPTY_CODEX_COMMAND_APPROVAL_REQUESTS: CodexCommandApprovalRequest[] = []
 const EMPTY_CODEX_USER_INPUT_REQUESTS: CodexUserInputRequest[] = []
 const EMPTY_CODEX_MCP_ELICITATION_REQUESTS: CodexMcpElicitationRequest[] = []
@@ -262,6 +279,7 @@ export function ChatWindow({
   worktreePath: propWorktreePath,
 }: ChatWindowProps = {}) {
   const isMobile = useIsMobile()
+  const zenMode = useUIStore(state => state.zenMode)
   // PERFORMANCE: Use focused selectors instead of whole-store destructuring
   // This prevents re-renders when other sessions' state changes (e.g., streaming chunks)
 
@@ -367,7 +385,7 @@ export function ChatWindow({
     clearInputDraft,
     setExecutionMode,
     setError,
-    clearSetupScriptResult,
+    dismissSetupScript,
   } = useChatStore.getState()
 
   const queryClient = useQueryClient()
@@ -378,6 +396,11 @@ export function ChatWindow({
     isLoading: isSessionsLoading,
     isFetching: isSessionsFetching,
   } = useSessions(activeWorktreeId, activeWorktreePath)
+
+  const isFirstSession = isFirstWorktreeSession(
+    activeSessionId,
+    sessionsData?.sessions
+  )
 
   const uiStateInitialized = useUIStore(state => state.uiStateInitialized)
 
@@ -466,6 +489,21 @@ export function ChatWindow({
     isDedicatedEmptyCodeReview,
   ])
 
+  // Full-width review replaces the chat toolbar, so FloatingDock would reappear
+  // over the Send Separately / Send to Chat footer. Hide it while this surface
+  // is active (same mount-count pattern as ChatToolbar → chatToolbarMounted).
+  useEffect(() => {
+    if (!showReviewFullWidth) return
+    reviewSurfaceMountCount += 1
+    useUIStore.getState().setReviewSurfaceMounted(true)
+    return () => {
+      reviewSurfaceMountCount = Math.max(0, reviewSurfaceMountCount - 1)
+      if (reviewSurfaceMountCount === 0) {
+        useUIStore.getState().setReviewSurfaceMounted(false)
+      }
+    }
+  }, [showReviewFullWidth])
+
   useEffect(() => {
     const panel = reviewPanelRef.current
     if (!panel) return
@@ -518,7 +556,12 @@ export function ChatWindow({
   // the terminal (e.g. `claude --resume <id>`) lazily for the active session so
   // the conversation reappears in its terminal surface. The ref guards against
   // a duplicate spawn while the async relaunch is in flight.
-  const autoReconnectingRef = useRef<Set<string>>(new Set())
+  // Lazy init so we don't allocate a new Set on every render.
+  const autoReconnectingRef = useRef<Set<string> | null>(null)
+  if (autoReconnectingRef.current === null) {
+    autoReconnectingRef.current = new Set()
+  }
+  const autoReconnecting = autoReconnectingRef.current
   const [terminalReconnectError, setTerminalReconnectError] = useState<
     string | null
   >(null)
@@ -536,10 +579,10 @@ export function ChatWindow({
       session.primary_surface === 'terminal' || primarySurface === 'terminal'
     if (!shouldRestoreTerminal || sessionTerminalId) return
     if (!canReconnectSession(session)) return
-    if (autoReconnectingRef.current.has(deferredSessionId)) return
+    if (autoReconnecting.has(deferredSessionId)) return
 
     const sessionId = deferredSessionId
-    autoReconnectingRef.current.add(sessionId)
+    autoReconnecting.add(sessionId)
     setTerminalReconnectError(null)
     void reconnectNativeCliSession(session, activeWorktreeId, {
       openModal: false,
@@ -553,7 +596,7 @@ export function ChatWindow({
         )
       })
       .finally(() => {
-        autoReconnectingRef.current.delete(sessionId)
+        autoReconnecting.delete(sessionId)
       })
   }, [
     deferredSessionId,
@@ -656,6 +699,11 @@ export function ChatWindow({
     activeWorktreeId ?? null,
     worktree?.project_id ?? null
   )
+  const { data: loadedSentryContexts } = useLoadedSentryContexts(
+    activeSessionId ?? null,
+    activeWorktreeId ?? null,
+    worktree?.project_id ?? null
+  )
 
   // Attached saved contexts for indicator
   const { data: attachedSavedContexts } = useAttachedSavedContexts(
@@ -714,9 +762,9 @@ export function ChatWindow({
     const projectId = worktree?.project_id
     if (!projectId) return []
     const prefix = `${projectId}:`
-    return (preferences?.favorite_package_scripts ?? [])
-      .filter(key => key.startsWith(prefix))
-      .map(key => key.slice(prefix.length))
+    return (preferences?.favorite_package_scripts ?? []).flatMap(key =>
+      key.startsWith(prefix) ? [key.slice(prefix.length)] : []
+    )
   }, [preferences?.favorite_package_scripts, worktree?.project_id])
   const handleToggleFavoritePackageScript = useCallback(
     (scriptName: string) => {
@@ -746,7 +794,10 @@ export function ChatWindow({
   const zustandProvider = useChatStore(state =>
     deferredSessionId ? state.selectedProviders[deferredSessionId] : undefined
   )
-  const sessionProvider = session?.selected_provider ?? zustandProvider
+  // Prefer in-memory toolbar selection when present so mid-session provider
+  // switches apply immediately (session query can lag until invalidate).
+  const sessionProvider =
+    zustandProvider !== undefined ? zustandProvider : session?.selected_provider
 
   // Installed backends (only these should be selectable)
   const { installedBackends } = useInstalledBackends()
@@ -802,23 +853,21 @@ export function ChatWindow({
         ? (projectDefaultProvider ?? globalDefaultProvider)
         : null
   const selectedProvider =
-    sessionProvider !== undefined
-      ? sessionProvider
-      : defaultProviderForBackend
+    sessionProvider !== undefined ? sessionProvider : defaultProviderForBackend
   // Sentinels mean "use backend default" — treat as non-custom for feature detection
   const isCustomProvider = Boolean(
     selectedProvider &&
-      selectedProvider !== '__anthropic__' &&
-      selectedProvider !== '__default__'
+    selectedProvider !== '__anthropic__' &&
+    selectedProvider !== '__default__'
   )
 
   // Per-session model selection, falls back to preferences default (backend-aware)
-  const defaultModel = resolveDefaultModelForBackend(
+  const selectedModel = resolveSelectedModelForBackend(
     selectedBackend,
+    session?.selected_model,
     preferences,
     selectedBackend === 'pi' ? availablePiModelOptions : undefined
   )
-  const selectedModel: string = session?.selected_model ?? defaultModel
   const buildNewContextLabel = resolveApprovalLabel(
     'build',
     preferences,
@@ -894,14 +943,15 @@ export function ChatWindow({
   )
   // Custom providers don't support Opus 4.6 adaptive thinking — use thinking levels instead
   const useAdaptiveThinkingFlag =
-    !isCustomProvider &&
-    supportsAdaptiveThinking(
-      selectedModel,
-      cliStatus?.version ?? null,
-      selectedModelReasoning === undefined
-        ? undefined
-        : selectedModelReasoning?.type === 'effort'
-    )
+    selectedBackend === 'antigravity' ||
+    (!isCustomProvider &&
+      supportsAdaptiveThinking(
+        selectedModel,
+        cliStatus?.version ?? null,
+        selectedModelReasoning === undefined
+          ? undefined
+          : selectedModelReasoning?.type === 'effort'
+      ))
 
   // Hide thinking level UI entirely for providers that don't support it
   const customCliProfiles = preferences?.custom_cli_profiles ?? []
@@ -940,6 +990,7 @@ export function ChatWindow({
   // PERFORMANCE: Track hasValue via callback from ChatInput instead of store subscription
   // ChatInput notifies on mount, session change, and empty/non-empty boundary changes
   const [hasInputValue, setHasInputValue] = useState(false)
+  const [steerModifierActive, setSteerModifierActive] = useState(false)
   // Per-session execution mode (defaults to preference or 'plan' for new sessions)
   // Uses deferredSessionId for display consistency with other content
   const defaultExecutionMode = preferences?.default_execution_mode ?? 'plan'
@@ -990,6 +1041,11 @@ export function ChatWindow({
   // Per-worktree setup script result (stays at worktree level)
   const setupScriptResult = useChatStore(state =>
     activeWorktreeId ? state.setupScriptResults[activeWorktreeId] : undefined
+  )
+  const isSetupScriptDismissed = useChatStore(state =>
+    activeWorktreeId
+      ? (state.dismissedSetupScripts[activeWorktreeId] ?? false)
+      : false
   )
   // PERFORMANCE: Input-related selectors use activeSessionId for immediate feedback
   // When user switches tabs, attachments should reflect the NEW session immediately
@@ -1047,6 +1103,12 @@ export function ChatWindow({
         EMPTY_CODEX_PERMISSION_REQUESTS)
       : EMPTY_CODEX_PERMISSION_REQUESTS
   )
+  const pendingOpencodePermissionRequests = useChatStore(state =>
+    deferredSessionId
+      ? (state.pendingOpencodePermissionRequests[deferredSessionId] ??
+        EMPTY_OPENCODE_PERMISSION_REQUESTS)
+      : EMPTY_OPENCODE_PERMISSION_REQUESTS
+  )
   const pendingCodexCommandApprovalRequests = useChatStore(state =>
     deferredSessionId
       ? (state.pendingCodexCommandApprovalRequests[deferredSessionId] ??
@@ -1080,6 +1142,7 @@ export function ChatWindow({
   const activeCodexCommandApprovalRequest =
     pendingCodexCommandApprovalRequests[0]
   const activeCodexPermissionRequest = pendingCodexPermissionRequests[0]
+  const activeOpencodePermissionRequest = pendingOpencodePermissionRequests[0]
   const activeCodexUserInputRequest = pendingCodexUserInputRequests[0]
   const activeCodexMcpElicitationRequest = pendingCodexMcpElicitationRequests[0]
   const activeCodexDynamicToolCallRequest =
@@ -1131,6 +1194,11 @@ export function ChatWindow({
 
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
+  const unregisterChatComposerRef = useRef<(() => void) | null>(null)
+  const setChatComposerNode = useCallback((node: HTMLDivElement | null) => {
+    unregisterChatComposerRef.current?.()
+    unregisterChatComposerRef.current = node ? registerChatComposer(node) : null
+  }, [])
   const clearChatInputStateRef = useRef<(() => void) | null>(null)
   // PERFORMANCE: Refs for session/worktree IDs and settings to avoid recreating callbacks when session changes
   // This enables stable callback references that read current values from refs
@@ -1169,29 +1237,31 @@ export function ChatWindow({
   const mcpServersDataRef = useRef<McpServerInfo[]>(availableMcpServers)
   const selectedBackendRef = useRef(selectedBackend)
 
-  // Keep refs in sync with current values (runs on every render, but cheap)
-  activeSessionIdRef.current = activeSessionId
-  activeWorktreeIdRef.current = activeWorktreeId
-  activeWorktreePathRef.current = activeWorktreePath
-  selectedModelRef.current = selectedModel
-  buildModelRef.current = preferences?.build_model ?? null
-  yoloModelRef.current = preferences?.yolo_model ?? null
-  buildBackendRef.current = preferences?.build_backend ?? null
-  buildThinkingLevelRef.current = preferences?.build_thinking_level ?? null
-  buildEffortLevelRef.current = preferences?.build_effort_level ?? null
-  yoloBackendRef.current = preferences?.yolo_backend ?? null
-  yoloThinkingLevelRef.current = preferences?.yolo_thinking_level ?? null
-  yoloEffortLevelRef.current = preferences?.yolo_effort_level ?? null
-  selectedProviderRef.current = selectedProvider
-  selectedThinkingLevelRef.current = selectedThinkingLevel
-  selectedEffortLevelRef.current = selectedEffortLevel
-  useAdaptiveThinkingRef.current = useAdaptiveThinkingFlag
-  isCodexBackendRef.current = isCodexBackend
-  executionModeRef.current = executionMode
-  projectIdRef.current = worktree?.project_id ?? null
-  enabledMcpServersRef.current = enabledMcpServers
-  mcpServersDataRef.current = availableMcpServers
-  selectedBackendRef.current = selectedBackend
+  // Keep refs in sync with current values (layout effect keeps render pure)
+  useLayoutEffect(() => {
+    activeSessionIdRef.current = activeSessionId
+    activeWorktreeIdRef.current = activeWorktreeId
+    activeWorktreePathRef.current = activeWorktreePath
+    selectedModelRef.current = selectedModel
+    buildModelRef.current = preferences?.build_model ?? null
+    yoloModelRef.current = preferences?.yolo_model ?? null
+    buildBackendRef.current = preferences?.build_backend ?? null
+    buildThinkingLevelRef.current = preferences?.build_thinking_level ?? null
+    buildEffortLevelRef.current = preferences?.build_effort_level ?? null
+    yoloBackendRef.current = preferences?.yolo_backend ?? null
+    yoloThinkingLevelRef.current = preferences?.yolo_thinking_level ?? null
+    yoloEffortLevelRef.current = preferences?.yolo_effort_level ?? null
+    selectedProviderRef.current = selectedProvider
+    selectedThinkingLevelRef.current = selectedThinkingLevel
+    selectedEffortLevelRef.current = selectedEffortLevel
+    useAdaptiveThinkingRef.current = useAdaptiveThinkingFlag
+    isCodexBackendRef.current = isCodexBackend
+    executionModeRef.current = executionMode
+    projectIdRef.current = worktree?.project_id ?? null
+    enabledMcpServersRef.current = enabledMcpServers
+    mcpServersDataRef.current = availableMcpServers
+    selectedBackendRef.current = selectedBackend
+  })
 
   // Stable callback for useMessageHandlers to build MCP config from current refs
   const getMcpConfig = useCallback(
@@ -1230,15 +1300,19 @@ export function ChatWindow({
   } = useScrollManagement({
     messages: session?.messages,
     virtualizedListRef,
-    activeWorktreeId,
+    // Key scroll restoration on the displayed session (deferred) so we save
+    // and restore against the transcript that is actually mounted (issue #594).
+    activeSessionId: deferredSessionId,
+    contentReady:
+      !isLoading && !isSessionsLoading && !isSessionSwitching && !!session,
     isSending,
   })
 
   // Drag and drop images into chat input
   const { isDragging } = useDragAndDropImages(activeSessionId)
 
-  // State for file content modal (opened by clicking filenames in tool calls)
-  const [viewingFilePath, setViewingFilePath] = useState<string | null>(null)
+  // File content modal is global (MainWindow) so the file browser can open it too
+  const setViewingFilePath = useUIStore(state => state.setViewingFilePath)
 
   // State for git diff modal (opened by clicking diff stats)
   const [diffRequest, setDiffRequest] = useState<DiffRequest | null>(null)
@@ -1389,7 +1463,7 @@ export function ChatWindow({
                   ? (preferences?.selected_commandcode_model ??
                     'commandcode/default')
                   : yoloBackend === 'grok'
-                    ? (preferences?.selected_grok_model ?? 'grok/grok-4.5')
+                    ? (preferences?.selected_grok_model ?? 'grok/grok-4.6')
                     : yoloBackend === 'kimi'
                       ? (preferences?.selected_kimi_model ?? 'kimi/default')
                       : selectedModelRef.current)
@@ -1579,7 +1653,7 @@ export function ChatWindow({
                   ? (preferences?.selected_commandcode_model ??
                     'commandcode/default')
                   : buildBackend === 'grok'
-                    ? (preferences?.selected_grok_model ?? 'grok/grok-4.5')
+                    ? (preferences?.selected_grok_model ?? 'grok/grok-4.6')
                     : buildBackend === 'kimi'
                       ? (preferences?.selected_kimi_model ?? 'kimi/default')
                       : selectedModelRef.current)
@@ -1852,7 +1926,7 @@ export function ChatWindow({
                   ? (preferences?.selected_commandcode_model ??
                     'commandcode/default')
                   : modeBackend === 'grok'
-                    ? (preferences?.selected_grok_model ?? 'grok/grok-4.5')
+                    ? (preferences?.selected_grok_model ?? 'grok/grok-4.6')
                     : modeBackend === 'kimi'
                       ? (preferences?.selected_kimi_model ?? 'kimi/default')
                       : selectedModelRef.current)
@@ -1987,10 +2061,13 @@ export function ChatWindow({
 
   // Opens new session(s) and sends review fix message(s) there.
   // Pass a string for one combined fix, or string[] to send each finding separately.
+  // Prefer the selected reviewer's backend/model (multi-review) so MiniMax/Grok
+  // findings keep the same auth path as the review job (issue #630).
   const handleReviewFix = useCallback(
     async (
       messageOrMessages: string | string[],
-      executionMode: 'plan' | 'yolo'
+      executionMode: 'plan' | 'yolo',
+      options?: { backend?: string; model?: string }
     ) => {
       if (!activeSessionId || !activeWorktreeId || !activeWorktreePath) return
 
@@ -2005,25 +2082,64 @@ export function ChatWindow({
       const store = useChatStore.getState()
       store.setSessionReviewing(activeSessionId, false)
 
-      const backend = resolveMagicPromptBackend(
-        preferences?.magic_prompt_backends,
-        'code_review_backend',
-        preferences?.default_backend
-      )
+      const defaultBackend = (preferences?.default_backend ??
+        'claude') as CliBackend
+      const backend = (options?.backend ??
+        resolveMagicPromptBackend(
+          preferences?.magic_prompt_backends,
+          'code_review_backend',
+          defaultBackend
+        ) ??
+        defaultBackend) as CliBackend
       const model =
+        options?.model ??
         preferences?.magic_prompt_models?.code_review_model ??
         selectedModelRef.current
+      // Code-review magic prompt provider (e.g. MiniMax custom CLI profile).
+      // Without this, Claude fix sessions run unauthenticated OAuth and fail
+      // with "Not logged in · Please run /login" (issue #630).
+      const provider = resolveMagicPromptProvider(
+        preferences?.magic_prompt_providers,
+        'code_review_provider',
+        preferences?.default_provider
+      )
+      const isCustomProvider = Boolean(
+        provider && provider !== '__anthropic__' && provider !== '__default__'
+      )
+      // Claude custom profiles only apply to Claude-compatible backends.
+      const customProfileName =
+        backend === 'claude' && isCustomProvider
+          ? (provider ?? undefined)
+          : undefined
 
-      // Create one session per message. Use mutateAsync in a loop so each
-      // session is fully created before the next (TanStack Query per-call
-      // onSuccess is unreliable across consecutive mutate() calls).
+      const usesEffortBackend =
+        backend === 'codex' ||
+        backend === 'opencode' ||
+        backend === 'pi' ||
+        backend === 'grok' ||
+        backend === 'kimi' ||
+        backend === 'antigravity'
+      const effortLevel = usesEffortBackend
+        ? ((preferences?.magic_prompt_efforts?.code_review_effort as
+            | EffortLevel
+            | null
+            | undefined) ?? selectedEffortLevelRef.current)
+        : undefined
+      const thinkingLevel = usesEffortBackend
+        ? undefined
+        : selectedThinkingLevelRef.current
+
+      // Sequential on purpose: each session must fully create before the next
+      // (TanStack Query per-call onSuccess is unreliable across consecutive
+      // mutate() calls). Do not Promise.all — order and store setup matter.
       for (const message of messages) {
         let newSession: Session
         try {
           newSession = await createSession.mutateAsync({
             worktreeId: activeWorktreeId,
             worktreePath: activeWorktreePath,
-            backend: backend ?? undefined,
+            name: 'Fix review findings',
+            backend,
           })
         } catch (err) {
           toast.error(`Failed to create session: ${err}`)
@@ -2036,10 +2152,41 @@ export function ChatWindow({
         nextStore.setError(newSession.id, null)
         nextStore.addSendingSession(newSession.id)
         nextStore.setSelectedModel(newSession.id, model)
-        if (backend) {
-          nextStore.setSelectedBackend(newSession.id, backend)
+        nextStore.setSelectedBackend(newSession.id, backend)
+        if (provider !== undefined) {
+          nextStore.setSelectedProvider(newSession.id, provider)
         }
         nextStore.setExecutingMode(newSession.id, executionMode)
+        if (effortLevel) {
+          nextStore.setEffortLevel(newSession.id, effortLevel)
+        }
+        // Map session → worktree without switching the active tab (background fix).
+        useChatStore.setState(s => ({
+          sessionWorktreeMap: {
+            ...s.sessionWorktreeMap,
+            [newSession.id]: activeWorktreeId,
+          },
+        }))
+
+        // Persist so the toolbar matches when the user opens the fix tab.
+        setSessionBackend.mutate({
+          sessionId: newSession.id,
+          worktreeId: activeWorktreeId,
+          worktreePath: activeWorktreePath,
+          backend,
+        })
+        setSessionModel.mutate({
+          sessionId: newSession.id,
+          worktreeId: activeWorktreeId,
+          worktreePath: activeWorktreePath,
+          model,
+        })
+        setSessionProvider.mutate({
+          sessionId: newSession.id,
+          worktreeId: activeWorktreeId,
+          worktreePath: activeWorktreePath,
+          provider,
+        })
 
         sendMessage.mutate({
           sessionId: newSession.id,
@@ -2047,9 +2194,23 @@ export function ChatWindow({
           worktreePath: activeWorktreePath,
           message,
           model,
-          backend: backend ?? undefined,
+          backend,
           executionMode,
-          thinkingLevel: selectedThinkingLevelRef.current,
+          thinkingLevel,
+          effortLevel,
+          customProfileName,
+          mcpConfig: buildMcpConfigJson(
+            mcpServersDataRef.current ?? [],
+            enabledMcpServersRef.current,
+            backend
+          ),
+          parallelExecutionPrompt:
+            preferences?.parallel_execution_prompt_enabled
+              ? (preferences.magic_prompts?.parallel_execution ??
+                DEFAULT_PARALLEL_EXECUTION_PROMPT)
+              : undefined,
+          chromeEnabled: preferences?.chrome_enabled ?? false,
+          aiLanguage: preferences?.ai_language,
         })
       }
     },
@@ -2060,8 +2221,14 @@ export function ChatWindow({
       createSession,
       preferences,
       sendMessage,
+      selectedEffortLevelRef,
       selectedModelRef,
       selectedThinkingLevelRef,
+      setSessionBackend,
+      setSessionModel,
+      setSessionProvider,
+      mcpServersDataRef,
+      enabledMcpServersRef,
     ]
   )
 
@@ -2112,7 +2279,6 @@ export function ChatWindow({
     handleRevertLastCommit,
     handleOpenPr,
     handleReview,
-    handleFinalReview,
     handleCodeRabbitReview,
     handleCodeRabbitPrReview,
     handleMerge,
@@ -2246,6 +2412,7 @@ export function ChatWindow({
     handleInvestigate,
     handleInvestigateWorkflowRun,
     handleReviewComments,
+    handleSmokeTest,
   } = useInvestigateHandlers({
     activeSessionId,
     activeWorktreeId,
@@ -2375,6 +2542,7 @@ export function ChatWindow({
     handleInvestigateWorkflowRun,
     handleInvestigate,
     handleReviewComments,
+    handleSmokeTest,
     isModal,
     sessionModalOpen,
   })
@@ -2395,6 +2563,7 @@ export function ChatWindow({
     handleCodexCommandApproval,
     handleCodexPermissionRequest,
     handleCodexPermissionRequestDecline,
+    handleOpencodePermissionReply,
     handleCodexUserInputAnswer,
     handleCodexMcpElicitationAccept,
     handleCodexMcpElicitationDecline,
@@ -2808,7 +2977,6 @@ export function ChatWindow({
           open={reviewMethodModalOpen}
           onOpenChange={setReviewMethodModalOpen}
           onAiReview={handleReview}
-          onFinalReview={handleFinalReview}
           onCodeRabbitCliReview={handleCodeRabbitReview}
           onCodeRabbitPrReview={handleCodeRabbitPrReview}
           codeRabbitPrAvailable={Boolean(worktree?.pr_number)}
@@ -2941,7 +3109,9 @@ export function ChatWindow({
                             {/* Setup script running indicator */}
                             {worktree?.setup_script &&
                               worktree.setup_success == null &&
-                              !setupScriptResult && (
+                              !setupScriptResult &&
+                              isFirstSession &&
+                              !isSetupScriptDismissed && (
                                 <div className="my-2 flex items-center gap-2 rounded border border-muted bg-muted/30 px-3 py-2 font-mono text-sm text-muted-foreground">
                                   <Loader2 className="h-4 w-4 animate-spin shrink-0" />
                                   <span>
@@ -2953,11 +3123,14 @@ export function ChatWindow({
                                 </div>
                               )}
                             {/* Setup script output from jean.json */}
-                            {setupScriptResult && activeWorktreeId && (
+                            {setupScriptResult &&
+                              activeWorktreeId &&
+                              isFirstSession &&
+                              !isSetupScriptDismissed && (
                               <SetupScriptOutput
                                 result={setupScriptResult}
                                 onDismiss={() =>
-                                  clearSetupScriptResult(activeWorktreeId)
+                                  dismissSetupScript(activeWorktreeId)
                                 }
                               />
                             )}
@@ -2995,6 +3168,7 @@ export function ChatWindow({
                                     }
                                     sessionId={deferredSessionId ?? ''}
                                     worktreePath={activeWorktreePath ?? ''}
+                                    worktreeId={activeWorktreeId ?? null}
                                     approveShortcut={approveShortcut}
                                     approveShortcutYolo={approveShortcutYolo}
                                     approveShortcutClearContext={
@@ -3048,17 +3222,21 @@ export function ChatWindow({
                                       handleScrollToBottomHandled
                                     }
                                     completedDurationMs={completedDurationMs}
-                                    hasOlderOnDisk={hasOlderOnDisk}
+                                    hasOlderOnDisk={!zenMode && hasOlderOnDisk}
                                     isLoadingOlder={loadOlderMessages.isPending}
-                                    onLoadOlderRuns={handleLoadOlderRuns}
+                                    onLoadOlderRuns={
+                                      zenMode ? undefined : handleLoadOlderRuns
+                                    }
                                     loadedRunStartIndex={loadedRunStartIndex}
                                     hiddenPromptCount={
-                                      isCompactHistoryExpanded
+                                      zenMode || isCompactHistoryExpanded
                                         ? 0
                                         : compactHistoryWindow.hiddenPromptCount
                                     }
                                     onShowHiddenPrompts={
-                                      handleShowHiddenCompactPrompts
+                                      zenMode
+                                        ? undefined
+                                        : handleShowHiddenCompactPrompts
                                     }
                                   />
                                 ) : (
@@ -3070,6 +3248,7 @@ export function ChatWindow({
                                     lastPlanMessageIndex={lastPlanMessageIndex}
                                     sessionId={deferredSessionId ?? ''}
                                     worktreePath={activeWorktreePath ?? ''}
+                                    worktreeId={activeWorktreeId ?? null}
                                     approveShortcut={approveShortcut}
                                     approveShortcutYolo={approveShortcutYolo}
                                     approveShortcutClearContext={
@@ -3221,12 +3400,19 @@ export function ChatWindow({
                                     'accept'
                                   )
                                 }
-                                onApproveYolo={() =>
+                                onApproveYolo={() => {
+                                  // Prefer acceptForSession when Codex allows it;
+                                  // otherwise accept once and Jean auto-approves
+                                  // residual prompts after promoting to YOLO (#626).
+                                  const decision = resolveCodexYoloDecision(
+                                    activeCodexCommandApprovalRequest.available_decisions
+                                  )
                                   handleCodexCommandApproval(
                                     activeCodexCommandApprovalRequest,
-                                    'acceptForSession'
+                                    decision,
+                                    true
                                   )
-                                }
+                                }}
                                 onDecline={() =>
                                   handleCodexCommandApproval(
                                     activeCodexCommandApprovalRequest,
@@ -3254,6 +3440,30 @@ export function ChatWindow({
                                 onDecline={() =>
                                   handleCodexPermissionRequestDecline(
                                     activeCodexPermissionRequest
+                                  )
+                                }
+                              />
+                            )}
+
+                            {activeOpencodePermissionRequest && (
+                              <OpenCodePermissionsRequest
+                                request={activeOpencodePermissionRequest}
+                                onOnce={() =>
+                                  handleOpencodePermissionReply(
+                                    activeOpencodePermissionRequest,
+                                    'once'
+                                  )
+                                }
+                                onAlways={() =>
+                                  handleOpencodePermissionReply(
+                                    activeOpencodePermissionRequest,
+                                    'always'
+                                  )
+                                }
+                                onReject={() =>
+                                  handleOpencodePermissionReply(
+                                    activeOpencodePermissionRequest,
+                                    'reject'
                                   )
                                 }
                               />
@@ -3363,7 +3573,11 @@ export function ChatWindow({
                     {/* Input container - full width, centered content */}
                     <div className="bg-background">
                       <div className="mx-auto max-w-7xl">
-                        <div className="relative sm:mx-auto sm:mb-3 sm:max-w-3xl xl:max-w-4xl">
+                        <div
+                          ref={setChatComposerNode}
+                          data-chat-composer=""
+                          className="relative sm:mx-auto sm:mb-3 sm:max-w-3xl xl:max-w-4xl"
+                        >
                           {/* Queued prompts - rendered as an extension above the chat input */}
                           {activeSessionId &&
                             currentQueuedMessages.length > 0 && (
@@ -3430,7 +3644,8 @@ export function ChatWindow({
                             )}
 
                             {/* Task widget - inline fallback for narrow screens */}
-                            {activeTodos.length > 0 &&
+                            {!zenMode &&
+                              activeTodos.length > 0 &&
                               (dismissedTodoMessageId === null ||
                                 (todoSourceMessageId !== null &&
                                   todoSourceMessageId !==
@@ -3458,7 +3673,8 @@ export function ChatWindow({
                               )}
 
                             {/* Agent widget - inline fallback for narrow screens */}
-                            {activeAgents.length > 0 &&
+                            {!zenMode &&
+                              activeAgents.length > 0 &&
                               (dismissedAgentMessageId === null ||
                                 (agentSourceMessageId !== null &&
                                   agentSourceMessageId !==
@@ -3482,159 +3698,240 @@ export function ChatWindow({
                                 </div>
                               )}
 
-                            {/* Textarea section */}
-                            <div className="px-4 pt-3 pb-2 md:px-6">
-                              <ChatInput
-                                activeSessionId={activeSessionId}
-                                activeWorktreePath={activeWorktreePath}
-                                activeProjectId={worktree?.project_id ?? null}
-                                isSending={isSending}
-                                executionMode={executionMode}
-                                canSwitchBackendWithTab={
-                                  (session?.messages?.length ?? 0) === 0
-                                }
-                                focusChatShortcut={focusChatShortcut}
-                                onSubmit={handleSubmit}
-                                onCancel={handleCancel}
-                                onSwitchBackendWithTab={handleTabBackendSwitch}
-                                onCommandExecute={handleCommandExecute}
-                                onHasValueChange={setHasInputValue}
-                                onRegisterClearHandler={(
-                                  handler: (() => void) | null
-                                ) => {
-                                  clearChatInputStateRef.current = handler
-                                }}
-                                onRegisterAttachHandler={handler => {
-                                  triggerChatAttachRef.current = handler
-                                }}
-                                formRef={formRef}
-                                inputRef={inputRef}
-                                installedBackends={installedBackends}
-                                selectedBackend={selectedBackend}
-                              />
-                            </div>
-
-                            {/* Bottom toolbar */}
-                            <div>
-                              <ChatToolbar
-                                isSending={isSending}
-                                hasPendingQuestions={hasPendingQuestions}
-                                hasPendingAttachments={hasPendingAttachments}
-                                hasInputValue={hasInputValue}
-                                executionMode={executionMode}
-                                selectedBackend={selectedBackend}
-                                sessionHasMessages={
-                                  (session?.messages?.length ?? 0) > 0
-                                }
-                                selectedModel={selectedModel}
-                                selectedProvider={selectedProvider}
-                                providerLocked={
-                                  (session?.messages?.length ?? 0) > 0
-                                }
-                                selectedThinkingLevel={selectedThinkingLevel}
-                                selectedEffortLevel={selectedEffortLevel}
-                                useAdaptiveThinking={useAdaptiveThinkingFlag}
-                                hideThinkingLevel={hideThinkingLevel}
-                                baseBranch={
-                                  gitStatus?.base_branch ??
-                                  worktree?.base_branch ??
-                                  'main'
-                                }
-                                baseRemote={
-                                  gitStatus?.base_remote ?? worktree?.base_remote
-                                }
-                                uncommittedAdded={uncommittedAdded}
-                                uncommittedRemoved={uncommittedRemoved}
-                                branchDiffAdded={branchDiffAdded}
-                                branchDiffRemoved={branchDiffRemoved}
-                                prUrl={worktree?.pr_url}
-                                prNumber={worktree?.pr_number}
-                                displayStatus={displayStatus}
-                                checkStatus={checkStatus}
-                                mergeableStatus={mergeableStatus}
-                                activeWorktreePath={activeWorktreePath}
-                                worktreeId={activeWorktreeId ?? null}
-                                activeSessionId={activeSessionId}
-                                projectId={worktree?.project_id}
-                                runScripts={runScripts}
-                                loadedIssueContexts={loadedIssueContexts ?? []}
-                                loadedPRContexts={loadedPRContexts ?? []}
-                                loadedSecurityContexts={
-                                  loadedSecurityContexts ?? []
-                                }
-                                loadedAdvisoryContexts={
-                                  loadedAdvisoryContexts ?? []
-                                }
-                                loadedLinearContexts={
-                                  loadedLinearContexts ?? []
-                                }
-                                attachedSavedContexts={
-                                  attachedSavedContexts ?? []
-                                }
-                                onOpenMagicModal={handleOpenMagicModal}
-                                onSaveContext={handleSaveContext}
-                                onLoadContext={handleLoadContext}
-                                onCommit={handleCommit}
-                                onCommitAndPush={handleCommitAndPushWithPicker}
-                                onOpenPr={handleOpenPr}
-                                onReview={() => setReviewMethodModalOpen(true)}
-                                onMerge={handleMerge}
-                                onMergePr={handleMergePr}
-                                onResolvePrConflicts={handleResolvePrConflicts}
-                                onBackendModelChange={
-                                  handleToolbarBackendModelChange
-                                }
-                                onResolveConflicts={handleResolveConflicts}
-                                hasOpenPr={Boolean(worktree?.pr_url)}
-                                onSetDiffRequest={setDiffRequest}
-                                installedBackends={installedBackends}
-                                onModelChange={handleToolbarModelChange}
-                                onProviderChange={handleToolbarProviderChange}
-                                customCliProfiles={
-                                  preferences?.custom_cli_profiles ?? []
-                                }
-                                customCodexProviders={
-                                  preferences?.custom_codex_providers ?? []
-                                }
-                                onThinkingLevelChange={
-                                  handleToolbarThinkingLevelChange
-                                }
-                                onEffortLevelChange={
-                                  handleToolbarEffortLevelChange
-                                }
-                                onSetExecutionMode={
-                                  handleToolbarSetExecutionMode
-                                }
-                                onAttach={() =>
-                                  triggerChatAttachRef.current?.()
-                                }
-                                onCancel={handleCancel}
-                                willSteer={isBackendAutoSteerEnabled(
-                                  selectedBackend,
-                                  preferences
+                            <div
+                              className={cn(
+                                zenMode && 'flex items-center overflow-hidden',
+                                zenMode && 'max-h-20'
+                              )}
+                            >
+                              {/* Textarea section */}
+                              <div
+                                className={cn(
+                                  'px-4 pt-3 pb-2 md:px-6',
+                                  zenMode && 'min-w-0 flex-1'
                                 )}
-                                queuedMessageCount={
-                                  currentQueuedMessages.length
-                                }
-                                availableMcpServers={availableMcpServers}
-                                enabledMcpServers={enabledMcpServers}
-                                onToggleMcpServer={handleToggleMcpServer}
-                                onOpenProjectSettings={
-                                  handleOpenProjectSettings
-                                }
-                                onRunCommand={handleRunCommand}
-                                packageScripts={packageScripts}
-                                favoritePackageScripts={favoritePackageScripts}
-                                onRunPackageScript={handleRunPackageScript}
-                                onToggleFavoritePackageScript={
-                                  handleToggleFavoritePackageScript
-                                }
-                              />
+                              >
+                                <ChatInput
+                                  activeSessionId={activeSessionId}
+                                  activeWorktreePath={activeWorktreePath}
+                                  activeProjectId={worktree?.project_id ?? null}
+                                  isSending={isSending}
+                                  executionMode={executionMode}
+                                  canSwitchBackendWithTab={
+                                    (session?.messages?.length ?? 0) === 0
+                                  }
+                                  focusChatShortcut={focusChatShortcut}
+                                  onSubmit={handleSubmit}
+                                  onCancel={handleCancel}
+                                  onSwitchBackendWithTab={
+                                    handleTabBackendSwitch
+                                  }
+                                  onCommandExecute={handleCommandExecute}
+                                  onHasValueChange={setHasInputValue}
+                                  onSteerModifierChange={setSteerModifierActive}
+                                  onRegisterClearHandler={(
+                                    handler: (() => void) | null
+                                  ) => {
+                                    clearChatInputStateRef.current = handler
+                                  }}
+                                  onRegisterAttachHandler={handler => {
+                                    triggerChatAttachRef.current = handler
+                                  }}
+                                  formRef={formRef}
+                                  inputRef={inputRef}
+                                  installedBackends={installedBackends}
+                                  selectedBackend={selectedBackend}
+                                />
+                              </div>
+
+                              {/* Bottom toolbar */}
+                              {zenMode ? (
+                                <div className="shrink-0 pr-3">
+                                  <SendCancelButton
+                                    isSending={isSending}
+                                    canSend={
+                                      hasInputValue || hasPendingAttachments
+                                    }
+                                    willSteer={
+                                      isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      ) ||
+                                      (steerModifierActive &&
+                                        isSteerCapableBackend(selectedBackend))
+                                    }
+                                    steerWithModifier={
+                                      steerModifierActive &&
+                                      !isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      )
+                                    }
+                                    queuedMessageCount={
+                                      currentQueuedMessages.length
+                                    }
+                                    onCancel={handleCancel}
+                                  />
+                                </div>
+                              ) : (
+                                <div className={cn(zenMode && 'shrink-0')}>
+                                  <ChatToolbar
+                                    isSending={isSending}
+                                    hasPendingQuestions={hasPendingQuestions}
+                                    hasPendingAttachments={
+                                      hasPendingAttachments
+                                    }
+                                    hasInputValue={hasInputValue}
+                                    executionMode={executionMode}
+                                    selectedBackend={selectedBackend}
+                                    sessionHasMessages={
+                                      (session?.messages?.length ?? 0) > 0
+                                    }
+                                    selectedModel={selectedModel}
+                                    selectedProvider={selectedProvider}
+                                    providerLocked={
+                                      (session?.messages?.length ?? 0) > 0
+                                    }
+                                    selectedThinkingLevel={
+                                      selectedThinkingLevel
+                                    }
+                                    selectedEffortLevel={selectedEffortLevel}
+                                    useAdaptiveThinking={
+                                      useAdaptiveThinkingFlag
+                                    }
+                                    hideThinkingLevel={hideThinkingLevel}
+                                    baseBranch={
+                                      gitStatus?.base_branch ??
+                                      worktree?.base_branch ??
+                                      'main'
+                                    }
+                                    baseRemote={
+                                      gitStatus?.base_remote ??
+                                      worktree?.base_remote
+                                    }
+                                    uncommittedAdded={uncommittedAdded}
+                                    uncommittedRemoved={uncommittedRemoved}
+                                    branchDiffAdded={branchDiffAdded}
+                                    branchDiffRemoved={branchDiffRemoved}
+                                    prUrl={worktree?.pr_url}
+                                    prNumber={worktree?.pr_number}
+                                    displayStatus={displayStatus}
+                                    checkStatus={checkStatus}
+                                    mergeableStatus={mergeableStatus}
+                                    activeWorktreePath={activeWorktreePath}
+                                    worktreeId={activeWorktreeId ?? null}
+                                    activeSessionId={activeSessionId}
+                                    projectId={worktree?.project_id}
+                                    runScripts={runScripts}
+                                    loadedIssueContexts={
+                                      loadedIssueContexts ?? []
+                                    }
+                                    loadedPRContexts={loadedPRContexts ?? []}
+                                    loadedSecurityContexts={
+                                      loadedSecurityContexts ?? []
+                                    }
+                                    loadedAdvisoryContexts={
+                                      loadedAdvisoryContexts ?? []
+                                    }
+                                    loadedLinearContexts={
+                                      loadedLinearContexts ?? []
+                                    }
+                                    loadedSentryContexts={
+                                      loadedSentryContexts ?? []
+                                    }
+                                    attachedSavedContexts={
+                                      attachedSavedContexts ?? []
+                                    }
+                                    onOpenMagicModal={handleOpenMagicModal}
+                                    onSaveContext={handleSaveContext}
+                                    onLoadContext={handleLoadContext}
+                                    onCommit={handleCommit}
+                                    onCommitAndPush={
+                                      handleCommitAndPushWithPicker
+                                    }
+                                    onOpenPr={handleOpenPr}
+                                    onReview={() =>
+                                      setReviewMethodModalOpen(true)
+                                    }
+                                    onMerge={handleMerge}
+                                    onMergePr={handleMergePr}
+                                    onResolvePrConflicts={
+                                      handleResolvePrConflicts
+                                    }
+                                    onBackendModelChange={
+                                      handleToolbarBackendModelChange
+                                    }
+                                    onResolveConflicts={handleResolveConflicts}
+                                    hasOpenPr={Boolean(
+                                      worktree?.pr_number || worktree?.pr_url
+                                    )}
+                                    onSetDiffRequest={setDiffRequest}
+                                    installedBackends={installedBackends}
+                                    onModelChange={handleToolbarModelChange}
+                                    onProviderChange={
+                                      handleToolbarProviderChange
+                                    }
+                                    customCliProfiles={
+                                      preferences?.custom_cli_profiles ?? []
+                                    }
+                                    customCodexProviders={
+                                      preferences?.custom_codex_providers ?? []
+                                    }
+                                    onThinkingLevelChange={
+                                      handleToolbarThinkingLevelChange
+                                    }
+                                    onEffortLevelChange={
+                                      handleToolbarEffortLevelChange
+                                    }
+                                    onSetExecutionMode={
+                                      handleToolbarSetExecutionMode
+                                    }
+                                    onAttach={() =>
+                                      triggerChatAttachRef.current?.()
+                                    }
+                                    onCancel={handleCancel}
+                                    willSteer={
+                                      isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      ) ||
+                                      (steerModifierActive &&
+                                        isSteerCapableBackend(selectedBackend))
+                                    }
+                                    steerWithModifier={
+                                      steerModifierActive &&
+                                      !isBackendAutoSteerEnabled(
+                                        selectedBackend,
+                                        preferences
+                                      )
+                                    }
+                                    queuedMessageCount={
+                                      currentQueuedMessages.length
+                                    }
+                                    availableMcpServers={availableMcpServers}
+                                    enabledMcpServers={enabledMcpServers}
+                                    onToggleMcpServer={handleToggleMcpServer}
+                                    onOpenProjectSettings={
+                                      handleOpenProjectSettings
+                                    }
+                                    onRunCommand={handleRunCommand}
+                                    packageScripts={packageScripts}
+                                    favoritePackageScripts={
+                                      favoritePackageScripts
+                                    }
+                                    onRunPackageScript={handleRunPackageScript}
+                                    onToggleFavoritePackageScript={
+                                      handleToggleFavoritePackageScript
+                                    }
+                                  />
+                                </div>
+                              )}
                             </div>
                           </form>
 
                           {/* Side panel widgets (Tasks + Agents) for wide screens */}
-                          {!terminalPanelOpen &&
+                          {!zenMode &&
+                            !terminalPanelOpen &&
                             (activeTodos.length > 0 ||
                               activeAgents.length > 0) && (
                               <div className="hidden xl:flex flex-col gap-2 absolute left-full bottom-0 ml-3 w-64 z-20">
@@ -3729,12 +4026,6 @@ export function ChatWindow({
             )}
           </ResizablePanelGroup>
         )}
-
-        {/* File content modal for viewing files from tool calls */}
-        <FileContentModal
-          filePath={viewingFilePath}
-          onClose={() => setViewingFilePath(null)}
-        />
 
         {/* Git diff modal for viewing diffs */}
         <Suspense fallback={null}>

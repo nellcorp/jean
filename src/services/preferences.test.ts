@@ -41,6 +41,7 @@ import {
   defaultPreferences,
 } from '@/types/preferences'
 import { DEFAULT_KEYBINDINGS } from '@/types/keybindings'
+import { clearClientPreferencesForTests } from '@/lib/client-preferences'
 
 vi.mock('@/lib/transport', () => ({
   invoke: vi.fn(),
@@ -133,6 +134,16 @@ describe('model option helpers', () => {
     expect(normalizeClaudeModel('claude-opus-4-7')).toBe('claude-opus-4-7')
     expect(normalizeClaudeModel('claude-opus-4-6')).toBe('claude-opus-4-6')
     expect(normalizeClaudeModel('claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
+    // Custom CLI providers keep Claude Code aliases for ANTHROPIC_DEFAULT_* routing
+    expect(
+      normalizeClaudeModel('sonnet', { preserveProviderAliases: true })
+    ).toBe('sonnet')
+    expect(
+      normalizeClaudeModel('opus', { preserveProviderAliases: true })
+    ).toBe('opus')
+    expect(
+      normalizeClaudeModel('haiku', { preserveProviderAliases: true })
+    ).toBe('haiku')
   })
 
   it('offers GPT 5.6 preview variants in Codex selectors', () => {
@@ -211,6 +222,11 @@ describe('model option helpers', () => {
       'Do NOT create git worktrees manually'
     )
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('Jean MCP/tools')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('Jean Run Environment')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain('get_run_environments')
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'test against its `url`, port, and startup command'
+    )
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       'VERY IMPORTANT: Keep Code Simple'
     )
@@ -240,6 +256,7 @@ describe('preferences service', () => {
   let queryClient: QueryClient
 
   beforeEach(() => {
+    clearClientPreferencesForTests()
     queryClient = createTestQueryClient()
     vi.clearAllMocks()
     // Mock Tauri environment
@@ -1305,8 +1322,23 @@ describe('preferences service', () => {
   })
 
   describe('AppearancePane scaling', () => {
-    it('syncs desktop and mobile scaling by default', async () => {
+    it(
+      'stores desktop/mobile zoom on this client only (not shared prefs)',
+      async () => {
       const { invoke } = await import('@/lib/transport')
+      const {
+        clearClientZoomForTests,
+        readClientZoom,
+        writeClientZoom,
+      } = await import('@/lib/client-zoom')
+      clearClientZoomForTests()
+      // Seed client zoom so the pane does not depend on async prefs hydrate.
+      writeClientZoom({
+        zoom_level: ZOOM_LEVEL_DEFAULT,
+        mobile_zoom_level: ZOOM_LEVEL_DEFAULT,
+        sync_zoom_levels: true,
+      })
+
       let storedPreferences = { ...defaultPreferences }
       vi.mocked(invoke).mockImplementation(async (command, args) => {
         if (command === 'load_preferences') return storedPreferences
@@ -1337,43 +1369,96 @@ describe('preferences service', () => {
         'data-disabled'
       )
 
+      const patchCallsBefore = vi
+        .mocked(invoke)
+        .mock.calls.filter(([command]) => command === 'patch_preferences')
+        .length
+
       await user.click(syncCheckbox)
 
       await waitFor(() => {
-        expect(invoke).toHaveBeenCalledWith('patch_preferences', {
-          patch: {
-            sync_zoom_levels: false,
-            mobile_zoom_level: ZOOM_LEVEL_DEFAULT,
-          },
-        })
         expect(syncCheckbox).not.toBeChecked()
-        expect(screen.getAllByRole('slider').at(-1)).not.toHaveAttribute(
-          'data-disabled'
-        )
+        expect(readClientZoom()?.sync_zoom_levels).toBe(false)
       })
+      expect(screen.getAllByRole('slider').at(-1)).not.toHaveAttribute(
+        'data-disabled'
+      )
+
+      // Zoom must not be written to shared server preferences (issue #622).
+      const patchCallsAfterSync = vi
+        .mocked(invoke)
+        .mock.calls.filter(([command]) => command === 'patch_preferences')
+      expect(patchCallsAfterSync).toHaveLength(patchCallsBefore)
 
       const mobileSlider = screen.getAllByRole('slider').at(-1)
-      mobileSlider?.focus()
+      expect(mobileSlider).toBeTruthy()
+      if (!mobileSlider) throw new Error('expected mobile zoom slider')
+      mobileSlider.focus()
       await user.keyboard('{ArrowRight}')
 
       await waitFor(() => {
-        expect(invoke).toHaveBeenCalledWith('patch_preferences', {
-          patch: { mobile_zoom_level: 100 },
-        })
+        expect(readClientZoom()?.mobile_zoom_level).toBe(110)
       })
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.filter(([command]) => command === 'patch_preferences')
+      ).toHaveLength(patchCallsBefore)
+
+      clearClientZoomForTests()
+    },
+      15_000
+    )
+  })
+
+  describe('AppearancePane finished session animation', () => {
+    it('toggles the finished session animation preference', async () => {
+      const { invoke } = await import('@/lib/transport')
+      let storedPreferences = {
+        ...defaultPreferences,
+        finished_session_animation_enabled: true,
+      }
+      vi.mocked(invoke).mockImplementation(async (command, args) => {
+        if (command === 'load_preferences') return storedPreferences
+        if (command === 'patch_preferences') {
+          storedPreferences = {
+            ...storedPreferences,
+            ...(args as { patch: Partial<AppPreferences> }).patch,
+          }
+          return undefined
+        }
+        throw new Error(`Unexpected command ${command}`)
+      })
+
+      const user = userEvent.setup()
+      render(
+        createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          createElement(AppearancePane)
+        )
+      )
+
+      const switchEl = await screen.findByRole('switch', {
+        name: 'Finished session animation',
+      })
+      expect(switchEl).toHaveAttribute('aria-checked', 'true')
+
+      await user.click(switchEl)
+
+      await waitFor(() => expect(switchEl).toHaveAttribute('aria-checked', 'false'))
+      expect(invoke).not.toHaveBeenCalledWith('patch_preferences', expect.anything())
+      expect(switchEl).toHaveAttribute('aria-checked', 'false')
     })
   })
 
   describe('AppearancePane window vibrancy', () => {
-    it('keeps the switch off and skips runtime vibrancy when persistence fails', async () => {
+    it('stores window vibrancy locally and applies it to the native window', async () => {
       const { invoke } = await import('@/lib/transport')
       const { toast } = await import('sonner')
       vi.mocked(invoke).mockImplementation(async command => {
         if (command === 'load_preferences') {
           return { ...defaultPreferences, window_vibrancy: false }
-        }
-        if (command === 'patch_preferences') {
-          throw new Error('Save failed')
         }
         if (command === 'set_window_vibrancy') return undefined
         throw new Error(`Unexpected command ${command}`)
@@ -1388,28 +1473,24 @@ describe('preferences service', () => {
         )
       )
 
-      const switchEl = await screen.findByRole('switch')
+      const switchEl = await screen.findByRole('switch', {
+        name: 'Window transparency',
+      })
       expect(switchEl).toHaveAttribute('aria-checked', 'false')
 
       await user.click(switchEl)
 
-      await waitFor(() => {
-        expect(invoke).toHaveBeenCalledWith('patch_preferences', {
-          patch: { window_vibrancy: true },
-        })
-      })
-      expect(invoke).not.toHaveBeenCalledWith('set_window_vibrancy', {
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_window_vibrancy', {
         enabled: true,
-      })
+      }))
+      expect(invoke).not.toHaveBeenCalledWith('patch_preferences', expect.anything())
       expect(
         queryClient.getQueryData<AppPreferences>(
           preferencesQueryKeys.preferences()
         )?.window_vibrancy
-      ).toBe(false)
-      expect(switchEl).toHaveAttribute('aria-checked', 'false')
-      expect(toast.error).toHaveBeenCalledWith('Failed to save preferences', {
-        description: 'Save failed',
-      })
+      ).toBe(true)
+      expect(switchEl).toHaveAttribute('aria-checked', 'true')
+      expect(toast.error).not.toHaveBeenCalled()
     })
   })
 })

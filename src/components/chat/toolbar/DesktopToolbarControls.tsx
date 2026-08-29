@@ -9,6 +9,7 @@ import {
   Shield,
   ShieldAlert,
   Wand2,
+  Bug,
 } from 'lucide-react'
 import { useCallback } from 'react'
 import { Kbd } from '@/components/ui/kbd'
@@ -47,6 +48,7 @@ import type {
   LoadedAdvisoryContext,
 } from '@/types/github'
 import type { LoadedLinearIssueContext } from '@/types/linear'
+import type { SentryIssueContext } from '@/types/sentry'
 import { LinearIcon } from '@/components/icons/LinearIcon'
 import type {
   CheckStatus,
@@ -60,8 +62,10 @@ import {
   EFFORT_LEVEL_OPTIONS,
   GROK_EFFORT_LEVEL_OPTIONS,
   KIMI_EFFORT_LEVEL_OPTIONS,
+  ANTIGRAVITY_EFFORT_LEVEL_OPTIONS,
   PI_EFFORT_LEVEL_OPTIONS,
   THINKING_LEVEL_OPTIONS,
+  withAdaptiveEffortOption,
 } from '@/components/chat/toolbar/toolbar-options'
 import {
   getPrStatusDisplay,
@@ -71,6 +75,9 @@ import { DesktopBackendModelPicker } from '@/components/chat/toolbar/DesktopBack
 import { ExecutionModeDropdown } from '@/components/chat/toolbar/ExecutionModeDropdown'
 import { DockBurgerButton } from '@/components/chat/toolbar/DockBurgerButton'
 import type { ModelReasoningCapability } from '@/services/model-catalog'
+
+/** Stable default so omit/undefined doesn't allocate a new [] each render. */
+const EMPTY_CODEX_PROVIDERS: CodexProviderProfile[] = []
 
 interface DesktopToolbarControlsProps {
   hasPendingQuestions: boolean
@@ -106,6 +113,7 @@ interface DesktopToolbarControlsProps {
   loadedSecurityContexts: LoadedSecurityAlertContext[]
   loadedAdvisoryContexts: LoadedAdvisoryContext[]
   loadedLinearContexts: LoadedLinearIssueContext[]
+  loadedSentryContexts: SentryIssueContext[]
   attachedSavedContexts: AttachedSavedContext[]
 
   providerDropdownOpen: boolean
@@ -135,6 +143,7 @@ interface DesktopToolbarControlsProps {
   handleViewSecurityAlert: (ctx: LoadedSecurityAlertContext) => void
   handleViewAdvisory: (ctx: LoadedAdvisoryContext) => void
   handleViewLinear: (ctx: LoadedLinearIssueContext) => void
+  handleViewSentry: (ctx: SentryIssueContext) => void
   handleViewSavedContext: (ctx: AttachedSavedContext) => void
 }
 
@@ -151,7 +160,7 @@ export function DesktopToolbarControls({
   sessionHasMessages,
   providerLocked,
   customCliProfiles,
-  customCodexProviders = [],
+  customCodexProviders = EMPTY_CODEX_PROVIDERS,
   isCodex,
   modelReasoning,
   prUrl,
@@ -169,6 +178,7 @@ export function DesktopToolbarControls({
   loadedSecurityContexts,
   loadedAdvisoryContexts,
   loadedLinearContexts,
+  loadedSentryContexts,
   attachedSavedContexts,
   providerDropdownOpen,
   thinkingDropdownOpen,
@@ -195,34 +205,54 @@ export function DesktopToolbarControls({
   handleViewSecurityAlert,
   handleViewAdvisory,
   handleViewLinear,
+  handleViewSentry,
   handleViewSavedContext,
 }: DesktopToolbarControlsProps) {
   const isPi = selectedBackend === 'pi'
   const isGrok = selectedBackend === 'grok'
   const isKimi = selectedBackend === 'kimi'
+  const isAntigravity = selectedBackend === 'antigravity'
   const usesEffortControl =
     modelReasoning?.type === 'effort' ||
     (modelReasoning === undefined &&
-      (useAdaptiveThinking || isCodex || isPi || isGrok || isKimi))
+      (useAdaptiveThinking ||
+        isCodex ||
+        isPi ||
+        isGrok ||
+        isKimi ||
+        isAntigravity))
   const effortLevelOptions =
     modelReasoning?.type === 'effort'
-      ? modelReasoning.levels
-      : isPi
-        ? PI_EFFORT_LEVEL_OPTIONS
-        : isCodex
-          ? CODEX_EFFORT_LEVEL_OPTIONS
-          : isKimi
-            ? KIMI_EFFORT_LEVEL_OPTIONS
-            : isGrok
-              ? GROK_EFFORT_LEVEL_OPTIONS
-              : EFFORT_LEVEL_OPTIONS
+      ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
+      : isAntigravity
+        ? ANTIGRAVITY_EFFORT_LEVEL_OPTIONS
+        : isPi
+          ? withAdaptiveEffortOption(PI_EFFORT_LEVEL_OPTIONS, selectedModel)
+          : isCodex
+            ? withAdaptiveEffortOption(
+                CODEX_EFFORT_LEVEL_OPTIONS,
+                selectedModel
+              )
+            : isKimi
+              ? withAdaptiveEffortOption(
+                  KIMI_EFFORT_LEVEL_OPTIONS,
+                  selectedModel
+                )
+              : isGrok
+                ? withAdaptiveEffortOption(
+                    GROK_EFFORT_LEVEL_OPTIONS,
+                    selectedModel
+                  )
+                : withAdaptiveEffortOption(EFFORT_LEVEL_OPTIONS, selectedModel)
   const thinkingLevelOptions =
     modelReasoning?.type === 'thinking'
-      ? modelReasoning.levels
-      : THINKING_LEVEL_OPTIONS
+      ? withAdaptiveEffortOption(modelReasoning.levels, selectedModel)
+      : withAdaptiveEffortOption(THINKING_LEVEL_OPTIONS, selectedModel)
+  const effortOptionValues = new Set(effortLevelOptions.map(o => o.value))
+  const thinkingOptionValues = new Set(thinkingLevelOptions.map(o => o.value))
   const displayedEffortLevel =
     modelReasoning?.type === 'effort'
-      ? modelReasoning.levels.some(o => o.value === selectedEffortLevel)
+      ? effortOptionValues.has(selectedEffortLevel)
         ? selectedEffortLevel
         : modelReasoning.default
       : isCodex || isPi
@@ -237,9 +267,9 @@ export function DesktopToolbarControls({
   const displayedEffortLabel =
     effortLevelOptions.find(o => o.value === displayedEffortLevel)?.label ??
     displayedEffortLevel
-  const displayedThinkingLevel =
-    modelReasoning?.type === 'thinking' &&
-    !modelReasoning.levels.some(o => o.value === selectedThinkingLevel)
+  const displayedThinkingLevel = thinkingOptionValues.has(selectedThinkingLevel)
+    ? selectedThinkingLevel
+    : modelReasoning?.type === 'thinking'
       ? modelReasoning.default
       : selectedThinkingLevel
   const displayedThinkingLabel =
@@ -262,6 +292,7 @@ export function DesktopToolbarControls({
   const loadedSecurityCount =
     loadedSecurityContexts.length + loadedAdvisoryContexts.length
   const loadedLinearCount = loadedLinearContexts.length
+  const loadedSentryCount = loadedSentryContexts.length
   const loadedContextCount = attachedSavedContexts.length
   const providerDisplayName = getProviderDisplayName(
     selectedProvider,
@@ -312,6 +343,7 @@ export function DesktopToolbarControls({
         loadedPRCount > 0 ||
         loadedSecurityCount > 0 ||
         loadedLinearCount > 0 ||
+        loadedSentryCount > 0 ||
         loadedContextCount > 0) && (
         <>
           <div className="hidden @xl:block h-4 w-px bg-border/50" />
@@ -319,6 +351,7 @@ export function DesktopToolbarControls({
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
+                aria-label="Loaded contexts"
                 className="hidden @xl:flex h-8 items-center gap-1.5 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground"
               >
                 <CircleDot className="h-3.5 w-3.5" />
@@ -328,6 +361,7 @@ export function DesktopToolbarControls({
                     loadedPRCount > 0 && `${loadedPRCount}`,
                     loadedSecurityCount > 0 && `${loadedSecurityCount}`,
                     loadedLinearCount > 0 && `${loadedLinearCount}`,
+                    loadedSentryCount > 0 && `${loadedSentryCount}`,
                     loadedContextCount > 0 && `${loadedContextCount}`,
                   ]
                     .filter(Boolean)
@@ -351,6 +385,8 @@ export function DesktopToolbarControls({
                         #{ctx.number} {ctx.title}
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -382,6 +418,8 @@ export function DesktopToolbarControls({
                         #{ctx.number} {ctx.title}
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -414,6 +452,8 @@ export function DesktopToolbarControls({
                         #{ctx.number} {ctx.packageName} ({ctx.severity})
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -449,6 +489,8 @@ export function DesktopToolbarControls({
                         {ctx.ghsaId} — {ctx.summary}
                       </span>
                       <button
+                        type="button"
+                        aria-label="Open external link"
                         className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                         onClick={e => {
                           e.stopPropagation()
@@ -486,10 +528,51 @@ export function DesktopToolbarControls({
                       </span>
                       {ctx.url && (
                         <button
+                          type="button"
+                          aria-label="Open external link"
                           className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
                           onClick={e => {
                             e.stopPropagation()
                             if (ctx.url) openExternal(ctx.url)
+                          }}
+                        >
+                          <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                        </button>
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                </>
+              )}
+
+              {loadedSentryContexts.length > 0 && (
+                <>
+                  {(loadedIssueContexts.length > 0 ||
+                    loadedPRContexts.length > 0 ||
+                    loadedSecurityContexts.length > 0 ||
+                    loadedAdvisoryContexts.length > 0 ||
+                    loadedLinearContexts.length > 0) && (
+                    <DropdownMenuSeparator />
+                  )}
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">
+                    Sentry Issues
+                  </DropdownMenuLabel>
+                  {loadedSentryContexts.map(ctx => (
+                    <DropdownMenuItem
+                      key={ctx.id}
+                      onClick={() => handleViewSentry(ctx)}
+                    >
+                      <Bug className="h-4 w-4 text-orange-500" />
+                      <span className="truncate">
+                        {ctx.shortId} {ctx.title}
+                      </span>
+                      {ctx.permalink && (
+                        <button
+                          type="button"
+                          aria-label="Open external link"
+                          className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
+                          onClick={event => {
+                            event.stopPropagation()
+                            openExternal(ctx.permalink)
                           }}
                         >
                           <ExternalLink className="h-3.5 w-3.5 opacity-60" />
@@ -506,7 +589,8 @@ export function DesktopToolbarControls({
                     loadedPRContexts.length > 0 ||
                     loadedSecurityContexts.length > 0 ||
                     loadedAdvisoryContexts.length > 0 ||
-                    loadedLinearContexts.length > 0) && (
+                    loadedLinearContexts.length > 0 ||
+                    loadedSentryContexts.length > 0) && (
                     <DropdownMenuSeparator />
                   )}
                   <DropdownMenuLabel className="text-xs text-muted-foreground">

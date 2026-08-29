@@ -19,6 +19,8 @@ use crate::projects::storage::load_projects_data;
 
 /// Default global system prompt (must match DEFAULT_GLOBAL_SYSTEM_PROMPT in preferences.ts)
 const DEFAULT_GLOBAL_SYSTEM_PROMPT: &str = "\
+Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
+\n\
 ### 1. Planning Guidance\n\
 - For non-trivial tasks (3+ steps or architectural decisions), prefer planning before implementation when the current execution mode has not already authorized execution.\n\
 - If something goes sideways, STOP and re-plan immediately - don't keep pushing\n\
@@ -54,6 +56,7 @@ const DEFAULT_GLOBAL_SYSTEM_PROMPT: &str = "\
 - Diff behavior between main and your changes when relevant\n\
 - Ask yourself: \"Would a staff engineer approve this?\"\n\
 - Run tests, check logs, demonstrate correctness\n\
+- Before UI, HTTP, browser, or end-to-end verification, call Jean MCP `get_run_environments` and test against the returned url/port/command when a Run environment is available.\n\
 \n\
 ### 6. Demand Elegance (Balanced)\n\
 - For non-trivial changes: pause and ask \"is there a more elegant way?\"\n\
@@ -91,6 +94,12 @@ const DEFAULT_GLOBAL_SYSTEM_PROMPT: &str = "\
 - Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.\n\
 - If a new worktree is explicitly required, use Jean's worktree features through Jean MCP/tools, not raw git worktree commands.\n\
 - If already in a Jean worktree or base/main workspace, continue in the current workspace.\n\
+\n\
+## Jean Run Environment\n\
+- When you need to test a running app (UI, HTTP, browser, smoke, e2e), call Jean MCP `get_run_environments` first (pass this worktreeId when known).\n\
+- If an environment is running, test against its `url`, port, and startup command. Do not guess localhost ports or start a second dev server when Jean already has one.\n\
+- If nothing is running and verification needs a live server, say so and use the returned/startup command rather than inventing a different command or port.\n\
+- In how-to-test notes, include the exact URL/port you used.\n\
 \n\
 ## Important!\n\
 \n\
@@ -182,7 +191,7 @@ pub struct ErrorEvent {
 pub struct CancelledEvent {
     pub session_id: String,
     pub worktree_id: String, // Kept for backward compatibility
-    pub undo_send: bool, // True if user message should be restored to input (instant cancellation)
+    pub undo_send: bool,     // True only when the prompt never started (restore to input)
     pub emitted_at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
@@ -399,6 +408,34 @@ fn split_fast_model(model: &str) -> (&str, bool) {
     }
 }
 
+fn claude_permission_mode(execution_mode: Option<&str>, running_as_root: bool) -> &'static str {
+    match execution_mode.unwrap_or("plan") {
+        "build" => "acceptEdits",
+        // Claude Code rejects bypassPermissions when the process runs as root.
+        // Fall back to its most permissive supported mode so server installs
+        // can still start a Claude turn instead of producing no chat output.
+        "yolo" if running_as_root => "acceptEdits",
+        "yolo" => "bypassPermissions",
+        _ => "plan",
+    }
+}
+
+fn claude_allows_all_bash(execution_mode: Option<&str>) -> bool {
+    execution_mode == Some("yolo")
+}
+
+fn is_running_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions and does not mutate memory.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /// Build CLI arguments for Claude CLI.
 ///
 /// Returns a tuple of (args, env_vars) where env_vars are (key, value) pairs.
@@ -418,6 +455,7 @@ fn build_claude_args(
     mcp_config: Option<&str>,
     chrome_enabled: bool,
     custom_profile_name: Option<&str>,
+    include_recap: bool,
 ) -> (Vec<String>, Vec<(String, String)>) {
     let mut args = Vec::new();
     let mut env_vars = Vec::new();
@@ -503,11 +541,8 @@ fn build_claude_args(
     };
 
     // Permission mode
-    let perm_mode = match execution_mode.unwrap_or("plan") {
-        "build" => "acceptEdits",
-        "yolo" => "bypassPermissions",
-        _ => "plan",
-    };
+    let running_as_root = is_running_as_root();
+    let perm_mode = claude_permission_mode(execution_mode, running_as_root);
     args.push("--permission-mode".to_string());
     args.push(perm_mode.to_string());
 
@@ -552,20 +587,25 @@ fn build_claude_args(
                 );
             }
         }
-        // If Off, don't send any thinking/effort settings (but still send custom profile if present)
+        // Off / Adaptive: omit thinking/effort settings so the model decides
+        // (still send custom profile / other settings if present)
     } else {
         // Traditional thinking levels (Sonnet, Haiku)
         if let Some(level) = thinking_level {
-            let obj = settings_json.get_or_insert_with(|| serde_json::json!({}));
-            if let Some(map) = obj.as_object_mut() {
-                map.insert(
-                    "alwaysThinkingEnabled".to_string(),
-                    serde_json::Value::Bool(level.is_enabled()),
-                );
-            }
+            // Adaptive: omit alwaysThinkingEnabled / MAX_THINKING_TOKENS so
+            // models that support adaptive thinking can choose depth.
+            if !level.omits_thinking_settings() {
+                let obj = settings_json.get_or_insert_with(|| serde_json::json!({}));
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert(
+                        "alwaysThinkingEnabled".to_string(),
+                        serde_json::Value::Bool(level.is_enabled()),
+                    );
+                }
 
-            if let Some(tokens) = level.thinking_tokens() {
-                env_vars.push(("MAX_THINKING_TOKENS".to_string(), tokens.to_string()));
+                if let Some(tokens) = level.thinking_tokens() {
+                    env_vars.push(("MAX_THINKING_TOKENS".to_string(), tokens.to_string()));
+                }
             }
         }
     }
@@ -595,6 +635,12 @@ fn build_claude_args(
     }
 
     // Allowed tools
+    // Make unrestricted shell access explicit for every YOLO session. This is
+    // also required when root uses the acceptEdits compatibility fallback.
+    if claude_allows_all_bash(execution_mode) {
+        args.push("--allowedTools".to_string());
+        args.push("Bash(*)".to_string());
+    }
     if let Some(tools) = allowed_tools {
         for tool in tools {
             args.push("--allowedTools".to_string());
@@ -724,8 +770,9 @@ fn build_claude_args(
         }
     }
 
-    // End-of-turn recap instruction (compact view surfaces this block)
-    if super::should_add_recap_instruction(app) {
+    // End-of-turn recap instruction (compact view surfaces this block).
+    // Magic release notes skip this — the recap would cover the actual notes.
+    if super::should_include_recap_instruction(app, include_recap) {
         system_prompt_parts.push(super::RECAP_INSTRUCTION.to_string());
     }
 
@@ -1146,6 +1193,7 @@ pub fn execute_claude_detached(
     mcp_config: Option<&str>,
     chrome_enabled: bool,
     custom_profile_name: Option<&str>,
+    include_recap: bool,
     pid_callback: Option<Box<dyn FnOnce(u32) + Send>>,
 ) -> Result<(u32, ClaudeResponse), String> {
     use super::detached::spawn_detached_claude;
@@ -1190,6 +1238,7 @@ pub fn execute_claude_detached(
         mcp_config,
         chrome_enabled,
         custom_profile_name,
+        include_recap,
     );
 
     // Log the full Claude CLI command for debugging
@@ -1313,6 +1362,40 @@ fn flush_pending_chunks(
     }
 }
 
+fn startup_failure_message(
+    startup_failed: bool,
+    user_cancelled: bool,
+    full_content: &str,
+    error_lines: &[String],
+) -> Option<String> {
+    if !startup_failed || user_cancelled || !full_content.is_empty() {
+        return None;
+    }
+
+    if !error_lines.is_empty() {
+        return Some(format!("Claude CLI failed: {}", error_lines.join("\n")));
+    }
+
+    Some(
+        "Claude CLI produced no output and was stopped. It may have failed to start; \
+         check the Claude CLI installation and, in WSL mode, the distro configuration."
+            .to_string(),
+    )
+}
+
+fn terminate_failed_startup(pid: u32) {
+    if pid <= 1 {
+        return;
+    }
+
+    if let Err(tree_error) = crate::platform::kill_process_tree(pid) {
+        log::warn!("Failed to terminate startup process group {pid}: {tree_error}");
+        if let Err(process_error) = crate::platform::kill_process(pid) {
+            log::warn!("Failed to terminate startup process {pid}: {process_error}");
+        }
+    }
+}
+
 /// Tail an NDJSON output file and emit events as new lines appear.
 ///
 /// This is used for detached Claude CLI processes where the CLI writes
@@ -1359,6 +1442,7 @@ pub fn tail_claude_output(
     let mut completed = false;
     let mut cancelled = false;
     let mut user_cancelled = false; // True only for explicit user cancel (not process death)
+    let mut startup_failed = false; // True when Claude produced no output before the startup timeout / died starting up
     let mut usage: Option<UsageData> = None;
     let mut error_lines: Vec<String> = Vec::new();
     // Synthesized denials: Claude CLI doesn't populate `permission_denials` in
@@ -1512,10 +1596,11 @@ pub fn tail_claude_output(
                     let Some(pending_tool) = pending_stream_tools.remove(&index) else {
                         continue;
                     };
-                    let input_buf = pending_stream_tool_inputs.remove(&index).unwrap_or_default();
+                    let input_buf = pending_stream_tool_inputs
+                        .remove(&index)
+                        .unwrap_or_default();
 
-                    if pending_tool.name != "AskUserQuestion"
-                        && pending_tool.name != "ExitPlanMode"
+                    if pending_tool.name != "AskUserQuestion" && pending_tool.name != "ExitPlanMode"
                     {
                         continue;
                     }
@@ -2134,11 +2219,11 @@ pub fn tail_claude_output(
                     if let Some(denials) = msg.get("permission_denials").and_then(|v| v.as_array())
                     {
                         for d in denials {
-                            let Some(tool_name) = d.get("tool_name").and_then(|v| v.as_str()) else {
+                            let Some(tool_name) = d.get("tool_name").and_then(|v| v.as_str())
+                            else {
                                 continue;
                             };
-                            let Some(tool_use_id) =
-                                d.get("tool_use_id").and_then(|v| v.as_str())
+                            let Some(tool_use_id) = d.get("tool_use_id").and_then(|v| v.as_str())
                             else {
                                 continue;
                             };
@@ -2426,6 +2511,7 @@ pub fn tail_claude_output(
                     elapsed.as_secs_f64()
                 );
                 cancelled = true;
+                startup_failed = true;
                 break;
             }
 
@@ -2435,6 +2521,7 @@ pub fn tail_claude_output(
                     startup_timeout
                 );
                 cancelled = true;
+                startup_failed = true;
                 break;
             }
 
@@ -2505,6 +2592,26 @@ pub fn tail_claude_output(
         }
     }
 
+    if let Some(error) =
+        startup_failure_message(startup_failed, user_cancelled, &full_content, &error_lines)
+    {
+        // A startup timeout can leave a live process behind. End the complete
+        // process group before returning the terminal error to the caller.
+        if is_process_alive(pid) {
+            terminate_failed_startup(pid);
+        }
+        log::warn!("Claude CLI startup failed for session {session_id}: {error}");
+        let _ = app.emit_all(
+            "chat:error",
+            &ErrorEvent {
+                session_id: session_id.to_string(),
+                worktree_id: worktree_id.to_string(),
+                error: error.clone(),
+            },
+        );
+        return Err(error);
+    }
+
     if !error_lines.is_empty() && full_content.is_empty() {
         let error_text = error_lines.join("\n");
         log::warn!("CLI error output for session {session_id}: {error_text}");
@@ -2555,6 +2662,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn startup_failure_uses_cli_output_when_available() {
+        let lines = vec!["claude: command not found".to_string()];
+
+        assert_eq!(
+            startup_failure_message(true, false, "", &lines),
+            Some("Claude CLI failed: claude: command not found".to_string())
+        );
+    }
+
+    #[test]
+    fn startup_failure_without_output_has_actionable_message() {
+        let message = startup_failure_message(true, false, "", &[])
+            .expect("startup failure should be terminal");
+
+        assert!(message.contains("produced no output"));
+        assert!(message.contains("WSL"));
+    }
+
+    #[test]
+    fn startup_failure_message_ignores_user_cancel_and_completed_content() {
+        assert_eq!(startup_failure_message(true, true, "", &[]), None);
+        assert_eq!(startup_failure_message(true, false, "done", &[]), None);
+        assert_eq!(startup_failure_message(false, false, "", &[]), None);
+    }
+
+    #[test]
     fn compact_metadata_accepts_snake_case_from_claude_cli() {
         let msg = serde_json::json!({
             "type": "system",
@@ -2596,6 +2729,22 @@ mod tests {
     }
 
     #[test]
+    fn yolo_uses_accept_edits_when_running_as_root() {
+        assert_eq!(claude_permission_mode(Some("yolo"), true), "acceptEdits");
+        assert!(claude_allows_all_bash(Some("yolo")));
+    }
+
+    #[test]
+    fn yolo_uses_bypass_permissions_for_non_root_users() {
+        assert_eq!(
+            claude_permission_mode(Some("yolo"), false),
+            "bypassPermissions"
+        );
+        assert!(claude_allows_all_bash(Some("yolo")));
+        assert!(!claude_allows_all_bash(Some("build")));
+    }
+
+    #[test]
     fn custom_profile_env_vars_reads_string_env_entries() {
         let settings = r#"{
             "env": {
@@ -2617,6 +2766,8 @@ mod tests {
 
     #[test]
     fn default_global_system_prompt_prefers_interactive_plan_questions() {
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
+            .contains("Always use ASD-STE100 Simplified Technical English when you talk to me."));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("backend-native interactive question UI"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Claude AskUserQuestion"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Codex request_user_input"));
@@ -2628,6 +2779,10 @@ mod tests {
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean Worktree Policy"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Do NOT create git worktrees manually"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean MCP/tools"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Jean Run Environment"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("get_run_environments"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
+            .contains("test against its `url`, port, and startup command"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("VERY IMPORTANT: Keep Code Simple"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
             .contains("Always implement the simplest maintainable solution"));
@@ -2744,8 +2899,7 @@ mod tests {
                     "delta": { "type": "input_json_delta", "partial_json": chunk }
                 }
             });
-            let (index, partial) =
-                stream_event_input_delta(&msg).expect("delta extracted");
+            let (index, partial) = stream_event_input_delta(&msg).expect("delta extracted");
             assert_eq!(index, 1);
             buf.push_str(partial);
         }

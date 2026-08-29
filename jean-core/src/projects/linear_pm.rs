@@ -424,7 +424,12 @@ pub async fn create_linear_label(
     input: Value,
 ) -> Result<Value, String> {
     let mut input = clean_input(input);
-    if input.get("name").and_then(|n| n.as_str()).unwrap_or("").is_empty() {
+    if input
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .is_empty()
+    {
         return Err("create_linear_label requires a name".to_string());
     }
     // Default to the configured team so the label is scoped to it. Callers can
@@ -533,7 +538,12 @@ pub async fn create_linear_project(
             input["teamIds"] = json!([team]);
         }
     }
-    if input.get("name").and_then(|n| n.as_str()).unwrap_or("").is_empty() {
+    if input
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .is_empty()
+    {
         return Err("create_linear_project requires a name".to_string());
     }
     if input.get("teamIds").is_none() {
@@ -592,7 +602,12 @@ pub async fn create_linear_milestone(
     let id = resolve_linear_project(&app, &project_id, linear_project_id)?
         .ok_or("No Linear project id provided or configured for this project")?;
     let mut input = clean_input(input);
-    if input.get("name").and_then(|n| n.as_str()).unwrap_or("").is_empty() {
+    if input
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .is_empty()
+    {
         return Err("create_linear_milestone requires a name".to_string());
     }
     input["projectId"] = json!(id);

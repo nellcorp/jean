@@ -32,9 +32,11 @@ function serializePendingImages(
 ): Record<string, PendingImageDraft[]> {
   const out: Record<string, PendingImageDraft[]> = {}
   for (const [sessionId, images] of Object.entries(pendingImages)) {
-    const ready = images
-      .filter(img => !img.loading && !!img.path)
-      .map(({ id, path, filename }) => ({ id, path, filename }))
+    const ready = images.flatMap(img =>
+      !img.loading && img.path
+        ? [{ id: img.id, path: img.path, filename: img.filename }]
+        : []
+    )
     if (ready.length > 0) {
       out[sessionId] = ready
     }
@@ -129,6 +131,7 @@ export function useUIStatePersistence() {
       inputDrafts,
       pendingImages,
       pendingTextFiles,
+      dismissedSetupScripts,
       reviewSidebarVisible,
       lastOpenedPerProject,
     } = useChatStore.getState()
@@ -144,8 +147,12 @@ export function useUIStatePersistence() {
     const {
       leftSidebarSize,
       leftSidebarVisible,
+      fileBrowserSize,
+      fileBrowserVisible,
+      zenMode,
       sessionTerminalIds,
       sessionPrimarySurface,
+      seenFailedWorkflowRunIds,
     } = useUIStore.getState()
     const {
       terminals,
@@ -161,18 +168,22 @@ export function useUIStatePersistence() {
     const shouldPersistTerminalRuntime = !isLocalBackend()
     const terminalInstancesForPersist = shouldPersistTerminalRuntime
       ? Object.fromEntries(
-          Object.entries(terminals)
-            .map(([worktreeId, list]) => [
-              worktreeId,
-              list.map(terminal => ({
-                id: terminal.id,
-                command: terminal.command,
-                command_args: terminal.commandArgs ?? null,
-                label: terminal.label,
-                kind: terminal.kind ?? 'panel',
-              })),
-            ])
-            .filter(([, list]) => (list as unknown[]).length > 0)
+          Object.entries(terminals).flatMap(([worktreeId, list]) => {
+            if (list.length === 0) return []
+            return [
+              [
+                worktreeId,
+                list.map(terminal => ({
+                  id: terminal.id,
+                  command: terminal.command,
+                  command_args: terminal.commandArgs ?? null,
+                  label: terminal.label,
+                  kind: terminal.kind ?? 'panel',
+                  session_id: terminal.sessionId,
+                })),
+              ] as const,
+            ]
+          })
         )
       : {}
     const browserState = useBrowserStore.getState()
@@ -192,10 +203,14 @@ export function useUIStatePersistence() {
       expanded_folder_ids: Array.from(expandedFolderIds),
       left_sidebar_size: leftSidebarSize,
       left_sidebar_visible: leftSidebarVisible,
+      file_browser_size: fileBrowserSize,
+      file_browser_visible: fileBrowserVisible,
+      zen_mode: zenMode,
       active_session_ids: activeSessionIds,
       input_drafts: inputDrafts,
       pending_images: serializePendingImages(pendingImages),
       pending_text_files: serializePendingTextFiles(pendingTextFiles),
+      dismissed_setup_scripts: Object.keys(dismissedSetupScripts),
       // Review sidebar visibility
       review_sidebar_visible: reviewSidebarVisible,
       // Modal terminal drawer state
@@ -253,6 +268,7 @@ export function useUIStatePersistence() {
           { worktree_id: entry.worktreeId, session_id: entry.sessionId },
         ])
       ),
+      seen_failed_workflow_run_ids: seenFailedWorkflowRunIds,
       version: 1, // Reset for first release
     }
   }, [])
@@ -327,6 +343,26 @@ export function useUIStatePersistence() {
       useUIStore.getState().setLeftSidebarVisible(uiState.left_sidebar_visible)
     }
 
+    // Restore file browser size (must be at least 150px to be valid)
+    if (uiState.file_browser_size != null && uiState.file_browser_size >= 150) {
+      logger.debug('Restoring file browser size', {
+        size: uiState.file_browser_size,
+      })
+      useUIStore.getState().setFileBrowserSize(uiState.file_browser_size)
+    }
+
+    // Restore file browser visibility
+    if (uiState.file_browser_visible !== undefined) {
+      logger.debug('Restoring file browser visibility', {
+        visible: uiState.file_browser_visible,
+      })
+      useUIStore.getState().setFileBrowserVisible(uiState.file_browser_visible)
+    }
+
+    if (uiState.zen_mode !== undefined) {
+      useUIStore.getState().setZenMode(uiState.zen_mode)
+    }
+
     // Restore active project first (selectProject clears selectedWorktreeId)
     // This must happen BEFORE restoring the active worktree
     if (uiState.active_project_id) {
@@ -397,18 +433,26 @@ export function useUIStatePersistence() {
       useChatStore.setState({ inputDrafts })
     }
 
+    const dismissedSetupScripts = Object.fromEntries(
+      (uiState.dismissed_setup_scripts ?? []).map(worktreeId => [
+        worktreeId,
+        true,
+      ])
+    )
+    if (Object.keys(dismissedSetupScripts).length > 0) {
+      useChatStore.setState({ dismissedSetupScripts })
+    }
+
     // Restore unsent image attachments (files already on disk)
     const pendingImagesDraft = uiState.pending_images ?? {}
     if (Object.keys(pendingImagesDraft).length > 0) {
       const restoredImages: Record<string, PendingImage[]> = {}
       for (const [sessionId, images] of Object.entries(pendingImagesDraft)) {
-        const valid = images
-          .filter(img => img.id && img.path && img.filename)
-          .map(img => ({
-            id: img.id,
-            path: img.path,
-            filename: img.filename,
-          }))
+        const valid = images.flatMap(img =>
+          img.id && img.path && img.filename
+            ? [{ id: img.id, path: img.path, filename: img.filename }]
+            : []
+        )
         if (valid.length > 0) restoredImages[sessionId] = valid
       }
       if (Object.keys(restoredImages).length > 0) {
@@ -464,8 +508,10 @@ export function useUIStatePersistence() {
       }
 
       if (needsContentHydration.length > 0) {
-        void (async () => {
-          for (const item of needsContentHydration) {
+        // Independent per-file disk reads; Zustand functional updates are safe
+        // when completions interleave.
+        void Promise.all(
+          needsContentHydration.map(async item => {
             try {
               const result = await invoke<ReadTextResponse>(
                 'read_pasted_text',
@@ -491,8 +537,8 @@ export function useUIStatePersistence() {
                 .getState()
                 .removePendingTextFile(item.sessionId, item.id)
             }
-          }
-        })()
+          })
+        )
       }
     }
 
@@ -672,10 +718,10 @@ export function useUIStatePersistence() {
         if (shouldCancel()) return
         const { disposeTerminal } = await import('@/lib/terminal-instances')
         if (shouldCancel()) return
-        for (const id of staleInstanceIds) {
-          if (shouldCancel()) return
-          await disposeTerminal(id).catch(() => undefined)
-        }
+        // Independent terminal dispose; order does not matter
+        await Promise.all(
+          staleInstanceIds.map(id => disposeTerminal(id).catch(() => undefined))
+        )
         return
       }
 
@@ -692,16 +738,21 @@ export function useUIStatePersistence() {
       }
 
       for (const [worktreeId, list] of Object.entries(persistedTerminals)) {
-        const liveList = list
-          .filter(terminal => liveTerminalIds.has(terminal.id))
-          .map(terminal => ({
-            id: terminal.id,
-            worktreeId,
-            command: terminal.command ?? null,
-            commandArgs: terminal.command_args ?? null,
-            label: terminal.label,
-            kind: terminal.kind ?? 'panel',
-          })) satisfies TerminalInstance[]
+        const liveList = list.flatMap(terminal =>
+          liveTerminalIds.has(terminal.id)
+            ? [
+                {
+                  id: terminal.id,
+                  worktreeId,
+                  command: terminal.command ?? null,
+                  commandArgs: terminal.command_args ?? null,
+                  label: terminal.label,
+                  kind: terminal.kind ?? 'panel',
+                  sessionId: terminal.session_id ?? undefined,
+                },
+              ]
+            : []
+        ) satisfies TerminalInstance[]
 
         if (liveList.length === 0) {
           restoredModalOpen[worktreeId] = false
@@ -709,7 +760,9 @@ export function useUIStatePersistence() {
         }
 
         restoredTerminals[worktreeId] = liveList
-        const livePanelIds = liveList.filter(isPanelTerminal).map(t => t.id)
+        const livePanelIds = liveList.flatMap(t =>
+          isPanelTerminal(t) ? [t.id] : []
+        )
         const persistedActiveId = uiState.terminal_active_ids?.[worktreeId]
         if (persistedActiveId && livePanelIds.includes(persistedActiveId)) {
           restoredActiveIds[worktreeId] = persistedActiveId
@@ -836,6 +889,16 @@ export function useUIStatePersistence() {
       useProjectsStore
         .getState()
         .setGitHubDashboardFavoriteProjectIds(githubDashboardFavoriteProjectIds)
+    }
+
+    const seenFailedWorkflowRunIds = uiState.seen_failed_workflow_run_ids ?? []
+    if (seenFailedWorkflowRunIds.length > 0) {
+      logger.debug('Restoring seen failed workflow run IDs', {
+        count: seenFailedWorkflowRunIds.length,
+      })
+      useUIStore
+        .getState()
+        .setSeenFailedWorkflowRunIds(seenFailedWorkflowRunIds)
     }
 
     // Restore browser pane state (per-worktree tabs + 3-surface visibility)
@@ -998,8 +1061,13 @@ export function useUIStatePersistence() {
       useProjectsStore.getState().githubDashboardFavoriteProjectIds
     let prevLeftSidebarSize = useUIStore.getState().leftSidebarSize
     let prevLeftSidebarVisible = useUIStore.getState().leftSidebarVisible
+    let prevFileBrowserSize = useUIStore.getState().fileBrowserSize
+    let prevFileBrowserVisible = useUIStore.getState().fileBrowserVisible
+    let prevZenMode = useUIStore.getState().zenMode
     let prevSessionTerminalIds = useUIStore.getState().sessionTerminalIds
     let prevSessionPrimarySurface = useUIStore.getState().sessionPrimarySurface
+    let prevSeenFailedWorkflowRunIds =
+      useUIStore.getState().seenFailedWorkflowRunIds
     let prevWorktreeId = useChatStore.getState().activeWorktreeId
     let prevWorktreePath = useChatStore.getState().activeWorktreePath
     let prevLastActiveWorktreeId = useChatStore.getState().lastActiveWorktreeId
@@ -1007,6 +1075,8 @@ export function useUIStatePersistence() {
     let prevInputDrafts = useChatStore.getState().inputDrafts
     let prevPendingImages = useChatStore.getState().pendingImages
     let prevPendingTextFiles = useChatStore.getState().pendingTextFiles
+    let prevDismissedSetupScripts =
+      useChatStore.getState().dismissedSetupScripts
     let prevReviewSidebarVisible = useChatStore.getState().reviewSidebarVisible
     let prevLastOpenedPerProject = useChatStore.getState().lastOpenedPerProject
     let prevTerminalInstances = useTerminalStore.getState().terminals
@@ -1079,21 +1149,36 @@ export function useUIStatePersistence() {
       const sizeChanged = state.leftSidebarSize !== prevLeftSidebarSize
       const visibilityChanged =
         state.leftSidebarVisible !== prevLeftSidebarVisible
+      const fileBrowserSizeChanged =
+        state.fileBrowserSize !== prevFileBrowserSize
+      const fileBrowserVisibilityChanged =
+        state.fileBrowserVisible !== prevFileBrowserVisible
+      const zenModeChanged = state.zenMode !== prevZenMode
       const sessionTerminalIdsChanged =
         state.sessionTerminalIds !== prevSessionTerminalIds
       const sessionPrimarySurfaceChanged =
         state.sessionPrimarySurface !== prevSessionPrimarySurface
+      const seenFailedWorkflowRunIdsChanged =
+        state.seenFailedWorkflowRunIds !== prevSeenFailedWorkflowRunIds
 
       if (
         sizeChanged ||
         visibilityChanged ||
+        fileBrowserSizeChanged ||
+        fileBrowserVisibilityChanged ||
+        zenModeChanged ||
         sessionTerminalIdsChanged ||
-        sessionPrimarySurfaceChanged
+        sessionPrimarySurfaceChanged ||
+        seenFailedWorkflowRunIdsChanged
       ) {
         prevLeftSidebarSize = state.leftSidebarSize
         prevLeftSidebarVisible = state.leftSidebarVisible
+        prevFileBrowserSize = state.fileBrowserSize
+        prevFileBrowserVisible = state.fileBrowserVisible
+        prevZenMode = state.zenMode
         prevSessionTerminalIds = state.sessionTerminalIds
         prevSessionPrimarySurface = state.sessionPrimarySurface
+        prevSeenFailedWorkflowRunIds = state.seenFailedWorkflowRunIds
         const currentState = getCurrentUIState()
         debouncedSaveRef.current?.(currentState)
       }
@@ -1113,6 +1198,8 @@ export function useUIStatePersistence() {
       const pendingImagesChanged = state.pendingImages !== prevPendingImages
       const pendingTextFilesChanged =
         state.pendingTextFiles !== prevPendingTextFiles
+      const dismissedSetupScriptsChanged =
+        state.dismissedSetupScripts !== prevDismissedSetupScripts
       const reviewSidebarChanged =
         state.reviewSidebarVisible !== prevReviewSidebarVisible
       const lastOpenedChanged =
@@ -1124,6 +1211,7 @@ export function useUIStatePersistence() {
         inputDraftsChanged ||
         pendingImagesChanged ||
         pendingTextFilesChanged ||
+        dismissedSetupScriptsChanged ||
         reviewSidebarChanged ||
         lastOpenedChanged
       ) {
@@ -1134,6 +1222,7 @@ export function useUIStatePersistence() {
         prevInputDrafts = state.inputDrafts
         prevPendingImages = state.pendingImages
         prevPendingTextFiles = state.pendingTextFiles
+        prevDismissedSetupScripts = state.dismissedSetupScripts
         prevReviewSidebarVisible = state.reviewSidebarVisible
         prevLastOpenedPerProject = state.lastOpenedPerProject
         const currentState = getCurrentUIState()
