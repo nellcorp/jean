@@ -14,9 +14,9 @@ import type {
   CommandCodeModelInfo,
   CommandCodeReleaseInfo,
 } from '@/types/commandcode-cli'
-import { hasBackend } from '@/lib/environment'
+import { hasBackendTransport } from '@/lib/environment'
 
-const isTauri = hasBackend
+const isTauri = hasBackendTransport
 
 export const commandcodeCliQueryKeys = {
   all: ['commandcode-cli'] as const,
@@ -192,6 +192,10 @@ export function useCommandCodeInstallProgress(): [
   return [progress, resetProgress]
 }
 
+function checkManualVersion(version: string) {
+  return invoke<boolean>('check_commandcode_cli_version_exists', { version })
+}
+
 export function useCommandCodeCliSetup() {
   const status = useCommandCodeCliStatus()
   const versions = useAvailableCommandCodeVersions()
@@ -209,6 +213,7 @@ export function useCommandCodeCliSetup() {
     })
   }
 
+
   return {
     status: status.data,
     isStatusLoading: status.isLoading,
@@ -221,6 +226,7 @@ export function useCommandCodeCliSetup() {
     installError: installMutation.error,
     progress,
     install,
+    checkManualVersion,
     refetchStatus: status.refetch,
   }
 }

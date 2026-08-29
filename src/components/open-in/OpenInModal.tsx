@@ -29,6 +29,7 @@ import {
   useProjects,
   useWorktree,
   usePorts,
+  useWebEditorUrl,
 } from '@/services/projects'
 import {
   useLoadedIssueContexts,
@@ -41,7 +42,10 @@ import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import { notify } from '@/lib/notifications'
 import { openExternal } from '@/lib/platform'
 import { cn } from '@/lib/utils'
-import { isNativeApp } from '@/lib/environment'
+import {
+  canOpenInEditor,
+  canOpenNativeApps,
+} from '@/lib/environment'
 import { resolvePortUrl } from '@/components/browser/default-tab-url'
 
 interface ModalOption {
@@ -102,7 +106,15 @@ export function OpenInModal() {
     selectedWorktreeId
   )
 
-  const isNative = isNativeApp()
+  // Finder/terminal: backend host can launch apps (local desktop, WSL headless,
+  // or --allow-native-open). Editor also works from the native shell against a
+  // remote Jean via local Zed + ssh://.
+  const canOpenLocally = canOpenNativeApps()
+  const canOpenEditor = canOpenInEditor()
+  // Browser (web access): the browser-based editor is always reachable via a
+  // `/code` URL, independent of native-open capability.
+  const hasWebEditor = useWebEditorUrl() !== null
+  const editorAvailable = canOpenEditor || hasWebEditor
 
   const targetPath = useMemo(() => {
     if (worktree?.path) return worktree.path
@@ -124,7 +136,9 @@ export function OpenInModal() {
     const allOptions: ModalOption[] = [
       {
         id: 'editor',
-        label: isNative ? getEditorLabel(preferences?.editor) : 'Open Editor',
+        label: canOpenEditor
+          ? getEditorLabel(preferences?.editor)
+          : 'Open Editor',
         icon: Code,
         key: 'E',
       },
@@ -158,15 +172,17 @@ export function OpenInModal() {
         : []),
     ]
 
-    if (isNative) return allOptions
-    // Web mode: keep editor (opens the web VS Code), drop Finder/Terminal.
-    return allOptions.filter(
-      opt => opt.id === 'editor' || opt.id === 'github' || opt.id === 'open-pr'
-    )
+    return allOptions.filter(opt => {
+      if (opt.id === 'editor') return editorAvailable
+      if (opt.id === 'terminal' || opt.id === 'finder') return canOpenLocally
+      return true
+    })
   }, [
+    editorAvailable,
     preferences?.editor,
     preferences?.terminal,
-    isNative,
+    canOpenLocally,
+    canOpenEditor,
     worktree?.pr_url,
     worktree?.pr_number,
   ])
@@ -275,12 +291,12 @@ export function OpenInModal() {
   const handleOpenChange = useCallback(
     (open: boolean) => {
       if (open && !hasInitializedRef.current) {
-        setSelectedOption('editor')
+        setSelectedOption(editorAvailable ? 'editor' : 'github')
         hasInitializedRef.current = true
       }
       setOpenInModalOpen(open)
     },
-    [setOpenInModalOpen, isNative]
+    [setOpenInModalOpen, editorAvailable]
   )
 
   const portOptions: ModalOption[] = useMemo(() => {
@@ -444,6 +460,7 @@ export function OpenInModal() {
 
     return (
       <button
+        type="button"
         key={option.id}
         onClick={() => executeAction(option.id)}
         onMouseEnter={() => setSelectedOption(option.id)}
@@ -513,6 +530,7 @@ export function OpenInModal() {
 
         <div className="border-t px-4 py-2">
           <button
+            type="button"
             onClick={handleOpenSettings}
             className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >

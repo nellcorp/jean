@@ -149,7 +149,9 @@ describe('PreferencesDialog', () => {
       'Cursor',
       'PI',
       'Command Code',
-      'Grok (Beta)',
+      'Grok',
+      'Kimi Code',
+      'Antigravity CLIBeta',
       'GitHub CLI',
       'CodeRabbit CLI',
       'Terminal',
@@ -162,9 +164,55 @@ describe('PreferencesDialog', () => {
       'Usage',
       'Experimental',
     ])
+    // Separators appear between sections (not before the first "App" section)
     expect(
       navigationMenu.querySelectorAll('[data-sidebar="separator"]')
     ).toHaveLength(5)
+    expect(
+      Array.from(
+        navigationMenu.querySelectorAll('[data-sidebar="group-label"]')
+      ).map(label => label.textContent)
+    ).toEqual([
+      'App',
+      'Backends',
+      'Tools',
+      'Connectivity',
+      'Account',
+      'Advanced',
+    ])
+
+    for (const label of ['PI', 'Command Code', 'Grok']) {
+      const button = within(navigationMenu).getByText(label).closest('button')
+      if (!button) {
+        throw new Error(`Expected ${label} navigation button to be rendered`)
+      }
+
+      expect(within(button).queryByText('Beta')).toBeNull()
+    }
+
+    const antigravityButton = within(navigationMenu)
+      .getByText('Antigravity CLI')
+      .closest('button')
+    if (!antigravityButton) {
+      throw new Error(
+        'Expected Antigravity CLI navigation button to be rendered'
+      )
+    }
+
+    expect(within(antigravityButton).getByText('Beta')).toHaveClass(
+      'bg-yellow-500/10'
+    )
+
+    const kimiButton = within(navigationMenu)
+      .getByText('Kimi Code')
+      .closest('button')
+    if (!kimiButton) {
+      throw new Error('Expected Kimi Code navigation button to be rendered')
+    }
+
+    expect(within(kimiButton).getByLabelText('Kimi Code')).toHaveClass(
+      'translate-x-0.5'
+    )
   })
 
   it('keeps the dialog open when Escape clears the desktop search', async () => {

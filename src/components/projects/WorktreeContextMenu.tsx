@@ -28,8 +28,13 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
-import { isNativeApp } from '@/lib/environment'
+import {
+  canOpenInEditor,
+  canOpenNativeApps,
+  isNativeApp,
+} from '@/lib/environment'
 import { getFileManagerName } from '@/lib/platform'
+import { useWebEditorUrl } from '@/services/projects'
 import type { useWorktreeMenuActions } from './useWorktreeMenuActions'
 
 interface WorktreeContextMenuProps {
@@ -58,6 +63,9 @@ export function WorktreeContextMenu({
     handleDelete,
   } = actions
 
+  const hasWebEditor = useWebEditorUrl() !== null
+  const showEditorItem = canOpenInEditor() || hasWebEditor
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
@@ -75,9 +83,9 @@ export function WorktreeContextMenu({
               Run
             </ContextMenuSubTrigger>
             <ContextMenuSubContent>
-              {runScripts.map((cmd, i) => (
+              {runScripts.map(cmd => (
                 <ContextMenuItem
-                  key={i}
+                  key={cmd}
                   onSelect={() => handleRunCommand(cmd)}
                   className="font-mono text-xs"
                 >
@@ -88,23 +96,25 @@ export function WorktreeContextMenu({
           </ContextMenuSub>
         )}
 
-        {isNativeApp() && <ContextMenuSeparator />}
+        {(showEditorItem || canOpenNativeApps()) && <ContextMenuSeparator />}
 
-        <ContextMenuItem onClick={handleOpenInEditor}>
-          <Code className="mr-2 h-4 w-4" />
-          {isNativeApp()
-            ? `Open in ${getEditorLabel(preferences?.editor)}`
-            : 'Open Editor'}
-        </ContextMenuItem>
+        {showEditorItem && (
+          <ContextMenuItem onClick={handleOpenInEditor}>
+            <Code className="mr-2 h-4 w-4" />
+            {isNativeApp()
+              ? `Open in ${getEditorLabel(preferences?.editor)}`
+              : 'Open Editor'}
+          </ContextMenuItem>
+        )}
 
-        {isNativeApp() && (
+        {canOpenNativeApps() && (
           <ContextMenuItem onClick={handleOpenInFinder}>
             <FolderOpen className="mr-2 h-4 w-4" />
             Open in {getFileManagerName()}
           </ContextMenuItem>
         )}
 
-        {isNativeApp() && (
+        {canOpenNativeApps() && (
           <ContextMenuItem onClick={handleOpenInTerminal}>
             <Terminal className="mr-2 h-4 w-4" />
             Open in {getTerminalLabel(preferences?.terminal)}

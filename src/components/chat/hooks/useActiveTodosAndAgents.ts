@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { isTodoWrite, isPlanToolCall } from '@/types/chat'
+import { foldTodoWriteToolCalls, isPlanToolCall } from '@/types/chat'
 import type {
   ToolCall,
   ChatMessage,
@@ -37,6 +37,142 @@ function extractPlanTodos(toolCalls: ToolCall[]): Todo[] {
   return []
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function stringField(
+  input: Record<string, unknown>,
+  snakeKey: string,
+  camelKey: string
+): string | undefined {
+  const value = input[snakeKey] ?? input[camelKey]
+  return typeof value === 'string' ? value : undefined
+}
+
+function stringArrayField(
+  input: Record<string, unknown>,
+  snakeKey: string,
+  camelKey: string
+): string[] {
+  const value = input[snakeKey] ?? input[camelKey]
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : []
+}
+
+function agentStatesField(
+  input: Record<string, unknown>
+): Record<string, Record<string, unknown>> {
+  const value = input.agents_states ?? input.agentsStates
+  const record = asRecord(value)
+  if (!record) return {}
+
+  const states: Record<string, Record<string, unknown>> = {}
+  for (const [threadId, state] of Object.entries(record)) {
+    const stateRecord = asRecord(state)
+    if (stateRecord) states[threadId] = stateRecord
+  }
+  return states
+}
+
+function normalizeCodexAgentStatus(
+  agentStatus: unknown,
+  toolCallStatus?: unknown
+): CodexAgent['status'] {
+  if (agentStatus === 'completed' || agentStatus === 'shutdown') {
+    return 'completed'
+  }
+  if (agentStatus === 'interrupted') {
+    // Authoritative interrupted terminal state — do not conflate with error
+    return 'interrupted'
+  }
+  if (
+    agentStatus === 'errored' ||
+    agentStatus === 'notFound' ||
+    toolCallStatus === 'failed'
+  ) {
+    return 'errored'
+  }
+  return 'in_progress'
+}
+
+function truncateAgentPrompt(prompt: string): string {
+  return prompt.length > 80 ? prompt.substring(0, 80) + '...' : prompt
+}
+
+export function extractCodexAgents(
+  toolCalls: ToolCall[],
+  isSending: boolean,
+  parentTurnCancelled = false
+): CodexAgent[] {
+  const agents = new Map<string, CodexAgent>()
+
+  for (const tc of toolCalls) {
+    const input = asRecord(tc.input)
+    if (!input) continue
+
+    const receiverThreadIds = stringArrayField(
+      input,
+      'receiver_thread_ids',
+      'receiverThreadIds'
+    )
+    const agentsStates = agentStatesField(input)
+    const toolCallStatus = input.status
+
+    if (tc.name === 'SpawnAgent') {
+      const prompt = stringField(input, 'prompt', 'prompt') ?? ''
+      const threadId = receiverThreadIds[0] ?? tc.id
+      const state = agentsStates[threadId]
+      agents.set(threadId, {
+        id: threadId,
+        prompt: truncateAgentPrompt(prompt),
+        status: normalizeCodexAgentStatus(state?.status, toolCallStatus),
+        message: typeof state?.message === 'string' ? state.message : undefined,
+      })
+    }
+
+    for (const threadId of receiverThreadIds) {
+      if (!agents.has(threadId)) {
+        agents.set(threadId, {
+          id: threadId,
+          prompt: threadId,
+          status: 'in_progress',
+        })
+      }
+    }
+
+    for (const [threadId, state] of Object.entries(agentsStates)) {
+      const existing = agents.get(threadId)
+      agents.set(threadId, {
+        id: existing?.id ?? threadId,
+        prompt: existing?.prompt ?? threadId,
+        status: normalizeCodexAgentStatus(state.status, toolCallStatus),
+        message:
+          typeof state.message === 'string' ? state.message : existing?.message,
+      })
+    }
+  }
+
+  // Codex sub_agent_activity has no "completed" kind. A normal parent turn end
+  // is therefore the terminal completion signal for agents that still have a
+  // running state. Keep cancellation distinct so abandoned work is not green.
+  return Array.from(agents.values()).map(agent => {
+    if (isSending || agent.status !== 'in_progress') return agent
+    return {
+      ...agent,
+      status: parentTurnCancelled
+        ? ('interrupted' as const)
+        : ('completed' as const),
+      message: parentTurnCancelled
+        ? (agent.message ?? 'Interrupted before completion')
+        : agent.message,
+    }
+  })
+}
+
 interface UseActiveTodosAndAgentsParams {
   activeSessionId: string | null | undefined
   isSending: boolean
@@ -69,15 +205,14 @@ export function useActiveTodosAndAgents({
       return { todos: [], sourceMessageId: null, isFromStreaming: false }
 
     if (isSending && currentToolCalls.length > 0) {
-      // Prefer TodoWrite tool calls
-      for (let i = currentToolCalls.length - 1; i >= 0; i--) {
-        const tc = currentToolCalls[i]
-        if (tc && isTodoWrite(tc)) {
-          return {
-            todos: tc.input.todos,
-            sourceMessageId: null,
-            isFromStreaming: true,
-          }
+      // Fold TodoWrite calls chronologically so Grok merge:true patches update
+      // the full list instead of sticking on the first snapshot.
+      const todos = foldTodoWriteToolCalls(currentToolCalls)
+      if (todos.length > 0) {
+        return {
+          todos,
+          sourceMessageId: null,
+          isFromStreaming: true,
         }
       }
       // Fall back to plan steps (Codex plans surface steps as todos)
@@ -92,15 +227,12 @@ export function useActiveTodosAndAgents({
     }
 
     if (lastAssistantMessage?.tool_calls) {
-      // Prefer TodoWrite tool calls
-      for (let i = lastAssistantMessage.tool_calls.length - 1; i >= 0; i--) {
-        const tc = lastAssistantMessage.tool_calls[i]
-        if (tc && isTodoWrite(tc)) {
-          return {
-            todos: tc.input.todos,
-            sourceMessageId: lastAssistantMessage.id,
-            isFromStreaming: false,
-          }
+      const todos = foldTodoWriteToolCalls(lastAssistantMessage.tool_calls)
+      if (todos.length > 0) {
+        return {
+          todos,
+          sourceMessageId: lastAssistantMessage.id,
+          isFromStreaming: false,
         }
       }
       // Fall back to plan steps
@@ -122,7 +254,7 @@ export function useActiveTodosAndAgents({
     string | null
   >(null)
 
-  // Get active agents from SpawnAgent tool calls
+  // Get active agents from Codex collab tool calls
   const {
     agents: activeAgents,
     sourceMessageId: agentSourceMessageId,
@@ -131,39 +263,23 @@ export function useActiveTodosAndAgents({
     if (!activeSessionId)
       return { agents: [], sourceMessageId: null, isFromStreaming: false }
 
-    const toolCalls =
-      isSending && currentToolCalls.length > 0
-        ? currentToolCalls
-        : (lastAssistantMessage?.tool_calls ?? [])
+    // A new turn starts with no tool calls. Do not reuse the previous turn's
+    // agents in that gap, or their persisted running state appears active again.
+    const toolCalls = isSending
+      ? currentToolCalls
+      : (lastAssistantMessage?.tool_calls ?? [])
 
-    const agents: CodexAgent[] = []
-    for (const tc of toolCalls) {
-      if (tc.name === 'SpawnAgent') {
-        const input = tc.input as Record<string, unknown>
-        const prompt = (input.prompt as string) ?? ''
-        const truncated =
-          prompt.length > 80 ? prompt.substring(0, 80) + '...' : prompt
-        let status: CodexAgent['status'] = 'in_progress'
-        if (tc.output && !isSending) {
-          const out = tc.output as string
-          if (out.includes('errored')) {
-            status = 'errored'
-          } else {
-            status = 'completed'
-          }
-        }
-        agents.push({ id: tc.id, prompt: truncated, status })
-      }
-    }
+    const agents = extractCodexAgents(
+      toolCalls,
+      isSending,
+      lastAssistantMessage?.cancelled === true
+    )
 
-    const sourceId =
-      isSending && currentToolCalls.length > 0
-        ? null
-        : (lastAssistantMessage?.id ?? null)
+    const sourceId = isSending ? null : (lastAssistantMessage?.id ?? null)
     return {
       agents,
       sourceMessageId: sourceId,
-      isFromStreaming: isSending && currentToolCalls.length > 0,
+      isFromStreaming: isSending && agents.length > 0,
     }
   }, [activeSessionId, isSending, currentToolCalls, lastAssistantMessage])
 

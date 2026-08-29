@@ -11,16 +11,23 @@ let nativeApp = false
 
 vi.mock('@/lib/environment', () => ({
   isNativeApp: () => nativeApp,
+  isLocalBackend: () => nativeApp,
   hasBackend: () => true,
 }))
 
-const { mockInvoke, mockUseUIState, mockUseSaveUIState, mockUseProjects } =
-  vi.hoisted(() => ({
-    mockInvoke: vi.fn(),
-    mockUseUIState: vi.fn(),
-    mockUseSaveUIState: vi.fn(() => ({ mutate: vi.fn() })),
-    mockUseProjects: vi.fn(),
-  }))
+const {
+  mockInvoke,
+  mockSaveUIState,
+  mockUseUIState,
+  mockUseSaveUIState,
+  mockUseProjects,
+} = vi.hoisted(() => ({
+  mockInvoke: vi.fn(),
+  mockSaveUIState: vi.fn(),
+  mockUseUIState: vi.fn(),
+  mockUseSaveUIState: vi.fn(),
+  mockUseProjects: vi.fn(),
+}))
 
 vi.mock('@/lib/transport', () => ({
   invoke: mockInvoke,
@@ -75,6 +82,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
       isSuccess: true,
     })
     mockUseProjects.mockReturnValue({ data: [], isSuccess: true })
+    mockUseSaveUIState.mockReturnValue({ mutate: mockSaveUIState })
 
     useTerminalStore.setState({
       terminals: {},
@@ -87,6 +95,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
     })
     useUIStore.setState({
       uiStateInitialized: false,
+      zenMode: false,
       sessionTerminalIds: {},
       sessionPrimarySurface: {},
     })
@@ -95,6 +104,273 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
       activeWorktreePath: null,
       activeSessionIds: {},
       sessionWorktreeMap: {},
+      inputDrafts: {},
+      pendingImages: {},
+      pendingTextFiles: {},
+      dismissedSetupScripts: {},
+    })
+  })
+
+  it('restores unsent input drafts for every session', async () => {
+    mockUseUIState.mockReturnValue({
+      data: buildUiState({
+        input_drafts: {
+          'session-1': 'first unsent message',
+          'session-2': 'second unsent message',
+        },
+      }),
+      isSuccess: true,
+    })
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useChatStore.getState().inputDrafts).toEqual({
+        'session-1': 'first unsent message',
+        'session-2': 'second unsent message',
+      })
+    })
+  })
+
+  it('restores zen mode after a reload', async () => {
+    mockUseUIState.mockReturnValue({
+      data: buildUiState({ zen_mode: true }),
+      isSuccess: true,
+    })
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useUIStore.getState().zenMode).toBe(true)
+    })
+  })
+
+  it('restores dismissed setup scripts after a reload', async () => {
+    mockUseUIState.mockReturnValue({
+      data: buildUiState({ dismissed_setup_scripts: ['worktree-1'] }),
+      isSuccess: true,
+    })
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useChatStore.getState().dismissedSetupScripts).toEqual({
+        'worktree-1': true,
+      })
+    })
+  })
+
+  it('restores unsent image and pasted-text attachments', async () => {
+    mockInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'get_active_terminals') return []
+      if (command === 'load_ui_state') return buildUiState()
+      if (command === 'read_pasted_text') {
+        const path = (args as { path?: string })?.path
+        if (path === '/tmp/pasted-texts/paste-1.txt') {
+          return { content: 'hydrated paste body', size: 19 }
+        }
+        throw new Error(`unexpected path: ${path}`)
+      }
+      return undefined
+    })
+    mockUseUIState.mockReturnValue({
+      data: buildUiState({
+        pending_images: {
+          'session-1': [
+            {
+              id: 'img-1',
+              path: '/tmp/pasted-images/image-1.png',
+              filename: 'image-1.png',
+            },
+          ],
+        },
+        pending_text_files: {
+          'session-1': [
+            {
+              id: 'txt-1',
+              path: '/tmp/pasted-texts/paste-1.txt',
+              filename: 'paste-1.txt',
+              size: 12,
+            },
+          ],
+        },
+      }),
+      isSuccess: true,
+    })
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useChatStore.getState().pendingImages).toEqual({
+        'session-1': [
+          {
+            id: 'img-1',
+            path: '/tmp/pasted-images/image-1.png',
+            filename: 'image-1.png',
+          },
+        ],
+      })
+    })
+
+    await waitFor(() => {
+      expect(useChatStore.getState().pendingTextFiles).toEqual({
+        'session-1': [
+          {
+            id: 'txt-1',
+            path: '/tmp/pasted-texts/paste-1.txt',
+            filename: 'paste-1.txt',
+            size: 19,
+            content: 'hydrated paste body',
+          },
+        ],
+      })
+    })
+  })
+
+  it('debounces persistence when a session input draft changes', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useUIStore.getState().uiStateInitialized).toBe(true)
+    })
+
+    useChatStore.getState().setInputDraft('session-1', 'unsent message')
+
+    await waitFor(() => {
+      expect(mockSaveUIState).toHaveBeenCalledTimes(1)
+    })
+    expect(mockSaveUIState).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        input_drafts: { 'session-1': 'unsent message' },
+      })
+    )
+  })
+
+  it('debounces persistence when zen mode changes', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useUIStore.getState().uiStateInitialized).toBe(true)
+    })
+
+    useUIStore.getState().setZenMode(true)
+
+    await waitFor(() => {
+      expect(mockSaveUIState).toHaveBeenCalledWith(
+        expect.objectContaining({ zen_mode: true })
+      )
+    })
+  })
+
+  it('debounces persistence when pending images or text files change', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    renderHook(() => useUIStatePersistence(), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await waitFor(() => {
+      expect(useUIStore.getState().uiStateInitialized).toBe(true)
+    })
+
+    useChatStore.getState().addPendingImage('session-1', {
+      id: 'img-1',
+      path: '/tmp/pasted-images/image-1.png',
+      filename: 'image-1.png',
+    })
+    useChatStore.getState().addPendingTextFile('session-1', {
+      id: 'txt-1',
+      path: '/tmp/pasted-texts/paste-1.txt',
+      filename: 'paste-1.txt',
+      size: 12,
+      content: 'pasted body',
+    })
+    // Loading placeholders must not be persisted.
+    useChatStore.getState().addPendingImage('session-1', {
+      id: 'img-loading',
+      path: '',
+      filename: 'Processing...',
+      loading: true,
+    })
+
+    await waitFor(() => {
+      expect(mockSaveUIState).toHaveBeenCalled()
+      const lastCall = mockSaveUIState.mock.calls.at(-1)?.[0]
+      expect(lastCall).toEqual(
+        expect.objectContaining({
+          pending_images: {
+            'session-1': [
+              {
+                id: 'img-1',
+                path: '/tmp/pasted-images/image-1.png',
+                filename: 'image-1.png',
+              },
+            ],
+          },
+          pending_text_files: {
+            'session-1': [
+              {
+                id: 'txt-1',
+                path: '/tmp/pasted-texts/paste-1.txt',
+                filename: 'paste-1.txt',
+                size: 12,
+              },
+            ],
+          },
+        })
+      )
     })
   })
 
@@ -129,6 +405,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
               command_args: null,
               label: 'Shell',
               kind: 'panel',
+              session_id: null,
             },
             {
               id: 'persisted-2',
@@ -314,6 +591,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
               command_args: null,
               label: 'Shell',
               kind: 'panel',
+              session_id: null,
             },
             {
               id: 'fallback-session',
@@ -321,6 +599,7 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
               command_args: ['resume', 'abc123'],
               label: 'Codex',
               kind: 'session',
+              session_id: 'session-1',
             },
           ],
         },
@@ -370,6 +649,10 @@ describe('useUIStatePersistence — terminal restore on web refresh', () => {
     expect(terminalState.activeTerminalIds['worktree-1']).toBe('fallback-panel')
     expect(terminalState.runningTerminals.has('fallback-panel')).toBe(true)
     expect(terminalState.runningTerminals.has('fallback-session')).toBe(true)
+    expect(terminalState.terminals['worktree-1']?.[0]?.sessionId).toBeUndefined()
+    expect(terminalState.terminals['worktree-1']?.[1]?.sessionId).toBe(
+      'session-1'
+    )
     expect(terminalState.terminalPanelOpen['worktree-1']).toBe(true)
     expect(terminalState.terminalVisible).toBe(true)
     expect(useUIStore.getState().sessionTerminalIds['session-1']).toBe(

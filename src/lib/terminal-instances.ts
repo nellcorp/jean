@@ -19,16 +19,17 @@ import {
 import { openExternal } from '@/lib/platform'
 import { attachOrphanCompositionEndGuard } from '@/lib/terminal-composition-guard'
 import { LocalTerminalLinkProvider } from '@/lib/terminal-local-links'
+import { ensureTerminalFontLoaded } from '@/lib/terminal-font-loading'
 import {
   invoke,
   isTransportConnected,
-  subscribeTransportStatus,
   requestTerminalReplay,
 } from '@/lib/transport'
 import { listen } from '@/lib/transport'
 import { queryClient } from '@/lib/query-client'
 import { preferencesQueryKeys } from '@/services/preferences'
 import { isPanelTerminal, useTerminalStore } from '@/store/terminal-store'
+import { isModKeyEvent } from '@/types/keybindings'
 import {
   defaultPreferences,
   type AppPreferences,
@@ -43,6 +44,8 @@ import {
   resolveTerminalTheme,
   type ResolvedTerminalTheme,
 } from '@/lib/terminal-theme'
+import { isArrowGestureActive } from '@/lib/terminal-arrow-gesture'
+import { resolveSafeTerminalDimensions } from '@/lib/terminal-dimensions'
 
 type TerminalRenderer = 'xterm' | 'ghostty-web'
 type EmbeddedTerminal = XtermTerminal | GhosttyWebTerminal
@@ -64,6 +67,7 @@ interface PersistentTerminal {
   worktreePath: string
   command: string | null
   commandArgs: string[] | null
+  sessionId: string | null
   initialized: boolean // PTY has been started
   replayRequested: boolean // Buffered web replay has been requested for an existing PTY
   opened: boolean // Terminal UI has been opened into hostElement
@@ -71,6 +75,7 @@ interface PersistentTerminal {
   outputReadyPromise: Promise<void> | null
   pendingOutput: string[]
   lastAppearance: TerminalAppearance | null
+  appearanceLoadVersion: number
   appearanceResizeTimer: ReturnType<typeof setTimeout> | null
   touchScrollCleanup: (() => void) | null
   compositionGuardCleanup: (() => void) | null
@@ -151,6 +156,26 @@ function getTerminalAppearance(): TerminalAppearance {
   }
 }
 
+function hasSameFont(
+  first: TerminalAppearance,
+  second: TerminalAppearance
+): boolean {
+  return (
+    first.fontFamily === second.fontFamily && first.fontSize === second.fontSize
+  )
+}
+
+async function getLoadedTerminalAppearance(): Promise<TerminalAppearance> {
+  let appearance = getTerminalAppearance()
+
+  while (true) {
+    await ensureTerminalFontLoaded(appearance.fontFamily, appearance.fontSize)
+    const current = getTerminalAppearance()
+    if (hasSameFont(appearance, current)) return current
+    appearance = current
+  }
+}
+
 function hasThemeChanged(
   previous: TerminalAppearance | null,
   next: TerminalAppearance
@@ -175,7 +200,10 @@ function scheduleAppearanceResize(instance: PersistentTerminal): void {
     instance.appearanceResizeTimer = null
     if (!instance.terminal || !instance.fitAddon) return
     instance.fitAddon.fit()
-    const { cols, rows } = getSafeTerminalDimensions(instance.terminal)
+    const forCommand = instance.command != null && instance.command.length > 0
+    const { cols, rows } = getSafeTerminalDimensions(instance.terminal, {
+      forCommand,
+    })
     if (!instance.initialized) return
     invoke('terminal_resize', {
       terminalId: instance.terminalId,
@@ -185,15 +213,14 @@ function scheduleAppearanceResize(instance: PersistentTerminal): void {
   }, 120)
 }
 
-function getSafeTerminalDimensions(terminal: EmbeddedTerminal): {
+function getSafeTerminalDimensions(
+  terminal: EmbeddedTerminal,
+  options?: { forCommand?: boolean }
+): {
   cols: number
   rows: number
 } {
-  const rawCols = terminal.cols
-  const rawRows = terminal.rows
-  const rows = rawRows < 2 ? 24 : rawRows
-  const cols = rawCols < 2 ? 80 : rawCols
-  return { cols, rows }
+  return resolveSafeTerminalDimensions(terminal.cols, terminal.rows, options)
 }
 
 function disableGhosttyScrollbar(instance: PersistentTerminal): void {
@@ -244,6 +271,12 @@ function attachTouchScroll(instance: PersistentTerminal): (() => void) | null {
   }
 
   const onTouchMove = (event: TouchEvent): void => {
+    // Yield to the Termius-style long-press arrow gesture when active.
+    if (isArrowGestureActive(instance.terminalId)) {
+      lastY = null
+      remainder = 0
+      return
+    }
     if (lastY === null || event.touches.length !== 1) return
     const y = event.touches[0]?.clientY
     if (y === undefined) return
@@ -337,9 +370,12 @@ function scheduleGhosttyOutputReady(
   return instance.outputReadyPromise
 }
 
-function applyTerminalAppearance(instance: PersistentTerminal): void {
+async function applyTerminalAppearance(
+  instance: PersistentTerminal
+): Promise<void> {
   if (!instance.terminal) return
 
+  const loadVersion = ++instance.appearanceLoadVersion
   const next = getTerminalAppearance()
   const previous = instance.lastAppearance
   const fontChanged =
@@ -350,16 +386,31 @@ function applyTerminalAppearance(instance: PersistentTerminal): void {
 
   if (!fontChanged && !themeChanged) return
 
-  if (themeChanged) {
-    instance.terminal.options.theme = next.theme
+  if (fontChanged) {
+    await ensureTerminalFontLoaded(next.fontFamily, next.fontSize)
+    if (
+      loadVersion !== instance.appearanceLoadVersion ||
+      !isCurrentInstance(instance.terminalId, instance) ||
+      !instance.terminal ||
+      !hasSameFont(next, getTerminalAppearance())
+    ) {
+      return
+    }
+  }
+
+  const current = getTerminalAppearance()
+  const currentThemeChanged = hasThemeChanged(previous, current)
+
+  if (currentThemeChanged) {
+    instance.terminal.options.theme = current.theme
   }
   if (fontChanged) {
-    instance.terminal.options.fontFamily = next.fontFamily
-    instance.terminal.options.fontSize = next.fontSize
+    instance.terminal.options.fontFamily = current.fontFamily
+    instance.terminal.options.fontSize = current.fontSize
     scheduleAppearanceResize(instance)
   }
 
-  instance.lastAppearance = next
+  instance.lastAppearance = current
 }
 
 function ensurePreferencesSubscription(): void {
@@ -369,7 +420,7 @@ function ensurePreferencesSubscription(): void {
     if (event.query.queryHash !== '["preferences"]') return
     if (event.type !== 'updated') return
     for (const instance of instances.values()) {
-      applyTerminalAppearance(instance)
+      void applyTerminalAppearance(instance)
     }
   })
 }
@@ -416,6 +467,8 @@ function ensureWakeHandler(): void {
     for (const terminalId of [...inputBuffers.keys()]) {
       flushTerminalInput(terminalId)
     }
+    // Also deliver sticky Ctrl-C/D/Z held across a remote WS blip (issue #635).
+    flushPendingCriticalInput()
 
     for (const inst of instances.values()) {
       if (!inst.terminal || inst.renderer !== 'xterm') continue
@@ -431,34 +484,6 @@ function ensureWakeHandler(): void {
   }
   document.addEventListener('visibilitychange', wake)
   window.addEventListener('focus', wake)
-}
-
-/** Register one transport status subscriber that writes a [Reconnecting...]/
- *  [Reconnected] banner into every live xterm instance on connection-state
- *  transitions. Web access mode only — native always reports connected.
- *  Helps users understand why their input is being dropped during outages. */
-let transportStatusSubscribed = false
-let lastTransportConnected: boolean | null = null
-function ensureTransportStatusBanner(): void {
-  if (transportStatusSubscribed) return
-  transportStatusSubscribed = true
-  lastTransportConnected = isTransportConnected()
-  subscribeTransportStatus(() => {
-    const connected = isTransportConnected()
-    if (connected === lastTransportConnected) return
-    const message = connected
-      ? '\r\n\x1b[32m[Reconnected]\x1b[0m\r\n'
-      : '\r\n\x1b[33m[Reconnecting...]\x1b[0m\r\n'
-    for (const inst of instances.values()) {
-      if (!inst.terminal) continue
-      try {
-        inst.terminal.write(message)
-      } catch {
-        // ignore — terminal may be in mid-dispose
-      }
-    }
-    lastTransportConnected = connected
-  })
 }
 
 const FALLBACK_TERMINAL_BACKGROUND = '#101010'
@@ -515,6 +540,7 @@ function getThemeFromCss(): ResolvedTerminalTheme {
 }
 
 function shouldLetAppHandleShortcut(event: KeyboardEvent): boolean {
+  // Mod+Shift+Escape: unfocus terminal (platform mod, or either key as escape hatch)
   if (
     (event.metaKey || event.ctrlKey) &&
     event.shiftKey &&
@@ -532,23 +558,43 @@ function shouldLetAppHandleShortcut(event: KeyboardEvent): boolean {
     return false
   }
 
-  if (!event.metaKey) return false
+  // Only the platform primary mod (Cmd on macOS native, Ctrl elsewhere) is
+  // reserved for app shortcuts. Control on macOS native must reach the PTY
+  // (issue #615: Ctrl+T must not open a new terminal tab).
+  if (!isModKeyEvent(event)) return false
   const code = event.code
-  // CMD+` → toggle terminal panel
+  // Mod+` → toggle terminal panel
   if (code === 'Backquote') return true
-  // CMD+T → new terminal tab
+  // Mod+T → new terminal tab
   if (!event.shiftKey && !event.altKey && code === 'KeyT') return true
-  // CMD+W → close terminal tab
+  // Mod+W → close terminal tab
   if (!event.shiftKey && !event.altKey && code === 'KeyW') return true
-  // CMD+1..9 → switch terminal tab
+  // Mod+1..9 → switch terminal tab
   if (!event.shiftKey && !event.altKey && /^Digit[1-9]$/.test(code)) {
     return true
   }
-  // CMD+Alt+Backspace → cancel prompt
+  // Mod+Alt+Backspace → cancel prompt
   return event.altKey && (code === 'Backspace' || code === 'Delete')
 }
 
 const INPUT_FLUSH_DELAY_MS = 5
+
+/** Control chars that must never be silently dropped on a brief WS disconnect
+ *  (issue #635). Typing general keys while offline is discarded on purpose;
+ *  interrupt/EOF/suspend are sticky until the transport is back. */
+const CRITICAL_TERMINAL_CONTROL_CHARS = new Set(['\u0003', '\u0004', '\u001a'])
+
+/** Pending critical control input held while the WebSocket is down, keyed by
+ *  terminal id. Flushed on reconnect / wake. */
+const pendingCriticalInput = new Map<string, string>()
+
+function extractCriticalControlChars(data: string): string {
+  let out = ''
+  for (const ch of data) {
+    if (CRITICAL_TERMINAL_CONTROL_CHARS.has(ch)) out += ch
+  }
+  return out
+}
 
 function shouldFlushTerminalInputNow(data: string): boolean {
   return (
@@ -560,25 +606,75 @@ function shouldFlushTerminalInputNow(data: string): boolean {
   )
 }
 
+function sendTerminalWrite(terminalId: string, data: string): void {
+  if (!data) return
+  invoke('terminal_write', { terminalId, data }).catch(error => {
+    console.error('[terminal-instances] terminal_write failed:', error)
+    // Re-queue only critical control bytes so a flaky remote link cannot
+    // swallow Ctrl-C while the process keeps holding the port.
+    const critical = extractCriticalControlChars(data)
+    if (!critical) return
+    const existing = pendingCriticalInput.get(terminalId) ?? ''
+    pendingCriticalInput.set(terminalId, existing + critical)
+  })
+}
+
+function flushPendingCriticalInput(terminalId?: string): void {
+  if (!isTransportConnected()) return
+  const ids = terminalId
+    ? [terminalId]
+    : [...pendingCriticalInput.keys()]
+  for (const id of ids) {
+    const data = pendingCriticalInput.get(id)
+    if (!data) continue
+    pendingCriticalInput.delete(id)
+    sendTerminalWrite(id, data)
+  }
+}
+
 function flushTerminalInput(terminalId: string): void {
   const buffer = inputBuffers.get(terminalId)
   if (!buffer) return
   if (buffer.timer) clearTimeout(buffer.timer)
   inputBuffers.delete(terminalId)
   if (!buffer.data) return
-  invoke('terminal_write', { terminalId, data: buffer.data }).catch(
-    console.error
-  )
+
+  if (!isTransportConnected()) {
+    // Hold interrupt/EOF/suspend until reconnect; drop everything else.
+    const critical = extractCriticalControlChars(buffer.data)
+    if (critical) {
+      const existing = pendingCriticalInput.get(terminalId) ?? ''
+      pendingCriticalInput.set(terminalId, existing + critical)
+    }
+    return
+  }
+
+  sendTerminalWrite(terminalId, buffer.data)
 }
 
 function discardTerminalInput(terminalId: string): void {
   const buffer = inputBuffers.get(terminalId)
   if (buffer?.timer) clearTimeout(buffer.timer)
   inputBuffers.delete(terminalId)
+  pendingCriticalInput.delete(terminalId)
 }
 
 function queueTerminalInput(terminalId: string, data: string): void {
-  if (!isTransportConnected()) return
+  if (!isTransportConnected()) {
+    // Do not buffer normal keystrokes while offline (dump-on-reconnect is a
+    // footgun). Critical control sequences are the exception — losing Ctrl-C
+    // leaves remote processes running and injects their logs into typing.
+    const critical = extractCriticalControlChars(data)
+    if (critical) {
+      const existing = pendingCriticalInput.get(terminalId) ?? ''
+      pendingCriticalInput.set(terminalId, existing + critical)
+    }
+    return
+  }
+
+  // Deliver any sticky interrupts from a prior disconnect first so they land
+  // before newly typed characters.
+  flushPendingCriticalInput(terminalId)
 
   const buffer = inputBuffers.get(terminalId) ?? {
     data: '',
@@ -598,6 +694,15 @@ function queueTerminalInput(terminalId: string, data: string): void {
     INPUT_FLUSH_DELAY_MS
   )
   inputBuffers.set(terminalId, buffer)
+}
+
+/**
+ * Inject input into a terminal PTY (extra-keys bar, image drop, tests).
+ * Uses the same coalescing path as xterm onData.
+ */
+export function writeTerminalInput(terminalId: string, data: string): void {
+  if (!data) return
+  queueTerminalInput(terminalId, data)
 }
 
 function queueTerminalOutput(instance: PersistentTerminal, data: string): void {
@@ -645,11 +750,13 @@ async function createTerminalForRenderer(
   fitAddon: EmbeddedFitAddon
   appearance: TerminalAppearance
 }> {
-  const appearance = getTerminalAppearance()
+  const appearance = await getLoadedTerminalAppearance()
   const terminalOptions = {
     cursorBlink: true,
     fontSize: appearance.fontSize,
     fontFamily: appearance.fontFamily,
+    fontWeight: 400,
+    fontWeightBold: 500,
     theme: appearance.theme,
   }
 
@@ -731,7 +838,7 @@ function registerTerminalInputHandlers(
 ): void {
   // Handle user input - forward to PTY.
   // Drop input while transport is disconnected: queueing 30s+ of keystrokes
-  // and dumping them into the shell on reconnect = footgun (e.g. dangerous
+  // and dumping them into the shell on reattach = footgun (e.g. dangerous
   // partial commands executed). Banner makes the dropped state visible.
   terminal.onData(data => {
     queueTerminalInput(terminalId, data)
@@ -885,6 +992,7 @@ export function getOrCreateTerminal(
     worktreePath: string
     command?: string | null
     commandArgs?: string[] | null
+    sessionId?: string | null
   }
 ): PersistentTerminal {
   const existing = instances.get(terminalId)
@@ -900,12 +1008,11 @@ export function getOrCreateTerminal(
     worktreePath,
     command = null,
     commandArgs = null,
+    sessionId = null,
   } = options
 
   // Ensure the visibility/focus wake handler is running.
   ensureWakeHandler()
-  // Ensure transport status banner subscription is active (web access mode).
-  ensureTransportStatusBanner()
   // Keep existing terminal renderers in sync when font settings change.
   ensurePreferencesSubscription()
   // One backend listener per terminal event type, not per terminal instance.
@@ -922,6 +1029,7 @@ export function getOrCreateTerminal(
     worktreePath,
     command,
     commandArgs,
+    sessionId,
     initialized: false,
     replayRequested: false,
     opened: false,
@@ -929,6 +1037,7 @@ export function getOrCreateTerminal(
     outputReadyPromise: renderer === 'ghostty-web' ? null : Promise.resolve(),
     pendingOutput: [],
     lastAppearance: null,
+    appearanceLoadVersion: 0,
     appearanceResizeTimer: null,
     touchScrollCleanup: null,
     compositionGuardCleanup: null,
@@ -978,7 +1087,7 @@ export async function attachToContainer(
     return
   }
 
-  const { worktreePath, command, commandArgs } = instance
+  const { worktreePath, command, commandArgs, sessionId } = instance
 
   terminal.options.theme = getTerminalTheme()
 
@@ -1027,24 +1136,28 @@ export async function attachToContainer(
     instance.opened = true
   }
 
-  // Fit terminal to container and start/reconnect PTY
+  // Fit terminal to container and start/reattach PTY
   scheduleAnimationFrame(async () => {
     if (!isCurrentInstance(terminalId, instance)) return
 
     fitAddon.fit()
     // Enforce minimum dimensions — degenerate sizes (e.g. rows=0 during dialog
     // animation) cause portable_pty to crash with an internal assertion failure.
+    // Command PTYs (CLI login) also floor at 80×24 so TUI prompts like
+    // `opencode auth login` are not started mid-zoom with a handful of cols
+    // (issue #624).
+    const forCommand = command != null && command.length > 0
     const rawCols = terminal.cols
     const rawRows = terminal.rows
-    const { cols, rows } = getSafeTerminalDimensions(terminal)
+    const { cols, rows } = getSafeTerminalDimensions(terminal, { forCommand })
     console.log(
-      `[terminal-instances] attachToContainer ${terminalId}: fit=${rawCols}x${rawRows} → used=${cols}x${rows}, initialized=${instance.initialized}, container=${container.clientWidth}x${container.clientHeight}`
+      `[terminal-instances] attachToContainer ${terminalId}: fit=${rawCols}x${rawRows} → used=${cols}x${rows}, initialized=${instance.initialized}, container=${container.clientWidth}x${container.clientHeight}, forCommand=${forCommand}`
     )
 
     if (!(await waitForTerminalReady(terminalId, instance))) return
 
     if (!instance.initialized) {
-      // First time - check if PTY already exists (reconnecting after app restart)
+      // First time - check if PTY already exists (reattaching after app restart)
       const ptyExists = await invoke<boolean>('has_active_terminal', {
         terminalId,
       })
@@ -1052,7 +1165,7 @@ export async function attachToContainer(
 
       if (ptyExists) {
         // PTY exists - replay buffered output, then resize and mark as running.
-        // This is the web-refresh reconnect path: the Rust PTY survived, but
+        // This is the web-refresh reattach path: the Rust PTY survived, but
         // the browser lost its in-memory xterm instance and seq tracking.
         if (!instance.replayRequested) {
           instance.replayRequested = true
@@ -1071,6 +1184,7 @@ export async function attachToContainer(
           rows,
           command,
           commandArgs,
+          sessionId,
         }).catch(error => {
           console.error('[terminal-instances] start_terminal failed:', error)
           terminal.writeln(`\x1b[31mFailed to start terminal: ${error}\x1b[0m`)
@@ -1079,6 +1193,12 @@ export async function attachToContainer(
       if (!isCurrentInstance(terminalId, instance)) return
 
       instance.initialized = true
+
+      // Dialog zoom / flex layout often settles a frame after first attach.
+      // Re-fit and SIGWINCH so interactive TUI CLIs pick up the final size.
+      if (forCommand) {
+        scheduleCommandTerminalSettleResize(terminalId, instance)
+      }
     } else {
       // Already initialized - just resize
       await invoke('terminal_resize', { terminalId, cols, rows }).catch(
@@ -1091,10 +1211,43 @@ export async function attachToContainer(
 }
 
 /**
+ * After a command PTY starts, re-measure once layout has settled and push a
+ * resize to the backend. Fixes OpenCode/clack prompts that read TTY size at
+ * startup when the first fit ran during dialog animation (issue #624).
+ */
+function scheduleCommandTerminalSettleResize(
+  terminalId: string,
+  instance: PersistentTerminal
+): void {
+  const run = () => {
+    if (!isCurrentInstance(terminalId, instance)) return
+    if (!instance.terminal || !instance.fitAddon) return
+    instance.fitAddon.fit()
+    const { cols, rows } = getSafeTerminalDimensions(instance.terminal, {
+      forCommand: true,
+    })
+    invoke('terminal_resize', { terminalId, cols, rows }).catch(console.error)
+    try {
+      instance.terminal.focus()
+    } catch {
+      // ignore — terminal may be mid-dispose
+    }
+  }
+
+  // Two rAFs + short timeout covers dialog zoom-in and flex reflow.
+  scheduleAnimationFrame(() => {
+    scheduleAnimationFrame(() => {
+      setTimeout(run, 50)
+      setTimeout(run, 250)
+    })
+  })
+}
+
+/**
  * Start a terminal PTY without attaching to DOM.
  * Creates the embedded terminal instance (for event listeners + output
  * buffering) and spawns the PTY immediately. When the user later opens the
- * session, attachToContainer detects the running PTY and reconnects.
+ * session, attachToContainer detects and reattaches to the running PTY.
  */
 export function startHeadless(
   terminalId: string,
@@ -1103,6 +1256,7 @@ export function startHeadless(
     worktreePath: string
     command: string
     commandArgs?: string[] | null
+    sessionId?: string | null
   }
 ): void {
   const instance = getOrCreateTerminal(terminalId, options)
@@ -1120,6 +1274,7 @@ export function startHeadless(
         rows: 24,
         command: options.command,
         commandArgs: options.commandArgs ?? null,
+        sessionId: options.sessionId ?? null,
       })
     })
     .catch(error => {
@@ -1152,7 +1307,10 @@ export function fitTerminal(terminalId: string): void {
   if (!instance || !instance.fitAddon || !instance.terminal) return
 
   instance.fitAddon.fit()
-  const { cols, rows } = getSafeTerminalDimensions(instance.terminal)
+  const forCommand = instance.command != null && instance.command.length > 0
+  const { cols, rows } = getSafeTerminalDimensions(instance.terminal, {
+    forCommand,
+  })
   invoke('terminal_resize', { terminalId, cols, rows }).catch(console.error)
 }
 
@@ -1164,6 +1322,19 @@ export function focusTerminal(terminalId: string): void {
   if (!instance || !instance.terminal) return
 
   instance.terminal.focus()
+}
+
+/**
+ * Return currently selected terminal text, or empty string if none.
+ */
+export function getTerminalSelection(terminalId: string): string {
+  const instance = instances.get(terminalId)
+  if (!instance?.terminal) return ''
+  try {
+    return instance.terminal.getSelection() ?? ''
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -1183,6 +1354,7 @@ export async function disposeTerminal(terminalId: string): Promise<void> {
   instance.readyForOutput = false
   instance.outputReadyPromise = null
   pendingOnStopped.delete(terminalId)
+  instance.appearanceLoadVersion += 1
   if (instance.appearanceResizeTimer) {
     clearTimeout(instance.appearanceResizeTimer)
     instance.appearanceResizeTimer = null

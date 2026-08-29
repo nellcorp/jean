@@ -48,7 +48,7 @@ const mockDiff: GitDiff = {
   raw_patch: '',
   files: [
     {
-      path: 'src/example.ts',
+      path: 'database/migrations/2026_07_08_105014_add_uuid_to_cloud_init_scripts_table.php',
       old_path: null,
       status: 'modified',
       additions: 1,
@@ -158,10 +158,11 @@ describe('GitDiffModal keyboard shortcuts', () => {
     })
     scrollContainer.scrollTo = scrollTo
 
+    // Outside native macOS, "mod" is Ctrl (see isModKeyEvent).
     const wasNotPrevented = fireEvent.keyDown(document, {
       key: 'ArrowDown',
       code: 'ArrowDown',
-      metaKey: true,
+      ctrlKey: true,
       cancelable: true,
     })
 
@@ -188,7 +189,7 @@ describe('GitDiffModal keyboard shortcuts', () => {
     const wasNotPrevented = fireEvent.keyDown(document, {
       key: 'ArrowUp',
       code: 'ArrowUp',
-      metaKey: true,
+      ctrlKey: true,
       cancelable: true,
     })
 
@@ -207,12 +208,23 @@ describe('GitDiffModal keyboard shortcuts', () => {
     const wasNotPrevented = fireEvent.keyDown(filterInput, {
       key: 'ArrowDown',
       code: 'ArrowDown',
-      metaKey: true,
+      ctrlKey: true,
       cancelable: true,
     })
 
     expect(wasNotPrevented).toBe(true)
     expect(scrollTo).not.toHaveBeenCalled()
+  })
+
+  it('allows long revert filenames to wrap inside the confirmation dialog', async () => {
+    renderGitDiffModal()
+
+    await screen.findByTestId('file-diff')
+    fireEvent.keyDown(document, { key: 'Backspace' })
+
+    const dialog = await screen.findByRole('alertdialog')
+    const fileName = dialog.querySelector('.font-mono')
+    expect(fileName).toHaveClass('break-all')
   })
 })
 

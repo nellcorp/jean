@@ -99,6 +99,26 @@ describe('TerminalStore', () => {
   })
 
   describe('terminal instance management', () => {
+    it('registers a run terminal started outside the UI', () => {
+      useTerminalStore
+        .getState()
+        .registerStartedRun('worktree-1', 'run-from-mcp', 'bun run dev')
+
+      const state = useTerminalStore.getState()
+      expect(state.terminals['worktree-1']).toEqual([
+        expect.objectContaining({
+          id: 'run-from-mcp',
+          worktreeId: 'worktree-1',
+          command: 'bun run dev',
+          kind: 'panel',
+        }),
+      ])
+      expect(state.activeTerminalIds['worktree-1']).toBe('run-from-mcp')
+      expect(state.runningTerminals.has('run-from-mcp')).toBe(true)
+      expect(state.terminalPanelOpen['worktree-1']).toBe(true)
+      expect(state.terminalVisible).toBe(true)
+    })
+
     it('adds a terminal and returns ID', () => {
       const { addTerminal } = useTerminalStore.getState()
 
@@ -232,6 +252,20 @@ describe('TerminalStore', () => {
       expect(useTerminalStore.getState().activeTerminalIds['worktree-1']).toBe(
         panelId
       )
+    })
+
+    it('keeps the Jean session id on native CLI terminals', () => {
+      const terminalId = useTerminalStore
+        .getState()
+        .addTerminal('worktree-1', 'codex', 'Codex', {
+          kind: 'session',
+          sessionId: 'session-codex-1',
+        })
+
+      const terminal = useTerminalStore
+        .getState()
+        .terminals['worktree-1']?.find(item => item.id === terminalId)
+      expect(terminal?.sessionId).toBe('session-codex-1')
     })
 
     it('reorders panel terminals while preserving session terminals and active terminal', () => {

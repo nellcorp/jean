@@ -7,7 +7,8 @@ import React, {
   type FC,
 } from 'react'
 import { invoke } from '@/lib/transport'
-import { useQueryClient } from '@tanstack/react-query'
+import { loginArgsForBackend } from '@/lib/cli-auth'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Loader2, Check, ChevronsUpDown, Play } from 'lucide-react'
 import { Label } from '@/components/ui/label'
@@ -98,6 +99,14 @@ import {
   useAvailableGrokModels,
   grokCliQueryKeys,
 } from '@/services/grok-cli'
+import {
+  useKimiCliStatus,
+  useKimiCliAuth,
+  useKimiPathDetection,
+  useAvailableKimiModels,
+  kimiCliQueryKeys,
+} from '@/services/kimi-cli'
+import { useAntigravityCliStatus } from '@/services/antigravity-cli'
 import type { ClaudeAuthStatus } from '@/types/claude-cli'
 import type { GhAuthStatus } from '@/types/gh-cli'
 import type { CodexAuthStatus } from '@/types/codex-cli'
@@ -107,6 +116,7 @@ import type { CursorAuthStatus } from '@/types/cursor-cli'
 import type { PiAuthStatus } from '@/types/pi-cli'
 import type { CommandCodeAuthStatus } from '@/types/commandcode-cli'
 import type { GrokAuthStatus } from '@/types/grok-cli'
+import type { KimiAuthStatus } from '@/types/kimi-cli'
 import {
   Select,
   SelectContent,
@@ -133,16 +143,19 @@ import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import {
   getCatalogDefaultModelOptions,
   getCatalogModelOptions,
+  getCatalogModelReasoning,
   useModelCatalog,
 } from '@/services/model-catalog'
+import { withAdaptiveEffortOption } from '@/components/chat/toolbar/toolbar-options'
 import type { AppPreferences } from '@/types/preferences'
 import {
-  thinkingLevelOptions,
   effortLevelOptions,
   codexReasoningOptions,
+  codexModelVerbosityOptions,
+  grokReasoningOptions,
   backendOptions,
-  terminalOptions,
-  editorOptions,
+  getTerminalOptions,
+  getEditorOptions,
   gitPollIntervalOptions,
   remotePollIntervalOptions,
   archiveRetentionOptions,
@@ -150,12 +163,16 @@ import {
   notificationSoundOptions,
   type RemovalBehavior,
   type ClaudeModel,
+  getClaudeModelOptionsForProvider,
   type CodexModel,
   type CodexGoalExecutionMode,
   type CodexReasoningEffort,
+  type CodexModelVerbosity,
+  type GrokReasoningEffort,
   type CursorModel,
   type PiModel,
   type GrokModel,
+  type KimiModel,
   type CliBackend,
   type TerminalApp,
   type EditorApp,
@@ -169,8 +186,10 @@ import {
   COMMANDCODE_MODEL_OPTIONS,
   CURSOR_MODEL_OPTIONS,
   GROK_MODEL_OPTIONS,
+  KIMI_MODEL_OPTIONS,
   OPENCODE_MODEL_OPTIONS,
   PI_MODEL_OPTIONS,
+  KIMI_EFFORT_LEVEL_OPTIONS,
 } from '@/components/chat/toolbar/toolbar-options'
 import {
   formatCursorModelLabel,
@@ -178,9 +197,15 @@ import {
   formatPiModelLabel,
 } from '@/components/chat/toolbar/toolbar-utils'
 import { playNotificationSound } from '@/lib/sounds'
+import { CLIENT_BUILD_INFO } from '@/lib/build-info'
+import { getActiveRemoteConnection } from '@/lib/remote-connections'
+import {
+  fetchRemoteServerInfo,
+  formatJeanVersionLabel,
+} from '@/lib/remote-version'
 import type { ThinkingLevel, EffortLevel } from '@/types/chat'
 import { hasBackend, isNativeApp } from '@/lib/environment'
-import { isWindows } from '@/lib/platform'
+import { isWindows, openExternal } from '@/lib/platform'
 import { isNewerVersion } from '@/lib/version-utils'
 import { cn } from '@/lib/utils'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -189,8 +214,13 @@ import {
   setRemotePollInterval,
 } from '@/services/git-status'
 import { getPathUpdateAction } from '@/lib/cli-update'
-import { SettingsSection } from '../SettingsSection'
-import { resolvePiDefaultModel } from '@/lib/session-defaults'
+import { BackendPaneHeader, SettingsSection } from '../SettingsSection'
+import { BackendCliSourceCards } from '../BackendCliSourceCards'
+import { AiLanguageField } from './AiLanguageField'
+import {
+  resolveDefaultModelForBackend,
+  resolvePiDefaultModel,
+} from '@/lib/session-defaults'
 
 interface CleanupResult {
   deleted_worktrees: number
@@ -203,7 +233,7 @@ const InlineField: React.FC<{
   description?: React.ReactNode
   children: React.ReactNode
 }> = ({ label, description, children }) => (
-  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+  <div className="settings-inline-field flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
     <div className="space-y-0.5 sm:w-56 sm:shrink-0 lg:w-72">
       <Label className="text-sm text-foreground">{label}</Label>
       {description && (
@@ -225,16 +255,112 @@ type PreferencesPaneScope =
   | 'pi'
   | 'commandcode'
   | 'grok'
+  | 'kimi'
   | 'github'
   | 'coderabbit'
+
+const backendPaneMeta = {
+  claude: {
+    description:
+      'Configure the Claude CLI, default model, and native Claude session behavior.',
+  },
+  codex: {
+    description:
+      'Configure the Codex CLI, default model, reasoning, and native Codex session behavior.',
+  },
+  opencode: {
+    description:
+      'Configure the OpenCode CLI, default model, and native OpenCode session behavior.',
+  },
+  cursor: {
+    description:
+      'Configure the Cursor CLI, default model, and native Cursor session behavior.',
+  },
+  pi: {
+    description:
+      'Configure the PI CLI, active provider model, and native PI session behavior.',
+  },
+  commandcode: {
+    description:
+      'Configure the Command Code CLI and default model for native sessions.',
+  },
+  grok: {
+    description:
+      'Configure the Grok CLI, default model, effort level, and native ACP session behavior.',
+  },
+  kimi: {
+    description:
+      'Configure the Kimi Code CLI, default model, and native ACP session behavior.',
+  },
+} satisfies Partial<
+  Record<PreferencesPaneScope, { description: React.ReactNode }>
+>
+
+function formatOpenCodeModelLabelForSettings(value: string) {
+  const formatted = formatOpencodeModelLabel(value)
+  return value.startsWith('opencode/')
+    ? formatted.replace(/\s+\(OpenCode\)$/, '')
+    : formatted
+}
 
 export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   scope = 'general',
 }) => {
   const isGeneralScope = scope === 'general'
   const queryClient = useQueryClient()
+  const activeRemoteConnection = getActiveRemoteConnection()
+  const { data: remoteServerInfo, isLoading: isRemoteServerInfoLoading } =
+    useQuery({
+      queryKey: ['remote-server-info', activeRemoteConnection?.id],
+      queryFn: () => {
+        if (!activeRemoteConnection) {
+          throw new Error('No remote Jean server is connected.')
+        }
+        return fetchRemoteServerInfo(
+          activeRemoteConnection.url,
+          activeRemoteConnection.token
+        )
+      },
+      enabled: isGeneralScope && activeRemoteConnection !== null,
+      staleTime: 60_000,
+    })
+  const remoteServerVersion = remoteServerInfo?.appVersion
   const { data: preferences } = usePreferences()
   const { data: modelCatalog } = useModelCatalog()
+  const codexReasoning = getCatalogModelReasoning(
+    modelCatalog,
+    'codex',
+    preferences?.selected_codex_model ?? 'gpt-5.6-sol'
+  )
+  const selectedCodexModel = preferences?.selected_codex_model ?? 'gpt-5.6-sol'
+  const selectedCodexReasoningOptions = withAdaptiveEffortOption(
+    codexReasoning?.type === 'effort'
+      ? codexReasoning.levels
+      : codexReasoningOptions,
+    selectedCodexModel
+  )
+  const grokReasoning = getCatalogModelReasoning(
+    modelCatalog,
+    'grok',
+    preferences?.selected_grok_model ?? 'grok/grok-4.6'
+  )
+  const selectedGrokModel = preferences?.selected_grok_model ?? 'grok/grok-4.6'
+  const selectedGrokReasoningOptions = withAdaptiveEffortOption(
+    grokReasoning?.type === 'effort'
+      ? grokReasoning.levels
+      : grokReasoningOptions,
+    selectedGrokModel
+  )
+  const selectedClaudeModel =
+    preferences?.selected_model ?? 'claude-opus-4-8[1m]'
+  const claudeReasoning = getCatalogModelReasoning(
+    modelCatalog,
+    'claude',
+    selectedClaudeModel
+  )
+  const selectedClaudeReasoningOptions = claudeReasoning
+    ? withAdaptiveEffortOption(claudeReasoning.levels, selectedClaudeModel)
+    : []
   const patchPreferences = usePatchPreferences()
   const isWebAccessView = !isNativeApp()
   const webAccessSoundsEnabled = preferences?.web_access_sounds_enabled ?? true
@@ -250,14 +376,37 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     | 'coderabbit'
     | 'commandcode'
     | 'grok'
+    | 'kimi'
     | null
   >(null)
   const [isDeletingCli, setIsDeletingCli] = useState(false)
 
-  const remoteClaudeModelOptions = useMemo(
-    () => getCatalogModelOptions(modelCatalog, 'claude'),
-    [modelCatalog]
+  const customCliProfiles = useMemo(
+    () => preferences?.custom_cli_profiles ?? [],
+    [preferences?.custom_cli_profiles]
   )
+  const defaultClaudeProvider = preferences?.default_provider ?? null
+  const remoteClaudeModelOptions = useMemo(() => {
+    // When a custom CLI provider is the global default, surface the
+    // provider-routed opus/sonnet/haiku aliases so Settings → Claude can set
+    // a matching default model (issue #418).
+    const options = defaultClaudeProvider
+      ? getClaudeModelOptionsForProvider(
+          defaultClaudeProvider,
+          customCliProfiles
+        )
+      : getCatalogModelOptions(modelCatalog, 'claude')
+    const selected = preferences?.selected_model
+    if (selected && !options.some(option => option.value === selected)) {
+      return [...options, { value: selected as ClaudeModel, label: selected }]
+    }
+    return options
+  }, [
+    modelCatalog,
+    defaultClaudeProvider,
+    customCliProfiles,
+    preferences?.selected_model,
+  ])
   const remoteCodexDefaultModelOptions = useMemo(
     () => getCatalogDefaultModelOptions(modelCatalog, 'codex'),
     [modelCatalog]
@@ -273,6 +422,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: piPathDetection } = usePiPathDetection()
   const { data: commandcodePathDetection } = useCommandCodePathDetection()
   const { data: grokPathDetection } = useGrokPathDetection()
+  const { data: kimiPathDetection } = useKimiPathDetection()
 
   // CLI status hooks
   const { data: cliStatus, isLoading: isCliLoading } = useClaudeCliStatus()
@@ -291,6 +441,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: commandcodeStatus, isLoading: isCommandCodeLoading } =
     useCommandCodeCliStatus()
   const { data: grokStatus, isLoading: isGrokLoading } = useGrokCliStatus()
+  const { data: kimiStatus, isLoading: isKimiLoading } = useKimiCliStatus()
+  const { data: antigravityStatus } = useAntigravityCliStatus()
   const isGhPathSource = preferences?.gh_cli_source === 'path'
   const { data: ghVersions, isLoading: isGhVersionsLoading } =
     useAvailableGhVersions({ enabled: isGhPathSource && !!ghStatus?.installed })
@@ -372,6 +524,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: grokAuth, isLoading: isGrokAuthLoading } = useGrokCliAuth({
     enabled: !!grokStatus?.installed,
   })
+  const { data: kimiAuth, isLoading: isKimiAuthLoading } = useKimiCliAuth({
+    enabled: !!kimiStatus?.installed,
+  })
   const { data: availableOpencodeModels } = useAvailableOpencodeModels({
     enabled: !!opencodeStatus?.installed,
   })
@@ -387,6 +542,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: availableGrokModels } = useAvailableGrokModels({
     enabled: !!grokStatus?.installed,
   })
+  const { data: availableKimiModels } = useAvailableKimiModels({
+    enabled: !!kimiStatus?.installed,
+  })
 
   // Re-check CLI status when the source preference changes (handles initial load
   // with source already set to "path" and any timing issues with onSuccess invalidation)
@@ -397,6 +555,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     opencode: preferences?.opencode_cli_source,
     pi: preferences?.pi_cli_source,
     grok: preferences?.grok_cli_source,
+    kimi: preferences?.kimi_cli_source,
     coderabbit: preferences?.coderabbit_cli_source,
     commandcode: preferences?.commandcode_cli_source,
   })
@@ -408,6 +567,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       opencode: preferences?.opencode_cli_source,
       pi: preferences?.pi_cli_source,
       grok: preferences?.grok_cli_source,
+      kimi: preferences?.kimi_cli_source,
       coderabbit: preferences?.coderabbit_cli_source,
       commandcode: preferences?.commandcode_cli_source,
     }
@@ -425,6 +585,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
     if (cur.grok !== prevSources.current.grok) {
       queryClient.invalidateQueries({ queryKey: grokCliQueryKeys.status() })
+    }
+    if (cur.kimi !== prevSources.current.kimi) {
+      queryClient.invalidateQueries({ queryKey: kimiCliQueryKeys.status() })
     }
     if (cur.coderabbit !== prevSources.current.coderabbit) {
       queryClient.invalidateQueries({
@@ -445,7 +608,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     preferences?.gh_cli_source,
     preferences?.codex_cli_source,
     preferences?.opencode_cli_source,
+    preferences?.pi_cli_source,
     preferences?.grok_cli_source,
+    preferences?.kimi_cli_source,
     preferences?.coderabbit_cli_source,
     preferences?.commandcode_cli_source,
     queryClient,
@@ -473,6 +638,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const [checkingPiAuth, setCheckingPiAuth] = useState(false)
   const [checkingCommandCodeAuth, setCheckingCommandCodeAuth] = useState(false)
   const [checkingGrokAuth, setCheckingGrokAuth] = useState(false)
+  const [checkingKimiAuth, setCheckingKimiAuth] = useState(false)
   const [openCodeModelPopoverOpen, setOpenCodeModelPopoverOpen] =
     useState(false)
   const [cursorModelPopoverOpen, setCursorModelPopoverOpen] = useState(false)
@@ -712,6 +878,19 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
+  const handleKimiSourceChange = (value: 'jean' | 'path') => {
+    if (preferences) {
+      patchPreferences.mutate(
+        { kimi_cli_source: value },
+        {
+          onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: kimiCliQueryKeys.all })
+          },
+        }
+      )
+    }
+  }
+
   const handleConfirmDeleteCli = async () => {
     if (!deleteCliTarget) return
     const target = deleteCliTarget
@@ -733,6 +912,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
         cmd: 'uninstall_commandcode_cli' as const,
       },
       grok: { name: 'Grok CLI', cmd: 'uninstall_grok_cli' as const },
+      kimi: { name: 'Kimi Code CLI', cmd: 'uninstall_kimi_cli' as const },
     }
     const { name, cmd } = labelMap[target]
     setIsDeletingCli(true)
@@ -754,7 +934,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     ? 'commandcode_cli_source'
                     : target === 'grok'
                       ? 'grok_cli_source'
-                      : 'coderabbit_cli_source'
+                      : target === 'kimi'
+                        ? 'kimi_cli_source'
+                        : 'coderabbit_cli_source'
       await new Promise<void>((resolve, reject) => {
         patchPreferences.mutate(
           { [sourceKey]: 'path' } as Partial<AppPreferences>,
@@ -779,7 +961,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     ? commandcodeCliQueryKeys.all
                     : target === 'grok'
                       ? grokCliQueryKeys.all
-                      : coderabbitCliQueryKeys.all
+                      : target === 'kimi'
+                        ? kimiCliQueryKeys.all
+                        : coderabbitCliQueryKeys.all
       queryClient.invalidateQueries({ queryKey: queryKeys })
       const pathFound =
         target === 'claude'
@@ -796,7 +980,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     ? commandcodePathDetection?.found
                     : target === 'grok'
                       ? grokPathDetection?.found
-                      : coderabbitPathDetection?.found
+                      : target === 'kimi'
+                        ? kimiPathDetection?.found
+                        : coderabbitPathDetection?.found
       if (pathFound) {
         toast.success(`Jean-managed ${name} removed. Using system PATH.`, {
           id: toastId,
@@ -834,40 +1020,52 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
-  // If stored default_backend isn't installed, fall back to the first installed one
+  // Default backend: show all installed CLIs (issue #627/#649). Auth is enforced
+  // at send time / backend settings — hiding unauthenticated backends made Claude
+  // (and others) disappear from Defaults when auth probes were false-negative.
   const stored = preferences?.default_backend ?? 'claude'
-  const claudeInstalled = cliStatus?.installed
-  const codexInstalled = codexStatus?.installed
-  const opencodeInstalled = opencodeStatus?.installed
-  const cursorInstalled = cursorStatus?.installed
-  const piInstalled = piStatus?.installed
-  const commandcodeInstalled = commandcodeStatus?.installed
-  const grokInstalled = grokStatus?.installed
+  const claudeInstalled = !!cliStatus?.installed
+  const codexInstalled = !!codexStatus?.installed
+  const opencodeInstalled = !!opencodeStatus?.installed
+  const cursorInstalled = !!cursorStatus?.installed
+  const piInstalled = !!piStatus?.installed
+  const commandcodeInstalled = !!commandcodeStatus?.installed
+  const grokInstalled = !!grokStatus?.installed
+  const kimiInstalled = !!kimiStatus?.installed
+  const antigravityInstalled = !!antigravityStatus?.installed
   const installedBackendOptions = useMemo(
     () =>
       backendOptions.filter(option =>
         option.value === 'claude'
-          ? cliStatus?.installed
+          ? claudeInstalled
           : option.value === 'codex'
-            ? codexStatus?.installed
+            ? codexInstalled
             : option.value === 'opencode'
-              ? opencodeStatus?.installed
+              ? opencodeInstalled
               : option.value === 'cursor'
-                ? cursorStatus?.installed
+                ? cursorInstalled
                 : option.value === 'pi'
-                  ? piStatus?.installed
+                  ? piInstalled
                   : option.value === 'commandcode'
-                    ? commandcodeStatus?.installed
-                    : grokStatus?.installed
+                    ? commandcodeInstalled
+                    : option.value === 'grok'
+                      ? grokInstalled
+                      : option.value === 'kimi'
+                        ? kimiInstalled
+                        : option.value === 'antigravity'
+                          ? antigravityInstalled
+                          : false
       ),
     [
-      cliStatus?.installed,
-      codexStatus?.installed,
-      opencodeStatus?.installed,
-      cursorStatus?.installed,
-      piStatus?.installed,
-      commandcodeStatus?.installed,
-      grokStatus?.installed,
+      claudeInstalled,
+      codexInstalled,
+      opencodeInstalled,
+      cursorInstalled,
+      piInstalled,
+      commandcodeInstalled,
+      grokInstalled,
+      kimiInstalled,
+      antigravityInstalled,
     ]
   )
 
@@ -880,6 +1078,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       pi: piInstalled,
       commandcode: commandcodeInstalled,
       grok: grokInstalled,
+      kimi: kimiInstalled,
+      antigravity: antigravityInstalled,
     }
     if (installed[stored]) return stored
     const first = installedBackendOptions[0]
@@ -893,6 +1093,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     piInstalled,
     commandcodeInstalled,
     grokInstalled,
+    kimiInstalled,
+    antigravityInstalled,
     installedBackendOptions,
   ])
 
@@ -906,6 +1108,14 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     if (preferences) {
       patchPreferences.mutate({
         default_codex_reasoning_effort: value,
+      })
+    }
+  }
+
+  const handleCodexModelVerbosityChange = (value: CodexModelVerbosity) => {
+    if (preferences) {
+      patchPreferences.mutate({
+        default_codex_model_verbosity: value,
       })
     }
   }
@@ -949,14 +1159,22 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     }
   }
 
-  const selectedOpenCodeModel =
-    preferences?.selected_opencode_model ?? 'opencode/gpt-5.5'
-  const formatOpenCodeModelLabelForSettings = (value: string) => {
-    const formatted = formatOpencodeModelLabel(value)
-    return value.startsWith('opencode/')
-      ? formatted.replace(/\s+\(OpenCode\)$/, '')
-      : formatted
+  const handleGrokReasoningChange = (value: GrokReasoningEffort) => {
+    if (preferences) {
+      patchPreferences.mutate({
+        default_grok_reasoning_effort: value,
+      })
+    }
   }
+
+  const handleKimiModelChange = (value: KimiModel) => {
+    if (preferences) {
+      patchPreferences.mutate({ selected_kimi_model: value })
+    }
+  }
+
+  const selectedOpenCodeModel =
+    preferences?.selected_opencode_model ?? 'opencode/gpt-5.6-sol'
   const openCodeModelOptions = (
     availableOpencodeModels?.length
       ? availableOpencodeModels
@@ -984,8 +1202,6 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const selectedCursorModelLabel =
     cursorModelOptions.find(option => option.value === selectedCursorModel)
       ?.label ?? formatCursorModelLabel(selectedCursorModel)
-  const selectedGrokModel =
-    preferences?.selected_grok_model ?? 'grok/grok-composer-2.5-fast'
   const grokModelOptions: { value: GrokModel; label: string }[] = (
     availableGrokModels?.length
       ? availableGrokModels.map(model => ({
@@ -1000,6 +1216,23 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const selectedGrokModelLabel =
     grokModelOptions.find(option => option.value === selectedGrokModel)
       ?.label ?? selectedGrokModel.replace(/^grok\//, '')
+  const selectedKimiModel = preferences?.selected_kimi_model ?? 'kimi/default'
+  const kimiModelOptions: { value: KimiModel; label: string }[] = [
+    ...(KIMI_MODEL_OPTIONS as { value: KimiModel; label: string }[]),
+    ...(availableKimiModels ?? []).flatMap(model =>
+      model.id === 'default'
+        ? []
+        : [
+            {
+              value: `kimi/${model.id}` as KimiModel,
+              label: model.isDefault ? `${model.label} (default)` : model.label,
+            },
+          ]
+    ),
+  ]
+  const selectedKimiModelLabel =
+    kimiModelOptions.find(option => option.value === selectedKimiModel)
+      ?.label ?? selectedKimiModel.replace(/^kimi\//, '')
   const buildBackendOptions = backendOptions
   const effectiveBuildBackend = (preferences?.build_backend ??
     effectiveBackend) as CliBackend
@@ -1033,6 +1266,60 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const selectedPiModelLabel =
     piModelOptions.find(option => option.value === selectedPiModel)?.label ??
     formatPiModelLabel(selectedPiModel)
+  const buildModel =
+    preferences?.build_model ??
+    resolveDefaultModelForBackend(
+      effectiveBuildBackend,
+      preferences,
+      piModelOptions
+    )
+  const yoloModel =
+    preferences?.yolo_model ??
+    resolveDefaultModelForBackend(
+      effectiveYoloBackend,
+      preferences,
+      piModelOptions
+    )
+  const buildReasoningRaw =
+    getCatalogModelReasoning(modelCatalog, effectiveBuildBackend, buildModel) ??
+    (['codex', 'opencode', 'pi', 'grok', 'kimi'].includes(effectiveBuildBackend)
+      ? {
+          type: 'effort' as const,
+          default: 'high',
+          levels:
+            effectiveBuildBackend === 'codex'
+              ? codexReasoningOptions
+              : effectiveBuildBackend === 'kimi'
+                ? KIMI_EFFORT_LEVEL_OPTIONS
+                : effortLevelOptions,
+        }
+      : null)
+  const buildReasoning = buildReasoningRaw
+    ? {
+        ...buildReasoningRaw,
+        levels: withAdaptiveEffortOption(buildReasoningRaw.levels, buildModel),
+      }
+    : null
+  const yoloReasoningRaw =
+    getCatalogModelReasoning(modelCatalog, effectiveYoloBackend, yoloModel) ??
+    (['codex', 'opencode', 'pi', 'grok', 'kimi'].includes(effectiveYoloBackend)
+      ? {
+          type: 'effort' as const,
+          default: 'high',
+          levels:
+            effectiveYoloBackend === 'codex'
+              ? codexReasoningOptions
+              : effectiveYoloBackend === 'kimi'
+                ? KIMI_EFFORT_LEVEL_OPTIONS
+                : effortLevelOptions,
+        }
+      : null)
+  const yoloReasoning = yoloReasoningRaw
+    ? {
+        ...yoloReasoningRaw,
+        levels: withAdaptiveEffortOption(yoloReasoningRaw.levels, yoloModel),
+      }
+    : null
   const piAuthMessage = piAuth?.error
 
   const selectedCommandCodeModel =
@@ -1055,6 +1342,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const grokAuthMessage = grokAuth?.timedOut
     ? 'Auth check timed out. Try again or run `grok login` manually.'
     : grokAuth?.error
+  const kimiAuthMessage = kimiAuth?.timedOut
+    ? 'Auth check timed out. Try again or run `kimi login` manually.'
+    : kimiAuth?.error
 
   const handleCodexMultiAgentToggle = (enabled: boolean) => {
     if (preferences) {
@@ -1084,6 +1374,22 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     if (preferences) {
       patchPreferences.mutate({
         pi_auto_steer_enabled: enabled,
+      })
+    }
+  }
+
+  const handleGrokAutoSteerToggle = (enabled: boolean) => {
+    if (preferences) {
+      patchPreferences.mutate({
+        grok_auto_steer_enabled: enabled,
+      })
+    }
+  }
+
+  const handleKimiAutoSteerToggle = (enabled: boolean) => {
+    if (preferences) {
+      patchPreferences.mutate({
+        kimi_auto_steer_enabled: enabled,
       })
     }
   }
@@ -1270,8 +1576,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       setCheckingCodexAuth(false)
     }
 
-    // Not authenticated, open login modal
-    openCliLoginModal('codex', codexStatus.path, ['login'])
+    // Not authenticated, open login modal (device-code auth for terminal/headless)
+    openCliLoginModal('codex', codexStatus.path, loginArgsForBackend('codex'))
   }, [codexStatus?.path, openCliLoginModal, queryClient])
 
   const handleCodeRabbitLogin = useCallback(async () => {
@@ -1333,7 +1639,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
   const handleCodexRelogin = useCallback(() => {
     if (!codexStatus?.path) return
-    openCliLoginModal('codex', codexStatus.path, ['login'])
+    openCliLoginModal('codex', codexStatus.path, loginArgsForBackend('codex'))
   }, [codexStatus?.path, openCliLoginModal])
 
   const handleOpenCodeRelogin = useCallback(() => {
@@ -1495,6 +1801,38 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     openCliUpdateModal('grok')
   }, [openCliUpdateModal, patchPreferences, preferences?.grok_cli_source])
 
+  const handleKimiLogin = useCallback(async () => {
+    if (!kimiStatus?.path) return
+    setCheckingKimiAuth(true)
+    try {
+      await queryClient.invalidateQueries({
+        queryKey: kimiCliQueryKeys.auth(),
+      })
+      const result = await queryClient.fetchQuery<KimiAuthStatus>({
+        queryKey: kimiCliQueryKeys.auth(),
+      })
+      if (result?.authenticated) {
+        toast.success('Kimi Code CLI is already authenticated')
+        return
+      }
+    } finally {
+      setCheckingKimiAuth(false)
+    }
+    openCliLoginModal('kimi', kimiStatus.path, ['login'])
+  }, [kimiStatus?.path, openCliLoginModal, queryClient])
+
+  const handleKimiRelogin = useCallback(() => {
+    if (!kimiStatus?.path) return
+    openCliLoginModal('kimi', kimiStatus.path, ['login'])
+  }, [kimiStatus?.path, openCliLoginModal])
+
+  const handleKimiInstall = useCallback(() => {
+    if (preferences?.kimi_cli_source !== 'jean') {
+      patchPreferences.mutate({ kimi_cli_source: 'jean' })
+    }
+    openCliUpdateModal('kimi')
+  }, [openCliUpdateModal, patchPreferences, preferences?.kimi_cli_source])
+
   const handleCopyPath = useCallback((path: string | null | undefined) => {
     if (!path) return
     copyToClipboard(path)
@@ -1503,10 +1841,20 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
   return (
     <div className="space-y-6">
+      {scope in backendPaneMeta && (
+        <BackendPaneHeader
+          backend={scope as CliBackend}
+          description={
+            backendPaneMeta[scope as keyof typeof backendPaneMeta].description
+          }
+        />
+      )}
+
       {hasBackend() && scope === 'claude' && (
         <SettingsSection
-          title="Claude CLI"
+          title="CLI source"
           anchorId="pref-claude-section-cli"
+          variant="card"
           actions={
             cliStatus?.installed ? (
               checkingClaudeAuth || isClaudeAuthLoading ? (
@@ -1517,16 +1865,12 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               ) : claudeAuth?.authenticated ? (
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Logged in
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleClaudeRelogin}
-                  >
+                  <Button size="sm" onClick={handleClaudeRelogin}>
                     Relogin
                   </Button>
                 </span>
               ) : (
-                <Button variant="outline" size="sm" onClick={handleClaudeLogin}>
+                <Button size="sm" onClick={handleClaudeLogin}>
                   Login
                 </Button>
               )
@@ -1610,6 +1954,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
+                      type="button"
                       onClick={() =>
                         handleCopyPath(
                           preferences?.claude_cli_source === 'path'
@@ -1628,21 +1973,26 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 </Tooltip>
               }
             >
-              <Select
-                value={preferences?.claude_cli_source ?? 'jean'}
-                onValueChange={handleClaudeSourceChange}
-              >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="jean">Jean (managed)</SelectItem>
-                  <SelectItem value="path" disabled={!pathDetection?.found}>
-                    System PATH
-                    {!pathDetection?.found && ' (not found)'}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+              <div className="w-full space-y-3">
+                <BackendCliSourceCards
+                  value={preferences?.claude_cli_source ?? 'jean'}
+                  onValueChange={handleClaudeSourceChange}
+                  backendName="Claude CLI"
+                  path={pathDetection?.path}
+                  pathVersion={pathDetection?.version}
+                  pathFound={!!pathDetection?.found}
+                />
+                {preferences?.claude_cli_source === 'jean' &&
+                  cliStatus?.installed && (
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => setDeleteCliTarget('claude')}
+                    >
+                      Uninstall
+                    </Button>
+                  )}
+              </div>
             </InlineField>
             {!cliStatus?.installed && !pathDetection?.found && (
               <p className="text-xs text-muted-foreground px-1">
@@ -1757,6 +2107,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
+                      type="button"
                       onClick={() =>
                         handleCopyPath(
                           preferences?.gh_cli_source === 'path'
@@ -1914,6 +2265,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
+                        type="button"
                         onClick={() =>
                           handleCopyPath(
                             preferences?.coderabbit_cli_source === 'path'
@@ -1971,8 +2323,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {hasBackend() && scope === 'codex' && (
         <SettingsSection
-          title="Codex CLI"
+          title="CLI source"
           anchorId="pref-codex-section-cli"
+          variant="card"
           actions={
             codexStatus?.installed ? (
               checkingCodexAuth || isCodexAuthLoading ? (
@@ -1983,16 +2336,12 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               ) : codexAuth?.authenticated ? (
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Logged in
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleCodexRelogin}
-                  >
+                  <Button size="sm" onClick={handleCodexRelogin}>
                     Relogin
                   </Button>
                 </span>
               ) : (
-                <Button variant="outline" size="sm" onClick={handleCodexLogin}>
+                <Button size="sm" onClick={handleCodexLogin}>
                   Login
                 </Button>
               )
@@ -2078,6 +2427,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
+                      type="button"
                       onClick={() =>
                         handleCopyPath(
                           preferences?.codex_cli_source === 'path'
@@ -2096,29 +2446,37 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 </Tooltip>
               }
             >
-              <Select
-                value={preferences?.codex_cli_source ?? 'jean'}
-                onValueChange={handleCodexSourceChange}
-              >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="jean">Jean (managed)</SelectItem>
-                  <SelectItem
-                    value="path"
-                    disabled={!codexPathDetection?.found}
-                  >
-                    System PATH
-                    {!codexPathDetection?.found && ' (not found)'}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+              <div className="w-full space-y-3">
+                <BackendCliSourceCards
+                  value={preferences?.codex_cli_source ?? 'jean'}
+                  onValueChange={handleCodexSourceChange}
+                  backendName="Codex CLI"
+                  path={codexPathDetection?.path}
+                  pathVersion={codexPathDetection?.version}
+                  pathFound={!!codexPathDetection?.found}
+                />
+                {preferences?.codex_cli_source === 'jean' &&
+                  codexStatus?.installed && (
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => setDeleteCliTarget('codex')}
+                    >
+                      Uninstall
+                    </Button>
+                  )}
+              </div>
             </InlineField>
             {!codexStatus?.installed && !codexPathDetection?.found && (
               <p className="text-xs text-muted-foreground px-1">
                 Install with Jean, or install <code>codex</code> yourself in
                 your environment — we&apos;ll detect it on your PATH.
+              </p>
+            )}
+            {codexStatus?.installed && codexStatus.sandbox_ready === false && (
+              <p className="text-xs text-amber-600 dark:text-amber-400 px-1">
+                {codexStatus.sandbox_message ??
+                  'Codex sandbox requires bubblewrap. Install it with: sudo apt install bubblewrap'}
               </p>
             )}
           </div>
@@ -2127,8 +2485,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {hasBackend() && scope === 'opencode' && (
         <SettingsSection
-          title="OpenCode CLI"
+          title="CLI source"
           anchorId="pref-opencode-section-cli"
+          variant="card"
           actions={
             opencodeStatus?.installed ? (
               checkingOpenCodeAuth || isOpenCodeAuthLoading ? (
@@ -2139,20 +2498,12 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               ) : opencodeAuth?.authenticated ? (
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Logged in
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleOpenCodeRelogin}
-                  >
+                  <Button size="sm" onClick={handleOpenCodeRelogin}>
                     Relogin
                   </Button>
                 </span>
               ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleOpenCodeLogin}
-                >
+                <Button size="sm" onClick={handleOpenCodeLogin}>
                   Login
                 </Button>
               )
@@ -2236,6 +2587,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
+                      type="button"
                       onClick={() =>
                         handleCopyPath(
                           preferences?.opencode_cli_source === 'path'
@@ -2254,24 +2606,26 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 </Tooltip>
               }
             >
-              <Select
-                value={preferences?.opencode_cli_source ?? 'jean'}
-                onValueChange={handleOpencodeSourceChange}
-              >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="jean">Jean (managed)</SelectItem>
-                  <SelectItem
-                    value="path"
-                    disabled={!opencodePathDetection?.found}
-                  >
-                    System PATH
-                    {!opencodePathDetection?.found && ' (not found)'}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+              <div className="w-full space-y-3">
+                <BackendCliSourceCards
+                  value={preferences?.opencode_cli_source ?? 'jean'}
+                  onValueChange={handleOpencodeSourceChange}
+                  backendName="OpenCode CLI"
+                  path={opencodePathDetection?.path}
+                  pathVersion={opencodePathDetection?.version}
+                  pathFound={!!opencodePathDetection?.found}
+                />
+                {preferences?.opencode_cli_source === 'jean' &&
+                  opencodeStatus?.installed && (
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => setDeleteCliTarget('opencode')}
+                    >
+                      Uninstall
+                    </Button>
+                  )}
+              </div>
             </InlineField>
             {!opencodeStatus?.installed && !opencodePathDetection?.found && (
               <p className="text-xs text-muted-foreground px-1">
@@ -2285,13 +2639,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {hasBackend() && scope === 'cursor' && (
         <SettingsSection
-          title={
-            <span className="inline-flex items-center gap-2">
-              <BackendLabel backend="cursor" />
-              <span>CLI</span>
-            </span>
-          }
+          title="CLI source"
           anchorId="pref-cursor-section-cli"
+          variant="card"
           actions={
             cursorStatus?.installed ? (
               checkingCursorAuth || isCursorAuthLoading ? (
@@ -2302,16 +2652,12 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               ) : cursorAuth?.authenticated ? (
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Logged in
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleCursorRelogin}
-                  >
+                  <Button size="sm" onClick={handleCursorRelogin}>
                     Relogin
                   </Button>
                 </span>
               ) : (
-                <Button variant="outline" size="sm" onClick={handleCursorLogin}>
+                <Button size="sm" onClick={handleCursorLogin}>
                   Login
                 </Button>
               )
@@ -2368,6 +2714,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
+                      type="button"
                       onClick={() =>
                         handleCopyPath(
                           cursorPathDetection?.path ?? cursorStatus?.path
@@ -2409,13 +2756,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {hasBackend() && scope === 'pi' && (
         <SettingsSection
-          title={
-            <span className="inline-flex items-center gap-2">
-              <BackendLabel backend="pi" />
-              <span>CLI</span>
-            </span>
-          }
+          title="CLI source"
           anchorId="pref-pi-section-cli"
+          variant="card"
           actions={
             piStatus?.installed ? (
               checkingPiAuth || isPiAuthLoading ? (
@@ -2426,17 +2769,17 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               ) : piAuth?.authenticated ? (
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Logged in
-                  <Button variant="outline" size="sm" onClick={handlePiRelogin}>
+                  <Button size="sm" onClick={handlePiRelogin}>
                     Relogin
                   </Button>
                 </span>
               ) : (
-                <Button variant="outline" size="sm" onClick={handlePiLogin}>
+                <Button size="sm" onClick={handlePiLogin}>
                   Login
                 </Button>
               )
             ) : (
-              <Button variant="outline" size="sm" onClick={handlePiInstall}>
+              <Button size="sm" onClick={handlePiInstall}>
                 Install
               </Button>
             )
@@ -2478,6 +2821,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
+                      type="button"
                       onClick={() =>
                         handleCopyPath(
                           preferences?.pi_cli_source === 'path'
@@ -2496,31 +2840,23 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 </Tooltip>
               }
             >
-              <div className="flex items-center gap-2">
-                <Select
+              <div className="w-full space-y-3">
+                <BackendCliSourceCards
                   value={preferences?.pi_cli_source ?? 'jean'}
                   onValueChange={handlePiSourceChange}
-                >
-                  <SelectTrigger className="w-full sm:w-80">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="jean">Jean (managed)</SelectItem>
-                    <SelectItem value="path" disabled={!piPathDetection?.found}>
-                      System PATH
-                      {!piPathDetection?.found && ' (not found)'}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                  backendName="PI CLI"
+                  path={piPathDetection?.path}
+                  pathVersion={piPathDetection?.version}
+                  pathFound={!!piPathDetection?.found}
+                />
                 {preferences?.pi_cli_source === 'jean' &&
                   piStatus?.installed && (
                     <Button
-                      variant="ghost"
+                      variant="destructive"
                       size="sm"
-                      className="text-destructive hover:text-destructive"
                       onClick={() => setDeleteCliTarget('pi')}
                     >
-                      Delete managed install
+                      Uninstall
                     </Button>
                   )}
               </div>
@@ -2536,13 +2872,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {hasBackend() && scope === 'commandcode' && (
         <SettingsSection
-          title={
-            <span className="inline-flex items-center gap-2">
-              <BackendLabel backend="commandcode" />
-              <span>CLI</span>
-            </span>
-          }
+          title="CLI source"
           anchorId="pref-commandcode-section-cli"
+          variant="card"
           actions={
             commandcodeStatus?.installed ? (
               checkingCommandCodeAuth || isCommandCodeAuthLoading ? (
@@ -2553,29 +2885,17 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               ) : commandcodeAuth?.authenticated ? (
                 <span className="text-sm text-muted-foreground flex items-center gap-2">
                   Logged in
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleCommandCodeRelogin}
-                  >
+                  <Button size="sm" onClick={handleCommandCodeRelogin}>
                     Relogin
                   </Button>
                 </span>
               ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleCommandCodeLogin}
-                >
+                <Button size="sm" onClick={handleCommandCodeLogin}>
                   Login
                 </Button>
               )
             ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleCommandCodeInstall}
-              >
+              <Button size="sm" onClick={handleCommandCodeInstall}>
                 Install
               </Button>
             )
@@ -2621,6 +2941,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
+                      type="button"
                       onClick={() =>
                         handleCopyPath(
                           preferences?.commandcode_cli_source === 'path'
@@ -2639,34 +2960,23 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 </Tooltip>
               }
             >
-              <div className="flex items-center gap-2">
-                <Select
+              <div className="w-full space-y-3">
+                <BackendCliSourceCards
                   value={preferences?.commandcode_cli_source ?? 'jean'}
                   onValueChange={handleCommandCodeSourceChange}
-                >
-                  <SelectTrigger className="w-full sm:w-80">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="jean">Jean (managed)</SelectItem>
-                    <SelectItem
-                      value="path"
-                      disabled={!commandcodePathDetection?.found}
-                    >
-                      System PATH
-                      {!commandcodePathDetection?.found && ' (not found)'}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                  backendName="Command Code CLI"
+                  path={commandcodePathDetection?.path}
+                  pathVersion={commandcodePathDetection?.version}
+                  pathFound={!!commandcodePathDetection?.found}
+                />
                 {preferences?.commandcode_cli_source === 'jean' &&
                   commandcodeStatus?.installed && (
                     <Button
-                      variant="ghost"
+                      variant="destructive"
                       size="sm"
-                      className="text-destructive hover:text-destructive"
                       onClick={() => setDeleteCliTarget('commandcode')}
                     >
-                      Delete managed install
+                      Uninstall
                     </Button>
                   )}
               </div>
@@ -2691,13 +3001,18 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {scope === 'claude' && (
         <SettingsSection
-          title="Claude Settings"
+          title="Default model"
           anchorId="pref-claude-section-settings"
+          variant="card"
         >
           <div className="space-y-4">
             <InlineField
               label="Model"
-              description="Claude model for AI assistance"
+              description={
+                defaultClaudeProvider
+                  ? `Claude model for AI assistance (routed via ${defaultClaudeProvider}). Change the default provider under Settings → Providers.`
+                  : 'Claude model for AI assistance. Custom CLI providers are configured under Settings → Providers.'
+              }
             >
               <Select
                 value={preferences?.selected_model ?? 'claude-opus-4-8[1m]'}
@@ -2716,47 +3031,57 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               </Select>
             </InlineField>
 
-            <InlineField
-              label="Thinking"
-              description="Claude Sonnet/traditional thinking level"
-            >
-              <Select
-                value={preferences?.thinking_level ?? 'off'}
-                onValueChange={handleThinkingLevelChange}
+            {claudeReasoning?.type === 'thinking' && (
+              <InlineField
+                label="Thinking"
+                description="Thinking level for the selected Claude model"
               >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {thinkingLevelOptions.map(option => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </InlineField>
+                <Select
+                  value={preferences?.thinking_level ?? claudeReasoning.default}
+                  onValueChange={value =>
+                    handleThinkingLevelChange(value as ThinkingLevel)
+                  }
+                >
+                  <SelectTrigger className="w-full sm:w-80">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {selectedClaudeReasoningOptions.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+            )}
 
-            <InlineField
-              label="Effort"
-              description="Claude Opus adaptive effort (requires CLI 2.1.32+)"
-            >
-              <Select
-                value={preferences?.default_effort_level ?? 'high'}
-                onValueChange={handleEffortLevelChange}
+            {claudeReasoning?.type === 'effort' && (
+              <InlineField
+                label="Effort"
+                description="Effort level for the selected Claude model"
               >
-                <SelectTrigger className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {effortLevelOptions.map(option => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </InlineField>
+                <Select
+                  value={
+                    preferences?.default_effort_level ?? claudeReasoning.default
+                  }
+                  onValueChange={value =>
+                    handleEffortLevelChange(value as EffortLevel)
+                  }
+                >
+                  <SelectTrigger className="w-full sm:w-80">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {selectedClaudeReasoningOptions.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+            )}
 
             <InlineField
               label="Chrome browser integration"
@@ -2779,8 +3104,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {scope === 'codex' && (
         <SettingsSection
-          title="Codex Settings"
+          title="Default model"
           anchorId="pref-codex-section-settings"
+          variant="card"
         >
           <div className="space-y-4">
             <InlineField
@@ -2788,7 +3114,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               description="Codex model for AI assistance"
             >
               <Select
-                value={preferences?.selected_codex_model ?? 'gpt-5.5'}
+                value={preferences?.selected_codex_model ?? 'gpt-5.6-sol'}
                 onValueChange={handleCodexModelChange}
               >
                 <SelectTrigger className="w-full sm:w-80">
@@ -2816,7 +3142,28 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {codexReasoningOptions.map(option => (
+                  {selectedCodexReasoningOptions.map(option => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </InlineField>
+
+            <InlineField
+              label="Model verbosity"
+              description="How much intermediate text Codex writes during chat (low is terse; high is more detailed)"
+            >
+              <Select
+                value={preferences?.default_codex_model_verbosity ?? 'medium'}
+                onValueChange={handleCodexModelVerbosityChange}
+              >
+                <SelectTrigger className="w-full sm:w-80">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {codexModelVerbosityOptions.map(option => (
                     <SelectItem key={option.value} value={option.value}>
                       {option.label}
                     </SelectItem>
@@ -2884,8 +3231,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {scope === 'opencode' && (
         <SettingsSection
-          title="OpenCode Settings"
+          title="Default model"
           anchorId="pref-opencode-section-settings"
+          variant="card"
         >
           <div className="space-y-4">
             <InlineField
@@ -2951,7 +3299,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             </InlineField>
             <InlineField
               label="Steer running turn"
-              description="Prompts sent while OpenCode is working are sent to the running session instead of queued"
+              description="Text-only prompts sent while OpenCode is working are injected into the current turn instead of queued (attachments always queue)"
             >
               <Switch
                 checked={preferences?.opencode_auto_steer_enabled ?? true}
@@ -2964,13 +3312,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {scope === 'cursor' && (
         <SettingsSection
-          title={
-            <span className="inline-flex items-center gap-2">
-              <BackendLabel backend="cursor" />
-              <span>Settings</span>
-            </span>
-          }
+          title="Default model"
           anchorId="pref-cursor-section-settings"
+          variant="card"
         >
           <div className="space-y-4">
             <InlineField
@@ -3040,13 +3384,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {scope === 'pi' && (
         <SettingsSection
-          title={
-            <span className="inline-flex items-center gap-2">
-              <BackendLabel backend="pi" />
-              <span>Settings</span>
-            </span>
-          }
+          title="Default model"
           anchorId="pref-pi-section-settings"
+          variant="card"
         >
           <div className="space-y-4">
             <InlineField
@@ -3118,7 +3458,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             </InlineField>
             <InlineField
               label="Steer running turn"
-              description="Prompts sent while PI is working are injected into the current turn instead of queued"
+              description="Text-only prompts sent while PI is working are injected into the current turn instead of queued (attachments always queue)"
             >
               <Switch
                 checked={preferences?.pi_auto_steer_enabled ?? true}
@@ -3131,13 +3471,9 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
       {scope === 'commandcode' && (
         <SettingsSection
-          title={
-            <span className="inline-flex items-center gap-2">
-              <BackendLabel backend="commandcode" />
-              <span>Settings</span>
-            </span>
-          }
+          title="Default model"
           anchorId="pref-commandcode-section-settings"
+          variant="card"
         >
           <div className="space-y-4">
             <InlineField
@@ -3165,161 +3501,338 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       )}
 
       {scope === 'grok' && (
-        <SettingsSection
-          title={
-            <span className="inline-flex items-center gap-2">
-              <BackendLabel backend="grok" />
-              <span>Settings</span>
-            </span>
-          }
-          anchorId="pref-grok-section-settings"
-          actions={
-            grokStatus?.installed ? (
-              checkingGrokAuth || isGrokAuthLoading ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  <Loader2 className="size-3 animate-spin" />
-                  Checking...
-                </span>
-              ) : grokAuth?.authenticated ? (
-                <span className="text-sm text-muted-foreground flex items-center gap-2">
-                  Logged in
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleGrokRelogin}
-                  >
-                    Relogin
+        <>
+          <SettingsSection
+            title="CLI source"
+            anchorId="pref-grok-section-cli"
+            variant="card"
+            actions={
+              grokStatus?.installed ? (
+                checkingGrokAuth || isGrokAuthLoading ? (
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
+                    <Loader2 className="size-3 animate-spin" />
+                    Checking...
+                  </span>
+                ) : grokAuth?.authenticated ? (
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
+                    Logged in
+                    <Button size="sm" onClick={handleGrokRelogin}>
+                      Relogin
+                    </Button>
+                  </span>
+                ) : (
+                  <Button size="sm" onClick={handleGrokLogin}>
+                    Login
                   </Button>
-                </span>
+                )
               ) : (
-                <Button variant="outline" size="sm" onClick={handleGrokLogin}>
-                  Login
+                <Button size="sm" onClick={handleGrokInstall}>
+                  Install
                 </Button>
               )
-            ) : (
-              <Button variant="outline" size="sm" onClick={handleGrokInstall}>
-                Install
-              </Button>
-            )
-          }
-        >
-          <div className="space-y-4">
-            <InlineField
-              label={grokStatus?.installed ? 'Version' : 'Status'}
-              description={
-                grokStatus?.installed
-                  ? 'Enables Grok AI sessions through the Grok CLI.'
-                  : 'Grok can be Jean-managed or discovered from your system PATH.'
-              }
-            >
-              {isGrokLoading ? (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" />
-              ) : grokStatus?.installed ? (
-                <Button
-                  variant="outline"
-                  className="w-full sm:w-40 justify-between"
-                  onClick={handleGrokInstall}
-                >
-                  {grokStatus.version ?? 'Installed'}
-                </Button>
-              ) : (
-                <div className="flex items-center gap-2">
+            }
+          >
+            <div className="space-y-4">
+              <InlineField
+                label={grokStatus?.installed ? 'Version' : 'Status'}
+                description={
+                  grokStatus?.installed
+                    ? 'Enables Grok AI sessions through the Grok CLI.'
+                    : 'Grok can be Jean-managed or discovered from your system PATH.'
+                }
+              >
+                {isGrokLoading ? (
+                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                ) : grokStatus?.installed ? (
+                  <Button
+                    variant="outline"
+                    className="w-full sm:w-40 justify-between"
+                    onClick={handleGrokInstall}
+                  >
+                    {grokStatus.version ?? 'Installed'}
+                  </Button>
+                ) : (
                   <span className="text-sm text-muted-foreground">
                     Not found in PATH
                   </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleGrokInstall}
-                  >
-                    Install now
-                  </Button>
-                </div>
+                )}
+              </InlineField>
+              {grokAuthMessage && (
+                <p className="text-xs text-muted-foreground">
+                  {grokAuthMessage}
+                </p>
               )}
-            </InlineField>
-            {grokAuthMessage && (
-              <p className="text-xs text-muted-foreground">{grokAuthMessage}</p>
-            )}
-            <InlineField
-              label="Source"
-              description={
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      onClick={() =>
-                        handleCopyPath(
-                          preferences?.grok_cli_source === 'path'
-                            ? grokPathDetection?.path
-                            : grokStatus?.path
-                        )
-                      }
-                      className="text-left hover:underline cursor-pointer"
-                    >
-                      {preferences?.grok_cli_source === 'path'
-                        ? (grokPathDetection?.path ?? 'System PATH')
-                        : (grokStatus?.path ?? 'Not installed')}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Click to copy path</TooltipContent>
-                </Tooltip>
-              }
-            >
-              <div className="flex items-center gap-2">
+              <InlineField
+                label="Source"
+                description={
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleCopyPath(
+                            preferences?.grok_cli_source === 'path'
+                              ? grokPathDetection?.path
+                              : grokStatus?.path
+                          )
+                        }
+                        className="text-left hover:underline cursor-pointer"
+                      >
+                        {preferences?.grok_cli_source === 'path'
+                          ? (grokPathDetection?.path ?? 'System PATH')
+                          : (grokStatus?.path ?? 'Not installed')}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Click to copy path</TooltipContent>
+                  </Tooltip>
+                }
+              >
+                <div className="w-full space-y-3">
+                  <BackendCliSourceCards
+                    value={preferences?.grok_cli_source ?? 'jean'}
+                    onValueChange={handleGrokSourceChange}
+                    backendName="Grok CLI"
+                    path={grokPathDetection?.path}
+                    pathVersion={grokPathDetection?.version}
+                    pathFound={!!grokPathDetection?.found}
+                  />
+                  {preferences?.grok_cli_source === 'jean' &&
+                    grokStatus?.installed && (
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => setDeleteCliTarget('grok')}
+                      >
+                        Uninstall
+                      </Button>
+                    )}
+                </div>
+              </InlineField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Default model"
+            anchorId="pref-grok-section-settings"
+            variant="card"
+          >
+            <div className="space-y-4">
+              <InlineField
+                label="Model"
+                description="Grok model for AI assistance"
+              >
                 <Select
-                  value={preferences?.grok_cli_source ?? 'jean'}
-                  onValueChange={handleGrokSourceChange}
+                  value={selectedGrokModel}
+                  onValueChange={value =>
+                    handleGrokModelChange(value as GrokModel)
+                  }
                 >
-                  <SelectTrigger className="w-full sm:w-80">
+                  <SelectTrigger className="w-80 max-w-full">
+                    <SelectValue>{selectedGrokModelLabel}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {grokModelOptions.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+              <InlineField
+                label="Reasoning effort"
+                description="Default Grok reasoning effort for new sessions"
+              >
+                <Select
+                  value={preferences?.default_grok_reasoning_effort ?? 'high'}
+                  onValueChange={handleGrokReasoningChange}
+                >
+                  <SelectTrigger className="w-80 max-w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="jean">Jean (managed)</SelectItem>
-                    <SelectItem
-                      value="path"
-                      disabled={!grokPathDetection?.found}
-                    >
-                      System PATH
-                      {!grokPathDetection?.found && ' (not found)'}
-                    </SelectItem>
+                    {selectedGrokReasoningOptions.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
-                {preferences?.grok_cli_source === 'jean' &&
-                  grokStatus?.installed && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => setDeleteCliTarget('grok')}
-                    >
-                      Delete managed install
+              </InlineField>
+              <InlineField
+                label="Steer running turn"
+                description="Text-only prompts sent while Grok is working are injected into the current turn instead of queued (attachments always queue)"
+              >
+                <Switch
+                  checked={preferences?.grok_auto_steer_enabled ?? true}
+                  onCheckedChange={handleGrokAutoSteerToggle}
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+        </>
+      )}
+
+      {scope === 'kimi' && (
+        <>
+          <SettingsSection
+            title="CLI source"
+            anchorId="pref-kimi-section-cli"
+            variant="card"
+            actions={
+              kimiStatus?.installed ? (
+                checkingKimiAuth || isKimiAuthLoading ? (
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
+                    <Loader2 className="size-3 animate-spin" />
+                    Checking...
+                  </span>
+                ) : kimiAuth?.authenticated ? (
+                  <span className="text-sm text-muted-foreground flex items-center gap-2">
+                    Logged in
+                    <Button size="sm" onClick={handleKimiRelogin}>
+                      Relogin
                     </Button>
-                  )}
-              </div>
-            </InlineField>
-            <InlineField
-              label="Model"
-              description="Grok model for AI assistance"
-            >
-              <Select
-                value={selectedGrokModel}
-                onValueChange={value =>
-                  handleGrokModelChange(value as GrokModel)
+                  </span>
+                ) : (
+                  <Button size="sm" onClick={handleKimiLogin}>
+                    Login
+                  </Button>
+                )
+              ) : (
+                <Button size="sm" onClick={handleKimiInstall}>
+                  Install
+                </Button>
+              )
+            }
+          >
+            <div className="space-y-4">
+              <InlineField
+                label={kimiStatus?.installed ? 'Version' : 'Status'}
+                description={
+                  kimiStatus?.installed
+                    ? 'Enables Kimi Code AI sessions through the Kimi Code CLI.'
+                    : 'Kimi Code can be Jean-managed or discovered from your system PATH.'
                 }
               >
-                <SelectTrigger className="w-80 max-w-full">
-                  <SelectValue>{selectedGrokModelLabel}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {grokModelOptions.map(option => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </InlineField>
-          </div>
-        </SettingsSection>
+                {isKimiLoading ? (
+                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                ) : kimiStatus?.installed ? (
+                  <Button
+                    variant="outline"
+                    className="w-full sm:w-40 justify-between"
+                    onClick={handleKimiInstall}
+                  >
+                    {kimiStatus.version ?? 'Installed'}
+                  </Button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground">
+                      Not found in PATH
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleKimiInstall}
+                    >
+                      Install now
+                    </Button>
+                  </div>
+                )}
+              </InlineField>
+              {kimiAuthMessage && (
+                <p className="text-xs text-muted-foreground">
+                  {kimiAuthMessage}
+                </p>
+              )}
+              <InlineField
+                label="Source"
+                description={
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleCopyPath(
+                            preferences?.kimi_cli_source === 'path'
+                              ? kimiPathDetection?.path
+                              : kimiStatus?.path
+                          )
+                        }
+                        className="text-left hover:underline cursor-pointer"
+                      >
+                        {preferences?.kimi_cli_source === 'path'
+                          ? (kimiPathDetection?.path ?? 'System PATH')
+                          : (kimiStatus?.path ?? 'Not installed')}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Click to copy path</TooltipContent>
+                  </Tooltip>
+                }
+              >
+                <div className="w-full space-y-3">
+                  <BackendCliSourceCards
+                    value={preferences?.kimi_cli_source ?? 'jean'}
+                    onValueChange={handleKimiSourceChange}
+                    backendName="Kimi Code CLI"
+                    path={kimiPathDetection?.path}
+                    pathVersion={kimiPathDetection?.version}
+                    pathFound={!!kimiPathDetection?.found}
+                  />
+                  {preferences?.kimi_cli_source === 'jean' &&
+                    kimiStatus?.installed && (
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => setDeleteCliTarget('kimi')}
+                      >
+                        Uninstall
+                      </Button>
+                    )}
+                </div>
+              </InlineField>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Default model"
+            anchorId="pref-kimi-section-settings"
+            variant="card"
+          >
+            <div className="space-y-4">
+              <InlineField
+                label="Model"
+                description="Kimi Code model for AI assistance"
+              >
+                <Select
+                  value={selectedKimiModel}
+                  onValueChange={value =>
+                    handleKimiModelChange(value as KimiModel)
+                  }
+                >
+                  <SelectTrigger className="w-80 max-w-full">
+                    <SelectValue>{selectedKimiModelLabel}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {kimiModelOptions.map(option => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </InlineField>
+              <InlineField
+                label="Steer running turn"
+                description="Text-only prompts sent while Kimi Code is working are injected into the current turn instead of queued (attachments always queue)"
+              >
+                <Switch
+                  checked={preferences?.kimi_auto_steer_enabled ?? false}
+                  onCheckedChange={handleKimiAutoSteerToggle}
+                />
+              </InlineField>
+            </div>
+          </SettingsSection>
+        </>
       )}
 
       {isGeneralScope && (
@@ -3355,11 +3868,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             {!isNativeApp() && (
               <InlineField
                 label="Web Editor URL"
-                description="Override where 'Open Editor' sends you. Blank = same-origin /code (default)."
+                description="Where the bundled browser editor (openvscode-server) is served. Enter a same-origin path such as /code — which is what the Jean docker-compose + Caddy setup exposes — or a full URL like https://host/code. Leave blank to hide the 'Open Editor' entry."
               >
                 <Input
                   className="w-full sm:w-80"
-                  placeholder="/code or https://host/code"
+                  placeholder="/code"
                   value={preferences?.web_editor_url ?? ''}
                   onChange={e => {
                     const next = e.target.value.trim()
@@ -3420,6 +3933,18 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                   patchPreferences.mutate({
                     auto_recaps_enabled: checked,
                   })
+                }}
+              />
+            </InlineField>
+
+            <InlineField
+              label="Keep AI servers warm"
+              description="Keep Codex and OpenCode running for 10 minutes after a request so follow-up prompts start faster"
+            >
+              <Switch
+                checked={preferences?.keep_ai_servers_warm ?? true}
+                onCheckedChange={checked => {
+                  patchPreferences.mutate({ keep_ai_servers_warm: checked })
                 }}
               />
             </InlineField>
@@ -3628,6 +4153,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                           ? remoteCodexDefaultModelOptions
                           : effectiveBuildBackend === 'commandcode'
                             ? commandCodeModelOptions
+                            : effectiveBuildBackend === 'grok'
+                              ? grokModelOptions
                             : remoteClaudeModelOptions
                         ).map(option => (
                           <SelectItem key={option.value} value={option.value}>
@@ -3638,49 +4165,50 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     </Select>
                   )}
                 </div>
-                <div>
-                  <Select
-                    value={preferences?.build_thinking_level ?? 'default'}
-                    onValueChange={handleBuildThinkingLevelChange}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="default">Default thinking</SelectItem>
-                      {thinkingLevelOptions.map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+                {buildReasoning?.type === 'thinking' && (
+                  <div>
+                    <Select
+                      value={preferences?.build_thinking_level ?? 'default'}
+                      onValueChange={handleBuildThinkingLevelChange}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">
+                          Default thinking
                         </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Select
-                    value={preferences?.build_effort_level ?? 'default'}
-                    onValueChange={handleBuildEffortLevelChange}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="default">
-                        {effectiveBuildBackend === 'codex'
-                          ? 'Default reasoning'
-                          : 'Default effort'}
-                      </SelectItem>
-                      {(effectiveBuildBackend === 'codex'
-                        ? codexReasoningOptions
-                        : effortLevelOptions
-                      ).map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+                        {buildReasoning.levels.map(option => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {buildReasoning?.type === 'effort' && (
+                  <div>
+                    <Select
+                      value={preferences?.build_effort_level ?? 'default'}
+                      onValueChange={handleBuildEffortLevelChange}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">
+                          Default reasoning
                         </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                        {buildReasoning.levels.map(option => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               </div>
             </InlineField>
 
@@ -3872,6 +4400,8 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                           ? remoteCodexDefaultModelOptions
                           : effectiveYoloBackend === 'commandcode'
                             ? commandCodeModelOptions
+                            : effectiveYoloBackend === 'grok'
+                              ? grokModelOptions
                             : remoteClaudeModelOptions
                         ).map(option => (
                           <SelectItem key={option.value} value={option.value}>
@@ -3882,61 +4412,56 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     </Select>
                   )}
                 </div>
-                <div>
-                  <Select
-                    value={preferences?.yolo_thinking_level ?? 'default'}
-                    onValueChange={handleYoloThinkingLevelChange}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="default">Default thinking</SelectItem>
-                      {thinkingLevelOptions.map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+                {yoloReasoning?.type === 'thinking' && (
+                  <div>
+                    <Select
+                      value={preferences?.yolo_thinking_level ?? 'default'}
+                      onValueChange={handleYoloThinkingLevelChange}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">
+                          Default thinking
                         </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Select
-                    value={preferences?.yolo_effort_level ?? 'default'}
-                    onValueChange={handleYoloEffortLevelChange}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="default">
-                        {effectiveYoloBackend === 'codex'
-                          ? 'Default reasoning'
-                          : 'Default effort'}
-                      </SelectItem>
-                      {(effectiveYoloBackend === 'codex'
-                        ? codexReasoningOptions
-                        : effortLevelOptions
-                      ).map(option => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+                        {yoloReasoning.levels.map(option => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {yoloReasoning?.type === 'effort' && (
+                  <div>
+                    <Select
+                      value={preferences?.yolo_effort_level ?? 'default'}
+                      onValueChange={handleYoloEffortLevelChange}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">
+                          Default reasoning
                         </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                        {yoloReasoning.levels.map(option => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
               </div>
             </InlineField>
 
-            <AiLanguageField
-              preferences={preferences}
-              patchPreferences={patchPreferences}
-            />
+            <AiLanguageField preferences={preferences} />
 
-            <ReferencePickerPruneField
-              preferences={preferences}
-              patchPreferences={patchPreferences}
-            />
+            <ReferencePickerPruneField preferences={preferences} />
 
             <InlineField
               label="Allow web tools in plan mode"
@@ -3967,7 +4492,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {editorOptions.map(option => (
+                    {getEditorOptions().map(option => (
                       <SelectItem key={option.value} value={option.value}>
                         {option.label}
                       </SelectItem>
@@ -3990,7 +4515,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {terminalOptions.map(option => (
+                    {getTerminalOptions().map(option => (
                       <SelectItem key={option.value} value={option.value}>
                         {option.label}
                       </SelectItem>
@@ -4088,7 +4613,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
             <InlineField
               label="Auto-update AI backends"
-              description="Install Claude, Codex, OpenCode, and GitHub CLI updates in the background as soon as a new version is detected."
+              description="Install supported AI backend CLI updates, including Command Code, in the background as soon as a new version is detected."
             >
               <Switch
                 checked={preferences?.auto_update_ai_backends ?? true}
@@ -4469,6 +4994,61 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               </div>
             </SettingsSection>
           )}
+
+          <SettingsSection
+            title="Version"
+            anchorId="pref-general-section-version"
+          >
+            <div className="space-y-4">
+              <InlineField
+                label={activeRemoteConnection ? 'Jean Client' : 'Jean'}
+                description="Application version"
+              >
+                <span className="font-mono text-sm text-muted-foreground">
+                  v{CLIENT_BUILD_INFO.appVersion}
+                </span>
+              </InlineField>
+
+              {activeRemoteConnection && (
+                <InlineField
+                  label="Jean Server"
+                  description="Connected remote server version"
+                >
+                  <span className="font-mono text-sm text-muted-foreground">
+                    {isRemoteServerInfoLoading
+                      ? 'Loading…'
+                      : formatJeanVersionLabel(remoteServerVersion)}
+                  </span>
+                </InlineField>
+              )}
+
+              {CLIENT_BUILD_INFO.gitSha && (
+                <InlineField
+                  label="Commit"
+                  description="Source commit used for this build"
+                >
+                  <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openExternal(
+                          `https://github.com/coollabsio/jean/commit/${CLIENT_BUILD_INFO.gitSha}`
+                        )
+                      }
+                      className="font-mono hover:text-foreground hover:underline"
+                    >
+                      {CLIENT_BUILD_INFO.gitSha}
+                    </button>
+                    {CLIENT_BUILD_INFO.builtAt && (
+                      <span>
+                        · {new Date(CLIENT_BUILD_INFO.builtAt).toLocaleString()}
+                      </span>
+                    )}
+                  </div>
+                </InlineField>
+              )}
+            </div>
+          </SettingsSection>
         </>
       )}
 
@@ -4520,7 +5100,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                         ? 'Command Code CLI'
                         : deleteCliTarget === 'grok'
                           ? 'Grok CLI'
-                          : 'GitHub CLI'}
+                          : deleteCliTarget === 'kimi'
+                            ? 'Kimi Code CLI'
+                            : deleteCliTarget === 'pi'
+                              ? 'PI CLI'
+                              : 'GitHub CLI'}
               ?
             </AlertDialogTitle>
             <AlertDialogDescription>
@@ -4540,7 +5124,11 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                               ? commandcodePathDetection?.found
                               : deleteCliTarget === 'grok'
                                 ? grokPathDetection?.found
-                                : false
+                                : deleteCliTarget === 'kimi'
+                                  ? kimiPathDetection?.found
+                                  : deleteCliTarget === 'pi'
+                                    ? piPathDetection?.found
+                                    : false
                 return pathFound
                   ? 'The Jean-managed binary will be removed and the source will switch to System PATH. You can reinstall it later from this page.'
                   : 'The Jean-managed binary will be removed. No System PATH version was detected, so this backend will be unavailable until you reinstall it.'
@@ -4565,50 +5153,12 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   )
 }
 
-const AiLanguageField: FC<{
-  preferences: AppPreferences | undefined
-  patchPreferences: ReturnType<typeof usePatchPreferences>
-}> = ({ preferences, patchPreferences }) => {
-  const [localValue, setLocalValue] = useState(preferences?.ai_language ?? '')
-
-  const hasChanges = localValue !== (preferences?.ai_language ?? '')
-
-  const handleSave = useCallback(() => {
-    if (!preferences) return
-    patchPreferences.mutate({ ai_language: localValue })
-  }, [preferences, patchPreferences, localValue])
-
-  return (
-    <InlineField
-      label="AI Language"
-      description="Language for AI responses (e.g. French, 日本語)"
-    >
-      <div className="flex items-center gap-2">
-        <Input
-          className="w-full sm:w-40"
-          placeholder="Default"
-          value={localValue}
-          onChange={e => setLocalValue(e.target.value)}
-        />
-        <Button
-          size="sm"
-          onClick={handleSave}
-          disabled={!hasChanges || patchPreferences.isPending}
-        >
-          {patchPreferences.isPending && (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          )}
-          Save
-        </Button>
-      </div>
-    </InlineField>
-  )
-}
-
+// Own mutation instance so other GeneralPane saves do not put this Save button
+// into a shared isPending loading state.
 const ReferencePickerPruneField: FC<{
   preferences: AppPreferences | undefined
-  patchPreferences: ReturnType<typeof usePatchPreferences>
-}> = ({ preferences, patchPreferences }) => {
+}> = ({ preferences }) => {
+  const patchPreferences = usePatchPreferences()
   const saved = preferences?.reference_picker_extra_prune_dirs ?? []
   const [localValue, setLocalValue] = useState(saved.join('\n'))
 
@@ -4618,6 +5168,13 @@ const ReferencePickerPruneField: FC<{
     .filter(Boolean)
 
   const hasChanges = parsed.join('\n') !== saved.join('\n')
+  const isSaving =
+    patchPreferences.isPending &&
+    patchPreferences.variables != null &&
+    Object.hasOwn(
+      patchPreferences.variables,
+      'reference_picker_extra_prune_dirs'
+    )
 
   const handleSave = useCallback(() => {
     if (!preferences) return
@@ -4645,11 +5202,9 @@ const ReferencePickerPruneField: FC<{
           <Button
             size="sm"
             onClick={handleSave}
-            disabled={!hasChanges || patchPreferences.isPending}
+            disabled={!hasChanges || isSaving}
           >
-            {patchPreferences.isPending && (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            )}
+            {isSaving && <Loader2 className="h-4 w-4 animate-spin" />}
             Save
           </Button>
         </div>

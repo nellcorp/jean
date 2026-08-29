@@ -17,6 +17,7 @@ import ReactMarkdown from 'react-markdown'
 import rehypeRaw from 'rehype-raw'
 import remarkGfm from 'remark-gfm'
 import remend from 'remend'
+import { remarkFixInterruptedLists } from '@/lib/remark-fix-interrupted-lists'
 import { Copy, Check, Table, ListChecks } from 'lucide-react'
 import { toast } from 'sonner'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -28,13 +29,19 @@ import {
 import { Checkbox } from '@/components/ui/checkbox'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '@/store/chat-store'
+import { useUIStore } from '@/store/ui-store'
+import { convertFileSrc } from '@/lib/transport'
 
 interface MarkdownProps {
   children: string
-  /** Enable streaming mode with incomplete markdown handling */
+  /**
+   * Enable streaming mode: auto-closes incomplete markdown and skips the
+   * expensive rehype-raw HTML pass (raw HTML shows as literal text until the
+   * completed message re-renders without `streaming`).
+   */
   streaming?: boolean
   className?: string
-  /** Rendering context; tool-call markdown needs a wider ordered-list gutter. */
+  /** Rendering context (tool-call keeps the same ordered-list gutter as chat). */
   variant?: 'chat' | 'tool-call'
   /** Chat message ID — enables per-table checklist persistence when set */
   messageId?: string
@@ -77,6 +84,24 @@ function extractText(node: ReactNode): string {
   return ''
 }
 
+function openLocalFileLink(href: string | undefined): boolean {
+  if (!href || href.startsWith('#') || /^[a-z][a-z\d+.-]*:/i.test(href)) {
+    return false
+  }
+
+  const decodedHref = decodeURIComponent(href)
+  const isAbsolute = decodedHref.startsWith('/') || /^[a-z]:[\\/]/i.test(decodedHref)
+  const rootPath = useChatStore.getState().activeWorktreePath
+  if (!isAbsolute && !rootPath) return false
+
+  const separator = rootPath?.includes('\\') ? '\\' : '/'
+  const path = isAbsolute
+    ? decodedHref
+    : `${rootPath?.replace(/[\\/]+$/, '')}${separator}${decodedHref.replace(/^[\\/]+/, '')}`
+  useUIStore.getState().setViewingFilePath(path)
+  return true
+}
+
 function CodeBlock({ children }: { children: ReactNode }) {
   const [copied, setCopied] = useState(false)
 
@@ -96,7 +121,9 @@ function CodeBlock({ children }: { children: ReactNode }) {
       <Tooltip>
         <TooltipTrigger asChild>
           <button
+            type="button"
             onClick={handleCopy}
+            aria-label="Copy code"
             className="absolute right-2 top-2 opacity-50 hover:opacity-100 transition-opacity p-1.5 rounded-md hover:bg-background/80 text-muted-foreground hover:text-foreground cursor-pointer"
           >
             {copied ? (
@@ -114,9 +141,11 @@ function CodeBlock({ children }: { children: ReactNode }) {
 
 function extractTableData(table: HTMLTableElement): string[][] {
   return Array.from(table.querySelectorAll('tr')).map(row =>
-    Array.from(row.querySelectorAll('th, td'))
-      .filter(cell => !(cell as HTMLElement).dataset.checklistCell)
-      .map(cell => (cell.textContent ?? '').trim())
+    Array.from(row.querySelectorAll('th, td')).flatMap(cell =>
+      (cell as HTMLElement).dataset.checklistCell
+        ? []
+        : [(cell.textContent ?? '').trim()]
+    )
   )
 }
 
@@ -132,6 +161,12 @@ function tableToMarkdown(data: string[][]): string {
   const separator = `| ${header.map(() => '---').join(' | ')} |`
   const bodyLines = rows.map(row => `| ${row.join(' | ')} |`)
   return [headerLine, separator, ...bodyLines].join('\n')
+}
+
+function markdownImageSrc(src: string | undefined): string | undefined {
+  if (!src) return src
+  if (/^(https?:|data:|blob:|asset:|\/api\/|#)/i.test(src)) return src
+  return convertFileSrc(src)
 }
 
 /**
@@ -150,21 +185,22 @@ function cloneRowWithLeadingCell(
   return cloneElement(rowEl, {}, [leading, original])
 }
 
+const CHECKLIST_THEAD_LEADING = (
+  <th
+    key="__checklist__"
+    data-checklist-cell="true"
+    className="w-10 px-2"
+    aria-hidden
+  />
+)
+
 function ChecklistAwareThead({ children }: { children?: ReactNode }) {
   const { checkedRows } = useContext(ChecklistInjectionContext)
   if (!checkedRows) {
     return <thead className="bg-muted/50">{children}</thead>
   }
-  const leading = (
-    <th
-      key="__checklist__"
-      data-checklist-cell="true"
-      className="w-10 px-2"
-      aria-hidden
-    />
-  )
   const augmented = Children.map(children, row =>
-    cloneRowWithLeadingCell(row, leading)
+    cloneRowWithLeadingCell(row, CHECKLIST_THEAD_LEADING)
   )
   return <thead className="bg-muted/50">{augmented}</thead>
 }
@@ -278,8 +314,10 @@ function TableBlock({ children, tableOffset }: TableBlockProps) {
           <Tooltip>
             <TooltipTrigger asChild>
               <button
+                type="button"
                 onClick={handleToggleChecklist}
                 className={checklistEnabled ? activeBtnClass : btnClass}
+                aria-label={checklistEnabled ? 'Turn off checklist' : 'Toggle checklist'}
                 aria-pressed={checklistEnabled}
               >
                 <ListChecks className="size-4" />
@@ -292,7 +330,7 @@ function TableBlock({ children, tableOffset }: TableBlockProps) {
         )}
         <Tooltip>
           <TooltipTrigger asChild>
-            <button onClick={() => handleCopy('markdown')} className={btnClass}>
+            <button type="button" onClick={() => handleCopy('markdown')} aria-label="Copy as Markdown" className={btnClass}>
               {copiedFormat === 'markdown' ? (
                 <Check className="size-4" />
               ) : (
@@ -304,7 +342,7 @@ function TableBlock({ children, tableOffset }: TableBlockProps) {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <button onClick={() => handleCopy('tsv')} className={btnClass}>
+            <button type="button" onClick={() => handleCopy('tsv')} aria-label="Copy for spreadsheet" className={btnClass}>
               {copiedFormat === 'tsv' ? (
                 <Check className="size-4" />
               ) : (
@@ -386,7 +424,7 @@ const components: Components = {
   // Images
   img: ({ src, alt }) => (
     <img
-      src={src}
+      src={markdownImageSrc(src)}
       alt={alt || ''}
       className="max-w-full h-auto rounded-md my-4"
     />
@@ -396,6 +434,9 @@ const components: Components = {
   a: ({ href, children }) => (
     <a
       href={href}
+      onClick={event => {
+        if (openLocalFileLink(href)) event.preventDefault()
+      }}
       className="underline underline-offset-2 hover:text-foreground"
       target="_blank"
       rel="noopener noreferrer"
@@ -413,10 +454,14 @@ const components: Components = {
       {children}
     </ul>
   ),
+  // pl-8 (not pl-6): double-digit markers ("10.") need extra gutter width when
+  // list-outside paints into padding; chat parents use overflow-x-hidden and
+  // otherwise clip the tens digit to ".0", ".1" (issue #542). tool-call keeps
+  // the same width for consistency.
   ol: ({ children, className, ...props }) => (
     <ol
       {...props}
-      className={cn('my-4 pl-6 list-decimal list-outside space-y-2', className)}
+      className={cn('my-4 pl-8 list-decimal list-outside space-y-2', className)}
     >
       {children}
     </ol>
@@ -434,9 +479,13 @@ const components: Components = {
     </blockquote>
   ),
 
-  // Paragraphs - more breathing room
+  // Paragraphs - more breathing room. whitespace-pre-wrap keeps single spaces
+  // visible if a stream left odd mid-token spacing; ligatures off avoids fonts
+  // visually merging fragments (Grok ACP emits many tiny word pieces).
   p: ({ children }) => (
-    <p className="my-3 leading-relaxed first:mt-0 last:mb-0">{children}</p>
+    <p className="my-3 leading-relaxed first:mt-0 last:mb-0 whitespace-pre-wrap [font-variant-ligatures:none]">
+      {children}
+    </p>
   ),
 
   // Task list checkboxes (from remark-gfm) → shadcn Checkbox for theme-aware styling
@@ -474,8 +523,13 @@ const components: Components = {
 
 const streamingComponents: Components = {
   ...components,
+  // whitespace-pre-wrap keeps mid-stream spaces visible under rapid reparse
+  // (Grok emits many tiny word fragments per frame). Ligatures off avoids
+  // fonts collapsing adjacent tokens visually while text is still settling.
   p: ({ children }) => (
-    <p className="my-0 leading-relaxed first:mt-0 last:mb-0">{children}</p>
+    <p className="my-0 leading-relaxed first:mt-0 last:mb-0 whitespace-pre-wrap [font-variant-ligatures:none]">
+      {children}
+    </p>
   ),
 }
 
@@ -494,7 +548,9 @@ const toolCallComponents: Components = {
 const toolCallStreamingComponents: Components = {
   ...toolCallComponents,
   p: ({ children }) => (
-    <p className="my-0 leading-relaxed first:mt-0 last:mb-0">{children}</p>
+    <p className="my-0 leading-relaxed first:mt-0 last:mb-0 whitespace-pre-wrap [font-variant-ligatures:none]">
+      {children}
+    </p>
   ),
 }
 
@@ -532,6 +588,15 @@ const compactComponents: Components = {
   ),
 }
 
+// Module-level plugin arrays keep references stable across renders.
+// remarkFixInterruptedLists runs after GFM so task lists are already parsed,
+// then nests orphan sibling ULs under the preceding OL item (issue #200).
+const remarkPlugins = [remarkGfm, remarkFixInterruptedLists]
+// rehype-raw re-parses the full accumulated text as HTML on every render —
+// the dominant per-frame cost while streaming — so streaming mode skips it
+// and only completed (non-streaming) renders apply it.
+const rehypePlugins = [rehypeRaw]
+
 /**
  * Memoized markdown renderer to prevent expensive re-parsing
  * ReactMarkdown is expensive, so we avoid re-renders when content hasn't changed
@@ -545,8 +610,20 @@ const Markdown = memo(function Markdown({
   sessionId,
   compact = false,
 }: MarkdownProps) {
-  // Apply remend preprocessing for streaming content to auto-close incomplete markdown
-  const content = streaming ? remend(children) : children
+  // Apply remend preprocessing for streaming content to auto-close incomplete
+  // markdown. remend strips a single trailing space (incomplete-markdown
+  // heuristic) — restore it so space-bearing stream tails don't disappear
+  // mid-token when the next delta is delayed.
+  const content = streaming
+    ? (() => {
+        const hadTrailingSpace =
+          children.endsWith(' ') && !children.endsWith('  ')
+        const repaired = remend(children)
+        return hadTrailingSpace && !repaired.endsWith(' ')
+          ? `${repaired} `
+          : repaired
+      })()
+    : children
 
   const contextValue = useMemo(
     () => ({ messageId: messageId ?? null, sessionId: sessionId ?? null }),
@@ -568,8 +645,8 @@ const Markdown = memo(function Markdown({
       <MarkdownTableContext.Provider value={contextValue}>
         <ReactMarkdown
           components={componentsToUse}
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeRaw]}
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={streaming ? undefined : rehypePlugins}
         >
           {content}
         </ReactMarkdown>

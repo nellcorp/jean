@@ -24,9 +24,9 @@ import type {
   CodexUsageSnapshot,
 } from '@/types/codex-cli'
 
-import { hasBackend } from '@/lib/environment'
+import { hasBackendTransport } from '@/lib/environment'
 
-const isTauri = hasBackend
+const isTauri = hasBackendTransport
 const USAGE_REFRESH_MS = 1000 * 60 * 5
 
 // Query keys for Codex CLI
@@ -339,6 +339,10 @@ export function useCodexInstallProgress(): [
 /**
  * Combined hook for Codex CLI setup flow
  */
+function checkManualVersion(version: string) {
+  return invoke<boolean>('check_codex_cli_version_exists', { version })
+}
+
 export function useCodexCliSetup() {
   const status = useCodexCliStatus()
   const versions = useAvailableCodexVersions()
@@ -370,6 +374,7 @@ export function useCodexCliSetup() {
     })
   }
 
+
   return {
     status: status.data,
     isStatusLoading: status.isLoading,
@@ -382,6 +387,7 @@ export function useCodexCliSetup() {
     installError: installMutation.error,
     progress,
     install,
+    checkManualVersion,
     refetchStatus: status.refetch,
   }
 }

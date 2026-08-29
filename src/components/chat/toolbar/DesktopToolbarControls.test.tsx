@@ -57,7 +57,6 @@ function renderDesktopToolbarControls(
     activeWorktreePath: undefined,
     availableMcpServers: [],
     enabledMcpServers: [],
-    activeMcpCount: 0,
     isHealthChecking: false,
     mcpStatuses: undefined,
     loadedIssueContexts: [],
@@ -65,6 +64,7 @@ function renderDesktopToolbarControls(
     loadedSecurityContexts: [],
     loadedAdvisoryContexts: [],
     loadedLinearContexts: [],
+    loadedSentryContexts: [],
     attachedSavedContexts: [],
     providerDropdownOpen: false,
     thinkingDropdownOpen: false,
@@ -91,6 +91,7 @@ function renderDesktopToolbarControls(
     handleViewSecurityAlert: vi.fn(),
     handleViewAdvisory: vi.fn(),
     handleViewLinear: vi.fn(),
+    handleViewSentry: vi.fn(),
     handleViewSavedContext: vi.fn(),
   }
 
@@ -98,6 +99,27 @@ function renderDesktopToolbarControls(
 }
 
 describe('DesktopToolbarControls', () => {
+  it('shows loaded Sentry issues in the context dropdown', async () => {
+    const user = userEvent.setup()
+    const handleViewSentry = vi.fn()
+    renderDesktopToolbarControls({
+      loadedSentryContexts: [
+        {
+          id: '123',
+          shortId: 'COOLIFY-BXB',
+          title: 'Backup failed',
+          permalink: 'https://sentry.io/issues/123',
+          content: '# Sentry context',
+        },
+      ],
+      handleViewSentry,
+    })
+
+    await user.click(screen.getByRole('button', { name: /loaded contexts/i }))
+    await user.click(await screen.findByText(/COOLIFY-BXB/))
+    expect(handleViewSentry).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     ['plan', 'Plan'],
     ['build', 'Build'],
@@ -215,6 +237,53 @@ describe('DesktopToolbarControls', () => {
     expect(screen.queryByText('Ultracode')).not.toBeInTheDocument()
   })
 
+  it('renders effort levels supplied by the selected model catalog entry', () => {
+    renderDesktopToolbarControls({
+      selectedBackend: 'codex',
+      selectedModel: 'gpt-5.6-sol',
+      selectedEffortLevel: 'ultra',
+      thinkingDropdownOpen: true,
+      modelReasoning: {
+        type: 'effort',
+        default: 'medium',
+        levels: [
+          { value: 'medium', label: 'Medium', description: 'Balanced' },
+          {
+            value: 'ultra',
+            label: 'Ultra',
+            description: 'Automatic delegation',
+          },
+        ],
+      },
+    })
+
+    expect(screen.getAllByText('Ultra').length).toBeGreaterThan(0)
+    expect(screen.getByText('Automatic delegation')).toBeInTheDocument()
+    expect(screen.queryByText('xHigh')).not.toBeInTheDocument()
+  })
+
+  it('renders thinking levels supplied by the selected model catalog entry', () => {
+    renderDesktopToolbarControls({
+      selectedBackend: 'claude',
+      selectedModel: 'claude-legacy',
+      isCodex: false,
+      selectedThinkingLevel: 'megathink',
+      thinkingDropdownOpen: true,
+      modelReasoning: {
+        type: 'thinking',
+        default: 'think',
+        levels: [
+          { value: 'think', label: 'Think', description: '4K' },
+          { value: 'megathink', label: 'Mega', description: '10K' },
+        ],
+      },
+    })
+
+    expect(screen.getAllByText('Mega').length).toBeGreaterThan(0)
+    expect(screen.getByText('10K')).toBeInTheDocument()
+    expect(screen.queryByText('Ultrathink')).not.toBeInTheDocument()
+  })
+
   it('shows PI effort options instead of Claude thinking on desktop', () => {
     renderDesktopToolbarControls({
       isCodex: false,
@@ -235,6 +304,25 @@ describe('DesktopToolbarControls', () => {
     expect(screen.queryByText('Megathink')).not.toBeInTheDocument()
     expect(screen.queryByText('Max')).not.toBeInTheDocument()
     expect(screen.queryByText('Ultracode')).not.toBeInTheDocument()
+  })
+
+  it('shows only native Antigravity effort options', () => {
+    renderDesktopToolbarControls({
+      isCodex: false,
+      selectedBackend: 'antigravity',
+      selectedModel: 'antigravity/auto',
+      selectedEffortLevel: 'medium',
+      selectedThinkingLevel: 'megathink',
+      thinkingDropdownOpen: true,
+    })
+
+    for (const name of ['Adaptive/Default', 'Low', 'Medium', 'High']) {
+      expect(
+        screen.getByRole('menuitemradio', { name: new RegExp(name, 'i') })
+      ).toBeInTheDocument()
+    }
+    expect(screen.queryByText('Megathink')).not.toBeInTheDocument()
+    expect(screen.queryByText('xHigh')).not.toBeInTheDocument()
   })
 
   it('calls effort change handler when selecting an effort on desktop', async () => {

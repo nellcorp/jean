@@ -116,3 +116,31 @@ export function getCanvasFilterTabCount(
   return worktrees.filter(worktree => matchesCanvasFilterTab(worktree, tab))
     .length
 }
+
+export function matchesCanvasWorktreeSearch(
+  worktree: Worktree,
+  searchQuery: string
+): boolean {
+  const query = searchQuery.trim().toLowerCase()
+  if (!query) return true
+
+  return (
+    worktree.name.toLowerCase().includes(query) ||
+    worktree.branch.toLowerCase().includes(query) ||
+    getWorktreeLabels(worktree).some(label =>
+      label.name.toLowerCase().includes(query)
+    ) ||
+    (worktree.pr_number != null &&
+      worktree.pr_number.toString().includes(query)) ||
+    (worktree.issue_number != null &&
+      worktree.issue_number.toString().includes(query)) ||
+    (worktree.linear_issue_identifier ?? '').toLowerCase().includes(query) ||
+    (worktree.security_alert_number != null &&
+      worktree.security_alert_number.toString().includes(query)) ||
+    (worktree.advisory_ghsa_id ?? '').toLowerCase().includes(query)
+  )
+}
+
+export function shouldShowCanvasWorktreeSection(worktree: Worktree): boolean {
+  return worktree.status !== 'deleting'
+}
