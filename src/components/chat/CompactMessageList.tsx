@@ -32,9 +32,12 @@ import {
   normalizeQuestionMultipleField,
 } from '@/types/chat'
 import { MessageItem } from './MessageItem'
+import { getProviderChangeBeforeMessage } from './message-settings-labels'
+import { ProviderChangeSeparator } from './ProviderChangeSeparator'
+import { EditedFilesDisplay } from './EditedFilesDisplay'
 import { AskUserQuestion } from './AskUserQuestion'
 import { SteeredPromptGroup } from './SteeredPromptGroup'
-import { buildTimeline } from './tool-call-utils'
+import { buildTimeline, coalesceContentBlocks } from './tool-call-utils'
 import { formatDuration, getAssistantDurationMs } from './time-utils'
 import {
   TOOL_CALL_ROW_CLASS,
@@ -61,6 +64,7 @@ interface CompactMessageListProps {
   lastPlanMessageIndex: number
   sessionId: string
   worktreePath: string
+  worktreeId?: string | null
   approveShortcut: string
   approveShortcutYolo?: string
   approveShortcutClearContext?: string
@@ -160,8 +164,7 @@ function splitMessageAtSteeredInputs(
       current.flatMap(b => (b.type === 'tool_use' ? [b.tool_call_id] : []))
     )
     const text = current
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
+      .flatMap(b => (b.type === 'text' ? [b.text] : []))
       .join('')
     segments.push({
       kind: 'blocks',
@@ -209,8 +212,7 @@ function isPureTextAssistantMessage(message: ChatMessage): boolean {
   if (blocks.some(block => block.type !== 'text')) return false
 
   const blockText = blocks
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
+    .flatMap(block => (block.type === 'text' ? [block.text] : []))
     .join('')
 
   return Boolean(blockText.trim() || message.content?.trim())
@@ -229,7 +231,7 @@ function findLatestAssistantText(
     const message = group[g]?.message
     if (!message || message.role !== 'assistant') continue
 
-    const blocks = message.content_blocks ?? []
+    const blocks = coalesceContentBlocks(message.content_blocks ?? [])
     const texts: string[] = []
     for (const block of blocks) {
       if (block?.type === 'text' && block.text.trim()) {
@@ -257,9 +259,9 @@ function findLatestAssistantText(
  */
 function stripQuestionsFromMessage(message: ChatMessage): ChatMessage {
   const questionIds = new Set(
-    (message.tool_calls ?? [])
-      .filter(tc => isAskUserQuestion(tc))
-      .map(tc => tc.id)
+    (message.tool_calls ?? []).flatMap(tc =>
+      isAskUserQuestion(tc) ? [tc.id] : []
+    )
   )
   if (questionIds.size === 0) return message
   return {
@@ -320,7 +322,7 @@ function summarizeGroup(
   for (let g = group.length - 1; g >= 0; g--) {
     const message = group[g]?.message
     if (!message) continue
-    const blocks: ContentBlock[] = message.content_blocks ?? []
+    const blocks = coalesceContentBlocks(message.content_blocks ?? [])
     for (let i = blocks.length - 1; i >= 0; i--) {
       const block = blocks[i]
       if (!block) continue
@@ -652,6 +654,7 @@ export const CompactMessageList = memo(
         lastPlanMessageIndex,
         sessionId,
         worktreePath,
+        worktreeId = null,
         approveShortcut,
         approveShortcutYolo,
         approveShortcutClearContext,
@@ -687,7 +690,7 @@ export const CompactMessageList = memo(
       },
       ref
     ) {
-      const messageRefs = useRef<Map<number, HTMLDivElement>>(new Map())
+      const messageRefs = useRef(new Map<number, HTMLDivElement>())
       const pendingPrependAnchorRef = useRef<PrependScrollAnchor | null>(null)
       const pendingPrependMessagesLengthRef = useRef<number | null>(null)
 
@@ -711,6 +714,19 @@ export const CompactMessageList = memo(
           if (messages[i]?.role === 'user') {
             foundUserMessage = true
           }
+        }
+        return map
+      }, [messages])
+
+      // Pre-compute provider switches between consecutive user prompts
+      const providerChangeMap = useMemo(() => {
+        const map = new Map<
+          number,
+          ReturnType<typeof getProviderChangeBeforeMessage>
+        >()
+        for (let i = 0; i < messages.length; i++) {
+          const change = getProviderChangeBeforeMessage(messages, i)
+          if (change) map.set(i, change)
         }
         return map
       }, [messages])
@@ -851,6 +867,7 @@ export const CompactMessageList = memo(
             hasFollowUpMessage={extra.hasFollowUpMessage}
             sessionId={sessionId}
             worktreePath={worktreePath}
+            worktreeId={worktreeId}
             approveShortcut={approveShortcut}
             approveShortcutYolo={approveShortcutYolo}
             approveShortcutClearContext={approveShortcutClearContext}
@@ -888,6 +905,7 @@ export const CompactMessageList = memo(
           lastPlanMessageIndex,
           sessionId,
           worktreePath,
+          worktreeId,
           approveShortcut,
           approveShortcutYolo,
           approveShortcutClearContext,
@@ -1040,6 +1058,8 @@ export const CompactMessageList = memo(
               const hasFollowUpMessage =
                 item.message.role === 'assistant' &&
                 hasFollowUpFor(item.globalIndex)
+              const providerChange =
+                providerChangeMap.get(item.globalIndex) ?? null
               return (
                 <div
                   key={item.message.id}
@@ -1052,6 +1072,9 @@ export const CompactMessageList = memo(
                     item.globalIndex === lastIndex && isSending ? '' : 'pb-4'
                   }
                 >
+                  {providerChange && (
+                    <ProviderChangeSeparator change={providerChange} />
+                  )}
                   {renderMessageItem(
                     { message: item.message, globalIndex: item.globalIndex },
                     {
@@ -1173,6 +1196,9 @@ export const CompactMessageList = memo(
               Boolean(item.latestText) &&
               !(latestTextIsRecap && latestRunHasPlan)
             const surfaceRecap = latestTextIsRecap && showLatestText
+            const surfacedLatestToolCalls = showLatestText
+              ? item.messages.flatMap(({ message }) => message.tool_calls ?? [])
+              : []
             return (
               <div key={item.key}>
                 <CompactActivityRow
@@ -1192,6 +1218,12 @@ export const CompactMessageList = memo(
                     >
                       {item.latestText ?? ''}
                     </Markdown>
+                    {surfacedLatestToolCalls.length > 0 && (
+                      <EditedFilesDisplay
+                        toolCalls={surfacedLatestToolCalls}
+                        worktreePath={worktreePath}
+                      />
+                    )}
                   </div>
                 )}
               </div>

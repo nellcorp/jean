@@ -33,6 +33,7 @@ describe('ChatStore', () => {
       reviewResults: {},
       reviewSidebarVisible: false,
       fixedReviewFindings: {},
+      tableCheckedRows: {},
       worktreePaths: {},
       sendingSessionIds: {},
       sendStartedAt: {},
@@ -53,6 +54,7 @@ describe('ChatStore', () => {
       errors: {},
       lastSentMessages: {},
       setupScriptResults: {},
+      dismissedSetupScripts: {},
       pendingImages: {},
       pendingFiles: {},
       pendingTextFiles: {},
@@ -71,6 +73,14 @@ describe('ChatStore', () => {
       sessionLabels: {},
       savingContext: {},
       skippedQuestionSessions: {},
+    })
+  })
+
+  it('persists setup-script dismissal per worktree in store state', () => {
+    useChatStore.getState().dismissSetupScript('worktree-1')
+
+    expect(useChatStore.getState().dismissedSetupScripts).toEqual({
+      'worktree-1': true,
     })
   })
 
@@ -253,7 +263,7 @@ describe('ChatStore', () => {
       expect(state.sendingSessionIds['session-1']).toBeUndefined()
       expect(state.sendStartedAt['session-1']).toBeUndefined()
       expect(state.completedDurations['session-1']).toBeGreaterThanOrEqual(0)
-      expect(state.reviewingSessions['session-1']).toBe(true)
+      expect(state.reviewingSessions['session-1']).toBeUndefined()
     })
 
     it('stores completed duration when a session completes', () => {
@@ -399,6 +409,73 @@ describe('ChatStore', () => {
     })
   })
 
+  describe('appendStreamingChunk (atomic string + block append)', () => {
+    it('appends to both streamingContents and streamingContentBlocks', () => {
+      const { appendStreamingChunk } = useChatStore.getState()
+
+      appendStreamingChunk('session-1', 'Hello ')
+      appendStreamingChunk('session-1', 'World')
+
+      const state = useChatStore.getState()
+      expect(state.streamingContents['session-1']).toBe('Hello World')
+      expect(state.streamingContentBlocks['session-1']).toEqual([
+        { type: 'text', text: 'Hello World' },
+      ])
+    })
+
+    it('matches the state produced by appendStreamingContent + addTextBlock', () => {
+      const { appendStreamingChunk, appendStreamingContent, addTextBlock } =
+        useChatStore.getState()
+
+      appendStreamingChunk('combined', 'part one ')
+      appendStreamingChunk('combined', 'part two')
+
+      appendStreamingContent('separate', 'part one ')
+      addTextBlock('separate', 'part one ')
+      appendStreamingContent('separate', 'part two')
+      addTextBlock('separate', 'part two')
+
+      const state = useChatStore.getState()
+      expect(state.streamingContents['combined']).toBe(
+        state.streamingContents['separate']
+      )
+      expect(state.streamingContentBlocks['combined']).toEqual(
+        state.streamingContentBlocks['separate']
+      )
+    })
+
+    it('starts a new text block after a tool block while the string keeps accumulating', () => {
+      const { appendStreamingChunk, addToolBlock } = useChatStore.getState()
+
+      appendStreamingChunk('session-1', 'Before tool. ')
+      addToolBlock('session-1', 'tool-1')
+      appendStreamingChunk('session-1', 'After tool.')
+
+      const state = useChatStore.getState()
+      expect(state.streamingContents['session-1']).toBe(
+        'Before tool. After tool.'
+      )
+      expect(state.streamingContentBlocks['session-1']).toEqual([
+        { type: 'text', text: 'Before tool. ' },
+        { type: 'tool_use', tool_call_id: 'tool-1' },
+        { type: 'text', text: 'After tool.' },
+      ])
+    })
+
+    it('is a no-op for empty text (state references unchanged)', () => {
+      const { appendStreamingChunk } = useChatStore.getState()
+
+      appendStreamingChunk('session-1', 'Hello')
+      const before = useChatStore.getState()
+
+      appendStreamingChunk('session-1', '')
+
+      const after = useChatStore.getState()
+      expect(after.streamingContents).toBe(before.streamingContents)
+      expect(after.streamingContentBlocks).toBe(before.streamingContentBlocks)
+    })
+  })
+
   describe('tool calls', () => {
     const mockToolCall: ToolCall = {
       id: 'tool-1',
@@ -435,6 +512,81 @@ describe('ChatStore', () => {
 
       const toolCalls = useChatStore.getState().activeToolCalls['session-1']
       expect(toolCalls?.[0]?.output).toBe('file contents')
+    })
+
+    it('keeps tool_result when it arrives before tool_use (issue #572)', () => {
+      const { addToolCall, updateToolCallOutput } = useChatStore.getState()
+
+      // Result first (out-of-order) — must not drop stdout
+      updateToolCallOutput('session-1', 'tool-bash-1', 'exit: 0\nhello\n')
+
+      let toolCalls = useChatStore.getState().activeToolCalls['session-1']
+      expect(toolCalls).toHaveLength(1)
+      expect(toolCalls?.[0]?.id).toBe('tool-bash-1')
+      expect(toolCalls?.[0]?.output).toBe('exit: 0\nhello\n')
+
+      // Later tool_use enriches name/input without wiping output
+      addToolCall('session-1', {
+        id: 'tool-bash-1',
+        name: 'Bash',
+        input: { command: 'echo hello' },
+      })
+
+      toolCalls = useChatStore.getState().activeToolCalls['session-1']
+      expect(toolCalls).toHaveLength(1)
+      expect(toolCalls?.[0]?.name).toBe('Bash')
+      expect(toolCalls?.[0]?.input).toEqual({ command: 'echo hello' })
+      expect(toolCalls?.[0]?.output).toBe('exit: 0\nhello\n')
+    })
+
+    it('filters a large Read result that arrives before tool_use', () => {
+      const { addToolCall, updateToolCallOutput } = useChatStore.getState()
+      const largeFileContents = 'file contents\n'.repeat(10_000)
+
+      updateToolCallOutput('session-1', 'tool-read-1', largeFileContents)
+      addToolCall('session-1', {
+        id: 'tool-read-1',
+        name: 'Read',
+        input: { file_path: '/large-file.txt' },
+      })
+
+      const toolCall =
+        useChatStore.getState().activeToolCalls['session-1']?.[0]
+      expect(toolCall?.name).toBe('Read')
+      expect(toolCall?.input).toEqual({ file_path: '/large-file.txt' })
+      expect(toolCall?.output).toBe('')
+    })
+
+    it('removes a Monitor result that arrives before tool_use', () => {
+      const { addToolCall, updateToolCallOutput } = useChatStore.getState()
+
+      updateToolCallOutput('session-1', 'tool-monitor-1', 'duplicate output')
+      addToolCall('session-1', {
+        id: 'tool-monitor-1',
+        name: 'Monitor',
+        input: {},
+      })
+
+      const toolCall =
+        useChatStore.getState().activeToolCalls['session-1']?.[0]
+      expect(toolCall?.name).toBe('Monitor')
+      expect(toolCall?.output).toBeUndefined()
+    })
+
+    it('keeps an early question result until answer handling replaces it', () => {
+      const { addToolCall, updateToolCallOutput } = useChatStore.getState()
+
+      updateToolCallOutput('session-1', 'tool-question-1', 'Answer questions?')
+      addToolCall('session-1', {
+        id: 'tool-question-1',
+        name: 'question',
+        input: { questions: [{ question: 'Continue?' }] },
+      })
+
+      const toolCall =
+        useChatStore.getState().activeToolCalls['session-1']?.[0]
+      expect(toolCall?.name).toBe('question')
+      expect(toolCall?.output).toBe('Answer questions?')
     })
 
     it('clears tool calls', () => {
@@ -485,17 +637,43 @@ describe('ChatStore', () => {
       expect(blocks[1]).toEqual({ type: 'tool_use', tool_call_id: 'tool-1' })
     })
 
-    it('re-appends existing tool block to preserve latest chronology', () => {
+    it('keeps non-plan tools stable so messages stay between tool calls', () => {
       const { addTextBlock, addToolBlock, getStreamingContentBlocks } =
         useChatStore.getState()
 
+      addToolBlock('session-1', 'bash-1')
+      addTextBlock('session-1', 'status update between tools')
+      // tool_call_update re-emits the same tool id — must not jump past the text
+      addToolBlock('session-1', 'bash-1')
+
+      const blocks = getStreamingContentBlocks('session-1')
+      expect(blocks).toEqual([
+        { type: 'tool_use', tool_call_id: 'bash-1' },
+        { type: 'text', text: 'status update between tools' },
+      ])
+    })
+
+    it('re-appends plan tool blocks so the plan always trails research', () => {
+      const {
+        addToolCall,
+        addTextBlock,
+        addToolBlock,
+        getStreamingContentBlocks,
+      } = useChatStore.getState()
+
+      addToolCall('session-1', {
+        id: 'plan-1',
+        name: 'ExitPlanMode',
+        input: { plan: '# Plan\n\n- step one' },
+      })
       addToolBlock('session-1', 'plan-1')
-      addTextBlock('session-1', 'after')
+      addTextBlock('session-1', 'after research')
+      // Enriched plan re-emit moves plan tool to end (richest body last)
       addToolBlock('session-1', 'plan-1')
 
       const blocks = getStreamingContentBlocks('session-1')
       expect(blocks).toEqual([
-        { type: 'text', text: 'after' },
+        { type: 'text', text: 'after research' },
         { type: 'tool_use', tool_call_id: 'plan-1' },
       ])
     })
@@ -585,6 +763,65 @@ describe('ChatStore', () => {
         useChatStore.getState().streamingReplayContentBlocks['session-1']
       ).toBeUndefined()
     })
+
+    it('resynchronizes when capped replay starts at a later tool block', () => {
+      const store = useChatStore.getState()
+
+      store.setStreamingReplayContentBlocks('session-1', replayBlocks)
+
+      expect(
+        store.consumeStreamingReplayToolBlock('session-1', 'tool-1')
+      ).toBe(true)
+      expect(store.consumeStreamingReplayText('session-1', 'After tool.')).toBe(
+        ''
+      )
+      expect(
+        useChatStore.getState().streamingReplayContentBlocks['session-1']
+      ).toBeUndefined()
+    })
+
+    it('resynchronizes when capped replay starts inside a later text block', () => {
+      const store = useChatStore.getState()
+
+      store.setStreamingReplayContentBlocks('session-1', replayBlocks)
+
+      expect(store.consumeStreamingReplayText('session-1', 'After ')).toBe('')
+      expect(store.consumeStreamingReplayText('session-1', 'tool.')).toBe('')
+      expect(
+        useChatStore.getState().streamingReplayContentBlocks['session-1']
+      ).toBeUndefined()
+    })
+
+    it('keeps snapshot dedupe when a tool is re-emitted after already being consumed', () => {
+      // Grok ACP emits tool_use/tool_block again on tool_call_update. The
+      // second emission must not abandon remaining snapshot dedupe.
+      const store = useChatStore.getState()
+
+      store.addTextBlock('session-1', 'Before tool. ')
+      store.addToolBlock('session-1', 'tool-1')
+      store.addTextBlock('session-1', 'After tool.')
+      store.setStreamingReplayContentBlocks('session-1', replayBlocks)
+
+      expect(store.consumeStreamingReplayText('session-1', 'Before tool. ')).toBe(
+        ''
+      )
+      expect(store.consumeStreamingReplayToolBlock('session-1', 'tool-1')).toBe(
+        true
+      )
+      // Re-emitted tool_block for the same id (already past in the cursor).
+      expect(store.consumeStreamingReplayToolBlock('session-1', 'tool-1')).toBe(
+        true
+      )
+      expect(store.consumeStreamingReplayText('session-1', 'After tool.')).toBe(
+        ''
+      )
+      expect(
+        useChatStore.getState().getStreamingContentBlocks('session-1')
+      ).toEqual(replayBlocks)
+      expect(
+        useChatStore.getState().streamingReplayContentBlocks['session-1']
+      ).toBeUndefined()
+    })
   })
 
   describe('execution mode', () => {
@@ -654,6 +891,18 @@ describe('ChatStore', () => {
       const { isQuestionAnswered } = useChatStore.getState()
 
       expect(isQuestionAnswered('session-1', 'tool-1')).toBe(false)
+    })
+
+    it('rolls back an answered question when submitting the backend response fails', () => {
+      const store = useChatStore.getState()
+      store.markQuestionAnswered('session-1', 'tool-1', [
+        { questionIndex: 0, selectedOptions: [1] },
+      ])
+
+      store.clearQuestionAnswer('session-1', 'tool-1')
+
+      expect(store.isQuestionAnswered('session-1', 'tool-1')).toBe(false)
+      expect(store.getSubmittedAnswers('session-1', 'tool-1')).toBeUndefined()
     })
 
     it('tracks question skipping', () => {
@@ -788,6 +1037,34 @@ describe('ChatStore', () => {
       expect(useChatStore.getState().messageQueues['session-1']).toBe(before)
 
       moveQueuedMessageFront('session-1', 'msg-1')
+      expect(useChatStore.getState().messageQueues['session-1']).toBe(before)
+    })
+
+    it('updates a queued message text by id', () => {
+      const { enqueueMessage, updateQueuedMessage, getQueuedMessages } =
+        useChatStore.getState()
+
+      enqueueMessage('session-1', createMockMessage('msg-1', 'First'))
+      enqueueMessage('session-1', createMockMessage('msg-2', 'Second'))
+
+      updateQueuedMessage('session-1', 'msg-2', 'Updated second')
+
+      expect(getQueuedMessages('session-1').map(m => m.message)).toEqual([
+        'First',
+        'Updated second',
+      ])
+    })
+
+    it('queued message update is a no-op for unknown id or unchanged text', () => {
+      const { enqueueMessage, updateQueuedMessage } = useChatStore.getState()
+
+      enqueueMessage('session-1', createMockMessage('msg-1', 'First'))
+
+      const before = useChatStore.getState().messageQueues['session-1']
+      updateQueuedMessage('session-1', 'unknown-id', 'Updated')
+      expect(useChatStore.getState().messageQueues['session-1']).toBe(before)
+
+      updateQueuedMessage('session-1', 'msg-1', 'First')
       expect(useChatStore.getState().messageQueues['session-1']).toBe(before)
     })
   })
@@ -1361,6 +1638,38 @@ describe('ChatStore', () => {
 
       setSessionReviewing('session-1', false)
       expect(isSessionReviewing('session-1')).toBe(false)
+    })
+  })
+
+  describe('session status override', () => {
+    it('sets manual status overrides and keeps review flag in sync', () => {
+      const {
+        setSessionStatusOverride,
+        getSessionStatusOverride,
+        isSessionReviewing,
+      } = useChatStore.getState()
+
+      expect(getSessionStatusOverride('session-1')).toBeNull()
+
+      setSessionStatusOverride('session-1', 'review')
+      expect(getSessionStatusOverride('session-1')).toBe('review')
+      expect(isSessionReviewing('session-1')).toBe(true)
+
+      setSessionStatusOverride('session-1', 'completed')
+      expect(getSessionStatusOverride('session-1')).toBe('completed')
+      expect(isSessionReviewing('session-1')).toBe(false)
+
+      setSessionStatusOverride('session-1', null)
+      expect(getSessionStatusOverride('session-1')).toBeNull()
+    })
+
+    it('is a no-op when setting the same override again', () => {
+      const { setSessionStatusOverride } = useChatStore.getState()
+      setSessionStatusOverride('session-1', 'idle')
+      const first = useChatStore.getState().sessionStatusOverrides
+
+      setSessionStatusOverride('session-1', 'idle')
+      expect(useChatStore.getState().sessionStatusOverrides).toBe(first)
     })
   })
 

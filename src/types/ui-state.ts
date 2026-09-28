@@ -2,9 +2,12 @@
 // Contains ephemeral UI state that should be restored on app restart
 // Note: Field names use snake_case to match Rust struct exactly
 //
-// Session-specific state (answered_questions, submitted_answers, fixed_findings,
-// pending_permission_denials, denied_message_context, reviewing_sessions) is now
-// stored in the Session files. See useSessionStatePersistence.
+// Durable session state (answered_questions, submitted_answers, fixed_findings,
+// pending_permission_denials, denied_message_context, reviewing_sessions) is
+// stored in Session files. Lightweight unsent input drafts (textarea text plus
+// image / large-text paste attachment metadata) stay here so session composers
+// survive a full UI reload. Attachment file bytes live on disk; only metadata
+// is stored in UI state.
 // Review results are also stored in Session files (review_results field).
 
 import type { LabelData } from '@/types/chat'
@@ -25,12 +28,33 @@ export interface PersistedTerminalInstance {
   command_args?: string[] | null
   label: string
   kind?: 'panel' | 'session'
+  session_id?: string | null
 }
 
 export interface BrowserTabPersisted {
   id: string
   url: string
   title?: string
+}
+
+/** Persisted unsent image attachment (file already saved to disk) */
+export interface PendingImageDraft {
+  id: string
+  path: string
+  filename: string
+}
+
+/**
+ * Persisted unsent large-text paste attachment.
+ * `content` is optional so older saves / stripped payloads can rehydrate from disk.
+ */
+export interface PendingTextFileDraft {
+  id: string
+  path: string
+  filename: string
+  size: number
+  /** Optional; omitted when persisting to keep UI state small */
+  content?: string
 }
 
 export interface UIState {
@@ -44,8 +68,28 @@ export interface UIState {
   left_sidebar_size?: number
   /** Left sidebar visibility, defaults to false */
   left_sidebar_visible?: boolean
+  /** File browser sidebar width in pixels, defaults to 280 */
+  file_browser_size?: number
+  /** File browser sidebar visibility, defaults to false */
+  file_browser_visible?: boolean
+  /** Whether the session chat is using the reduced-chrome zen layout */
+  zen_mode?: boolean
   /** Active session ID per worktree (for restoring open tabs) */
   active_session_ids: Record<string, string>
+  /** Unsent chat textarea content per session */
+  input_drafts?: Record<string, string>
+  /**
+   * Unsent image attachments per session (files already on disk).
+   * Only fully-saved images are persisted — loading placeholders are omitted.
+   */
+  pending_images?: Record<string, PendingImageDraft[]>
+  /**
+   * Unsent large-text paste attachments per session (files already on disk).
+   * Content is optional in persistence; restore re-reads from disk when missing.
+   */
+  pending_text_files?: Record<string, PendingTextFileDraft[]>
+  /** Worktrees whose setup-script status card was dismissed */
+  dismissed_setup_scripts?: string[]
   /** Whether the review sidebar is visible */
   review_sidebar_visible?: boolean
   /** Modal terminal drawer open state per worktree */
@@ -58,7 +102,7 @@ export interface UIState {
   modal_terminal_width?: number
   /** Modal terminal height in pixels for bottom dock */
   modal_terminal_height?: number
-  /** Terminal instances persisted per worktree for web refresh reconnect */
+  /** Terminal instances persisted per worktree for restoration after web refresh */
   terminal_instances?: Record<string, PersistedTerminalInstance[]>
   /** Active terminal id per worktree */
   terminal_active_ids?: Record<string, string>
@@ -98,11 +142,18 @@ export interface UIState {
   dashboard_worktree_collapse_overrides?: Record<string, boolean>
   /** Project canvas settings per project */
   project_canvas_settings?: Record<string, ProjectCanvasSettingsState>
+  /** Favorited projects shown first in the GitHub Dashboard */
+  github_dashboard_favorite_project_ids?: string[]
   /** Last opened worktree+session per project: projectId → { worktree_id, session_id } */
   last_opened_per_project?: Record<
     string,
     { worktree_id: string; session_id: string }
   >
+  /**
+   * GitHub Actions workflow run database IDs the user has already opened
+   * (failed-run badges only count runs not in this list).
+   */
+  seen_failed_workflow_run_ids?: number[]
   version: number
 }
 
@@ -115,7 +166,14 @@ export const defaultUIState: UIState = {
   expanded_folder_ids: [],
   left_sidebar_size: 250,
   left_sidebar_visible: false,
+  file_browser_size: 280,
+  file_browser_visible: false,
+  zen_mode: false,
   active_session_ids: {},
+  input_drafts: {},
+  pending_images: {},
+  pending_text_files: {},
+  dismissed_setup_scripts: [],
   modal_terminal_open: {},
   modal_terminal_dock_mode: 'floating',
   modal_terminal_width: 400,
@@ -138,5 +196,7 @@ export const defaultUIState: UIState = {
   browser_modal_height: 400,
   browser_bottom_panel_open: {},
   browser_bottom_panel_height: 360,
+  github_dashboard_favorite_project_ids: [],
+  seen_failed_workflow_run_ids: [],
   version: 1,
 }

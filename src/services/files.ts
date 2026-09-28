@@ -13,8 +13,10 @@ export const fileQueryKeys = {
 }
 
 /**
- * Hook to get all files in a worktree (for @ mentions)
- * Results are cached and only refetched when worktree changes
+ * Hook to get all files in a worktree (file browser + @ mentions).
+ * Includes hidden and gitignored files (e.g. `.env`); heavy trees like
+ * `node_modules` / `vendor` / `target` are pruned server-side (BFS walk).
+ * Results are cached and only refetched when worktree changes.
  */
 export function useWorktreeFiles(worktreePath: string | null) {
   const { data: preferences } = usePreferences()
@@ -32,9 +34,6 @@ export function useWorktreeFiles(worktreePath: string | null) {
         const files = await invoke<WorktreeFile[]>('list_worktree_files', {
           worktreePath,
           maxFiles: 5000,
-          // Include gitignored files (e.g. .env, build outputs) so they can be
-          // referenced; heavy dependency/build dirs are pruned server-side.
-          includeIgnored: true,
           extraPruneDirs,
         })
         logger.info('Worktree files loaded', { count: files.length })

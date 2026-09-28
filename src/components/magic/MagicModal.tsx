@@ -1,8 +1,10 @@
 import { useCallback, useState, useRef, useEffect, useMemo } from 'react'
 import {
   ArrowDownToLine,
+  ArrowDownUp,
   ArrowUpToLine,
   GitCommitHorizontal,
+  GitBranchPlus,
   GitMerge,
   GitPullRequest,
   GitPullRequestArrow,
@@ -18,6 +20,7 @@ import {
   Link2,
   ShieldAlert,
   Loader2,
+  FlaskConical,
 } from 'lucide-react'
 import {
   Dialog,
@@ -56,9 +59,13 @@ import {
   useLoadedAdvisoryContexts,
 } from '@/services/github'
 import { usePreferences } from '@/services/preferences'
+import { useLoadedSentryContexts } from '@/services/sentry'
 import { useAvailableOpencodeModels } from '@/services/opencode-cli'
 import { useAvailableGrokModels } from '@/services/grok-cli'
-import { invoke } from '@/lib/transport'
+import { useAvailableKimiModels } from '@/services/kimi-cli'
+import { useAvailableAntigravityModels } from '@/services/antigravity-cli'
+import { startCommitJob } from '@/services/commit-jobs'
+import { invoke, listen } from '@/lib/transport'
 import { dismissibleToast } from '@/lib/dismissible-toast'
 import { generateId } from '@/lib/uuid'
 import { openExternal } from '@/lib/platform'
@@ -71,15 +78,16 @@ import {
   triggerImmediateGitPoll,
   fetchWorktreesStatus,
   performGitPull,
+  performGitSync,
 } from '@/services/git-status'
 import type {
-  CreateCommitResponse,
   RevertCommitResponse,
   CreatePrResponse,
   DetectPrResponse,
   MergeConflictsResponse,
   MergePrResponse,
-  ReviewResponse,
+  ReviewJob,
+  StartReviewJobResponse,
 } from '@/types/projects'
 import type { Session } from '@/types/chat'
 import {
@@ -91,8 +99,9 @@ import {
 } from '@/types/preferences'
 import { useRemotePicker } from '@/hooks/useRemotePicker'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
-import { chatQueryKeys } from '@/services/chat'
+import { chatQueryKeys, refreshWorktreeSessionsCaches } from '@/services/chat'
 import {
+  clearWorktreePr,
   linkWorktreePr,
   saveWorktreePr,
   projectsQueryKeys,
@@ -100,21 +109,34 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import {
   CODEX_MODEL_OPTIONS,
-  MODEL_OPTIONS,
   OPENCODE_MODEL_OPTIONS,
   GROK_MODEL_OPTIONS,
+  ANTIGRAVITY_MODEL_OPTIONS,
 } from '@/components/chat/toolbar/toolbar-options'
 import { formatOpencodeModelLabel } from '@/components/chat/toolbar/toolbar-utils'
+import {
+  getCatalogModelOptions,
+  useModelCatalog,
+} from '@/services/model-catalog'
+import { BackendLabel } from '@/components/ui/backend-label'
 import { ReviewMethodModal } from '@/components/chat/ReviewMethodModal'
+import {
+  resolveCodeReviewConfigs,
+  startCodeReviewsSequentially,
+} from '@/lib/code-review-configs'
+import { resolveMcpConfigForSend } from '@/services/mcp'
 
 type MagicOption =
   | 'save-context'
   | 'load-context'
+  | 'inject-session'
   | 'linked-projects'
+  | 'fork-session'
   | 'commit'
   | 'commit-and-push'
   | 'pull'
   | 'push'
+  | 'sync'
   | 'open-pr'
   | 'link-pr'
   | 'update-pr'
@@ -128,6 +150,7 @@ type MagicOption =
   | 'merge-pr'
   | 'review-comments'
   | 'revert-last-commit'
+  | 'smoke-test'
 
 interface TriggerCodeRabbitPrReviewResponse {
   pr_number: number
@@ -142,6 +165,7 @@ const CANVAS_ALLOWED_OPTIONS = new Set<MagicOption>([
   'revert-last-commit',
   'pull',
   'push',
+  'sync',
   'open-pr',
   'link-pr',
   'update-pr',
@@ -152,10 +176,22 @@ const CANVAS_ALLOWED_OPTIONS = new Set<MagicOption>([
   'merge-pr',
   'resolve-conflicts',
   'linked-projects',
+  'smoke-test',
 ])
 
 /** Canvas options that navigate to worktree chat and dispatch a magic-command event */
-const CANVAS_NAVIGATE_AND_DISPATCH_OPTIONS = new Set<MagicOption>(['merge'])
+const CANVAS_NAVIGATE_AND_DISPATCH_OPTIONS = new Set<MagicOption>([
+  'merge',
+  'smoke-test',
+])
+
+/** Git-only actions should not depend on a mounted ChatWindow event listener. */
+const DIRECT_MAGIC_GIT_OPTIONS = new Set<MagicOption>([
+  'commit',
+  'commit-and-push',
+  'push',
+  'sync',
+])
 
 interface MagicOptionItem {
   id: MagicOption
@@ -175,7 +211,7 @@ interface MagicColumns {
   all: MagicSection[]
 }
 
-type InvestigateType = 'issue' | 'pr' | 'advisory'
+type InvestigateType = 'issue' | 'pr' | 'advisory' | 'sentry-issue'
 type InvestigateSelectionMode = 'settings-default' | 'custom'
 type ResolveSelectionMode = 'settings-default' | 'custom'
 
@@ -183,18 +219,21 @@ const INVESTIGATE_MODEL_KEYS = {
   issue: 'investigate_issue_model',
   pr: 'investigate_pr_model',
   advisory: 'investigate_advisory_model',
+  'sentry-issue': 'investigate_sentry_issue_model',
 } as const
 
 const INVESTIGATE_PROVIDER_KEYS = {
   issue: 'investigate_issue_provider',
   pr: 'investigate_pr_provider',
   advisory: 'investigate_advisory_provider',
+  'sentry-issue': 'investigate_sentry_issue_provider',
 } as const
 
 const INVESTIGATE_BACKEND_KEYS = {
   issue: 'investigate_issue_backend',
   pr: 'investigate_pr_backend',
   advisory: 'investigate_advisory_backend',
+  'sentry-issue': 'investigate_sentry_issue_backend',
 } as const
 
 const RESOLVE_CONFLICTS_MODEL_KEY = 'resolve_conflicts_model'
@@ -226,10 +265,22 @@ function buildMagicColumns(hasOpenPr: boolean): MagicColumns {
           key: 'L',
         },
         {
+          id: 'inject-session',
+          label: 'Inject Session',
+          icon: MessageSquare,
+          key: 'J',
+        },
+        {
           id: 'linked-projects',
           label: 'Linked Projects',
           icon: Link2,
           key: 'K',
+        },
+        {
+          id: 'fork-session',
+          label: 'Fork Session',
+          icon: GitBranchPlus,
+          key: 'W',
         },
       ],
     },
@@ -254,6 +305,7 @@ function buildMagicColumns(hasOpenPr: boolean): MagicColumns {
     {
       header: 'Sync',
       options: [
+        { id: 'sync', label: 'Sync', icon: ArrowDownUp, key: 'T' },
         { id: 'pull', label: 'Pull', icon: ArrowDownToLine, key: 'D' },
         { id: 'push', label: 'Push', icon: ArrowUpToLine, key: 'U' },
       ],
@@ -261,6 +313,12 @@ function buildMagicColumns(hasOpenPr: boolean): MagicColumns {
   ]
 
   const right: MagicSection[] = [
+    {
+      header: 'Test',
+      options: [
+        { id: 'smoke-test', label: 'Smoke Test', icon: FlaskConical, key: 'X' },
+      ],
+    },
     {
       header: 'Pull Request',
       options: [
@@ -342,9 +400,12 @@ function buildMagicColumns(hasOpenPr: boolean): MagicColumns {
 const KEY_TO_OPTION: Record<string, MagicOption> = {
   s: 'save-context',
   l: 'load-context',
+  j: 'inject-session',
   k: 'linked-projects',
+  w: 'fork-session',
   c: 'commit',
   p: 'commit-and-push',
+  t: 'sync',
   d: 'pull',
   u: 'push',
   o: 'open-pr',
@@ -360,6 +421,7 @@ const KEY_TO_OPTION: Record<string, MagicOption> = {
   y: 'investigate-advisory',
   n: 'merge-pr',
   z: 'revert-last-commit',
+  x: 'smoke-test',
 }
 
 export function MagicModal() {
@@ -400,6 +462,7 @@ export function MagicModal() {
   )
   const [isDetectingLinkPr, setIsDetectingLinkPr] = useState(false)
   const [isLinkingPr, setIsLinkingPr] = useState(false)
+  const [isUnlinkingPr, setIsUnlinkingPr] = useState(false)
   const [resolveSelectionMode, setResolveSelectionMode] =
     useState<ResolveSelectionMode>('settings-default')
   const [customResolveBackend, setCustomResolveBackend] =
@@ -407,7 +470,8 @@ export function MagicModal() {
   const [customResolveModel, setCustomResolveModel] = useState<string>('sonnet')
   const [revertConfirmOpen, setRevertConfirmOpen] = useState(false)
 
-  const hasOpenPr = Boolean(worktree?.pr_url)
+  // PR checkouts may have pr_number before pr_url is filled; treat either as open.
+  const hasOpenPr = Boolean(worktree?.pr_number || worktree?.pr_url)
 
   // Check if worktree has loaded issue/PR contexts (for enabling investigate options)
   // Contexts may be registered under session ID (Load Context) or worktree ID (create_worktree)
@@ -426,7 +490,13 @@ export function MagicModal() {
     activeSessionId ?? selectedWorktreeId,
     selectedWorktreeId
   )
+  const { data: sentryContexts } = useLoadedSentryContexts(
+    activeSessionId ?? selectedWorktreeId,
+    selectedWorktreeId,
+    worktree?.project_id ?? null
+  )
   const hasIssueContexts = (issueContexts?.length ?? 0) > 0
+  const hasSentryContexts = (sentryContexts?.length ?? 0) > 0
   const hasPrContexts = (prContexts?.length ?? 0) > 0
   const hasAdvisoryContexts = (advisoryContexts?.length ?? 0) > 0
 
@@ -442,6 +512,13 @@ export function MagicModal() {
   const { data: availableGrokModels } = useAvailableGrokModels({
     enabled: installedBackends.includes('grok'),
   })
+  const { data: availableKimiModels } = useAvailableKimiModels({
+    enabled: installedBackends.includes('kimi'),
+  })
+  const { data: availableAntigravityModels } = useAvailableAntigravityModels({
+    enabled: installedBackends.includes('antigravity'),
+  })
+  const { data: modelCatalog } = useModelCatalog()
 
   // Build columns dynamically based on PR state
   const magicColumns = useMemo(() => buildMagicColumns(hasOpenPr), [hasOpenPr])
@@ -498,6 +575,33 @@ export function MagicModal() {
       : GROK_MODEL_OPTIONS
     return models
   }, [availableGrokModels])
+  const kimiModelOptions = useMemo(() => {
+    if (!availableKimiModels?.length) {
+      return [{ value: 'kimi/default', label: 'Configured default' }]
+    }
+    return availableKimiModels.map(model => ({
+      value: `kimi/${model.id}`,
+      label: model.label,
+    }))
+  }, [availableKimiModels])
+  const antigravityModelOptions = useMemo(() => {
+    if (!availableAntigravityModels?.length) {
+      return ANTIGRAVITY_MODEL_OPTIONS
+    }
+    return availableAntigravityModels.map(model => ({
+      value: `antigravity/${model.id}`,
+      label: model.label || model.id,
+    }))
+  }, [availableAntigravityModels])
+
+  const claudeModelOptions = useMemo(
+    () =>
+      getCatalogModelOptions(modelCatalog, 'claude').map(option => ({
+        ...option,
+        label: option.label.replace(/^Claude\s+/, ''),
+      })),
+    [modelCatalog]
+  )
 
   const investigateDefaults = useMemo(() => {
     if (!investigateType) return null
@@ -516,18 +620,22 @@ export function MagicModal() {
     const model =
       preferences?.magic_prompt_models?.[modelKey] ??
       (backend === 'codex'
-        ? (preferences?.selected_codex_model ?? 'gpt-5.5')
+        ? (preferences?.selected_codex_model ?? 'gpt-5.6-sol')
         : backend === 'opencode'
-          ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.5')
+          ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.6-sol')
           : backend === 'cursor'
             ? (preferences?.selected_cursor_model ?? 'cursor/auto')
             : backend === 'commandcode'
               ? (preferences?.selected_commandcode_model ??
                 'commandcode/default')
-              : backend === 'grok'
-                ? (preferences?.selected_grok_model ??
-                  'grok/grok-composer-2.5-fast')
-                : (preferences?.selected_model ?? 'sonnet'))
+              : backend === 'kimi'
+                ? (preferences?.selected_kimi_model ?? 'kimi/default')
+                : backend === 'grok'
+                  ? (preferences?.selected_grok_model ?? 'grok/grok-4.6')
+                  : backend === 'antigravity'
+                    ? (preferences?.selected_antigravity_model ??
+                      'antigravity/auto')
+                    : (preferences?.selected_model ?? 'sonnet'))
     const provider = resolveMagicPromptProvider(
       preferences?.magic_prompt_providers,
       providerKey,
@@ -548,18 +656,22 @@ export function MagicModal() {
     const model =
       preferences?.magic_prompt_models?.[RESOLVE_CONFLICTS_MODEL_KEY] ??
       (backend === 'codex'
-        ? (preferences?.selected_codex_model ?? 'gpt-5.5')
+        ? (preferences?.selected_codex_model ?? 'gpt-5.6-sol')
         : backend === 'opencode'
-          ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.5')
+          ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.6-sol')
           : backend === 'cursor'
             ? (preferences?.selected_cursor_model ?? 'cursor/auto')
             : backend === 'commandcode'
               ? (preferences?.selected_commandcode_model ??
                 'commandcode/default')
-              : backend === 'grok'
-                ? (preferences?.selected_grok_model ??
-                  'grok/grok-composer-2.5-fast')
-                : (preferences?.selected_model ?? 'sonnet'))
+              : backend === 'kimi'
+                ? (preferences?.selected_kimi_model ?? 'kimi/default')
+                : backend === 'grok'
+                  ? (preferences?.selected_grok_model ?? 'grok/grok-4.6')
+                  : backend === 'antigravity'
+                    ? (preferences?.selected_antigravity_model ??
+                      'antigravity/auto')
+                    : (preferences?.selected_model ?? 'sonnet'))
     const provider = resolveMagicPromptProvider(
       preferences?.magic_prompt_providers,
       RESOLVE_CONFLICTS_PROVIDER_KEY,
@@ -600,9 +712,9 @@ export function MagicModal() {
             { value: 'sonnet', label: `Sonnet${suffix(sonnetModel)}` },
             { value: 'haiku', label: `Haiku${suffix(haikuModel)}` },
           ]
-        : MODEL_OPTIONS
+        : claudeModelOptions
     },
-    [preferences?.custom_cli_profiles]
+    [claudeModelOptions, preferences?.custom_cli_profiles]
   )
 
   const investigateClaudeProvider =
@@ -633,11 +745,21 @@ export function MagicModal() {
           return opencodeModelOptions
         case 'grok':
           return grokModelOptions
+        case 'kimi':
+          return kimiModelOptions
+        case 'antigravity':
+          return antigravityModelOptions
         default:
           return investigateClaudeModelOptions
       }
     },
-    [grokModelOptions, investigateClaudeModelOptions, opencodeModelOptions]
+    [
+      antigravityModelOptions,
+      grokModelOptions,
+      investigateClaudeModelOptions,
+      kimiModelOptions,
+      opencodeModelOptions,
+    ]
   )
 
   const customInvestigateModelOptions = useMemo(
@@ -664,7 +786,11 @@ export function MagicModal() {
       case 'cursor':
         return 'Cursor'
       case 'grok':
-        return 'Grok (Beta)'
+        return 'Grok'
+      case 'kimi':
+        return 'Kimi Code'
+      case 'antigravity':
+        return 'Antigravity'
       default:
         return 'Claude'
     }
@@ -710,11 +836,21 @@ export function MagicModal() {
           return opencodeModelOptions
         case 'grok':
           return grokModelOptions
+        case 'kimi':
+          return kimiModelOptions
+        case 'antigravity':
+          return antigravityModelOptions
         default:
           return resolveClaudeModelOptions
       }
     },
-    [grokModelOptions, opencodeModelOptions, resolveClaudeModelOptions]
+    [
+      antigravityModelOptions,
+      grokModelOptions,
+      kimiModelOptions,
+      opencodeModelOptions,
+      resolveClaudeModelOptions,
+    ]
   )
 
   const customResolveModelOptions = useMemo(
@@ -805,19 +941,7 @@ export function MagicModal() {
     setCustomInvestigateModel(nextModel)
   }, [getInvestigateModelOptions, installedBackends, investigateDefaults])
 
-  useEffect(() => {
-    if (!customInvestigateModelOptions.length) return
-    if (
-      !customInvestigateModelOptions.some(
-        option => option.value === customInvestigateModel
-      )
-    ) {
-      const firstOption = customInvestigateModelOptions[0]
-      if (firstOption) {
-        setCustomInvestigateModel(firstOption.value)
-      }
-    }
-  }, [customInvestigateModel, customInvestigateModelOptions])
+  // Invalid customInvestigateModel is handled by effectiveCustomInvestigateModel
 
   useEffect(() => {
     if (!resolveDialogOpen) {
@@ -839,19 +963,7 @@ export function MagicModal() {
     setCustomResolveModel(nextModel)
   }, [getResolveModelOptions, installedBackends, resolveDefaults])
 
-  useEffect(() => {
-    if (!customResolveModelOptions.length) return
-    if (
-      !customResolveModelOptions.some(
-        option => option.value === customResolveModel
-      )
-    ) {
-      const firstOption = customResolveModelOptions[0]
-      if (firstOption) {
-        setCustomResolveModel(firstOption.value)
-      }
-    }
-  }, [customResolveModel, customResolveModelOptions])
+  // Invalid customResolveModel is handled by effectiveCustomResolveModel
 
   // Direct git execution for when ChatWindow isn't rendered (project canvas)
   const executeGitDirectly = useCallback(
@@ -880,8 +992,7 @@ export function MagicModal() {
             : `Creating commit on ${branch}...`
         )
         try {
-          const result = await invoke<CreateCommitResponse>(
-            'create_commit_with_ai',
+          await startCommitJob(
             {
               worktreePath: worktree.path,
               customPrompt: preferences?.magic_prompts?.commit_message,
@@ -898,26 +1009,46 @@ export function MagicModal() {
                 preferences?.magic_prompt_efforts?.commit_message_effort ??
                 null,
               specificFiles,
+            },
+            job => {
+              clearWorktreeLoading(selectedWorktreeId)
+              if (job.status === 'failed' || !job.response) {
+                opToast.error(`Failed: ${job.error}`)
+                return
+              }
+
+              clearGitDiffSelectedFiles()
+              triggerImmediateGitPoll()
+              window.dispatchEvent(new CustomEvent('git-commit-completed'))
+              if (worktree.project_id) {
+                fetchWorktreesStatus(worktree.project_id)
+              }
+              const result = job.response
+              if (result.push_permission_denied) {
+                opToast.error(
+                  `No permission to push to PR #${worktree.pr_number}. Create a separate PR instead.`,
+                  {
+                    action: {
+                      label: toastActionLabel('Open PR'),
+                      onClick: () => executeGitDirectly('open-pr'),
+                    },
+                  }
+                )
+              } else if (result.push_fell_back) {
+                opToast.warning(
+                  'Could not push to PR branch, pushed to new branch instead'
+                )
+              } else if (result.commit_hash) {
+                const prefix = isPush ? 'Committed and pushed' : 'Committed'
+                opToast.success(`${prefix}: ${result.message.split('\n')[0]}`)
+              } else {
+                opToast.success('Pushed to remote')
+              }
             }
           )
-          clearGitDiffSelectedFiles()
-          triggerImmediateGitPoll()
-          window.dispatchEvent(new CustomEvent('git-commit-completed'))
-          if (worktree.project_id) fetchWorktreesStatus(worktree.project_id)
-          if (result.push_fell_back) {
-            opToast.warning(
-              'Could not push to PR branch, pushed to new branch instead'
-            )
-          } else if (result.commit_hash) {
-            const prefix = isPush ? 'Committed and pushed' : 'Committed'
-            opToast.success(`${prefix}: ${result.message.split('\n')[0]}`)
-          } else {
-            opToast.success('Pushed to remote')
-          }
         } catch (error) {
-          opToast.error(`Failed: ${error}`)
-        } finally {
           clearWorktreeLoading(selectedWorktreeId)
+          opToast.error(`Failed: ${error}`)
         }
       }
 
@@ -956,11 +1087,34 @@ export function MagicModal() {
             await performGitPull({
               worktreeId: selectedWorktreeId,
               worktreePath: worktree.path,
-              baseBranch: project?.default_branch ?? 'main',
+              baseBranch:
+                worktree.base_branch ?? project?.default_branch ?? 'main',
               branchLabel: worktree.branch,
               projectId: worktree.project_id ?? undefined,
-              remote,
+              remote: remote ?? worktree.base_remote,
               onMergeConflict: () => executeGitDirectly('resolve-conflicts'),
+            })
+          })
+          break
+        }
+        case 'sync': {
+          // Always pull then push (explicit menu action, not badge-gated by ahead/behind).
+          await pickRemoteOrRun(async remote => {
+            await performGitSync({
+              needsPull: true,
+              needsPush: true,
+              pull: {
+                worktreeId: selectedWorktreeId,
+                worktreePath: worktree.path,
+                baseBranch:
+                  worktree.base_branch ?? project?.default_branch ?? 'main',
+                branchLabel: worktree.branch,
+                projectId: worktree.project_id ?? undefined,
+                remote: remote ?? worktree.base_remote,
+                onMergeConflict: () => executeGitDirectly('resolve-conflicts'),
+              },
+              prNumber: worktree.pr_number,
+              pushRemote: remote,
             })
           })
           break
@@ -978,7 +1132,20 @@ export function MagicModal() {
               )
               triggerImmediateGitPoll()
               if (worktree.project_id) fetchWorktreesStatus(worktree.project_id)
-              if (result.fellBack) {
+              if (result.permissionDenied) {
+                opToast.error(
+                  `No permission to push to PR #${worktree.pr_number}. Create a separate PR instead.`,
+                  {
+                    duration: Infinity,
+                    description:
+                      result.output.trim() || 'The remote rejected the push.',
+                    action: {
+                      label: toastActionLabel('Open PR'),
+                      onClick: () => executeGitDirectly('open-pr'),
+                    },
+                  }
+                )
+              } else if (result.fellBack) {
                 opToast.warning(
                   'Could not push to PR branch, pushed to new branch instead'
                 )
@@ -999,6 +1166,30 @@ export function MagicModal() {
         case 'open-pr': {
           if (worktree.pr_url) {
             await openExternal(worktree.pr_url)
+            return
+          }
+          // Number without URL (e.g. older checkout_pr): resolve then open
+          if (worktree.pr_number) {
+            try {
+              const linked = await linkWorktreePr(
+                selectedWorktreeId,
+                worktree.path,
+                worktree.pr_number
+              )
+              queryClient.invalidateQueries({
+                queryKey: projectsQueryKeys.worktrees(worktree.project_id),
+              })
+              queryClient.invalidateQueries({
+                queryKey: [
+                  ...projectsQueryKeys.all,
+                  'worktree',
+                  selectedWorktreeId,
+                ],
+              })
+              await openExternal(linked.pr_url)
+            } catch (error) {
+              toast.error(`Failed to open PR #${worktree.pr_number}: ${error}`)
+            }
             return
           }
           setWorktreeLoading(selectedWorktreeId, 'pr')
@@ -1179,10 +1370,10 @@ export function MagicModal() {
                   RESOLVE_CONFLICTS_MODEL_KEY
                 ] ??
                 (resolvedBackend === 'codex'
-                  ? (preferences?.selected_codex_model ?? 'gpt-5.5')
+                  ? (preferences?.selected_codex_model ?? 'gpt-5.6-sol')
                   : resolvedBackend === 'opencode'
                     ? (preferences?.selected_opencode_model ??
-                      'opencode/gpt-5.5')
+                      'opencode/gpt-5.6-sol')
                     : resolvedBackend === 'cursor'
                       ? (preferences?.selected_cursor_model ?? 'cursor/auto')
                       : (preferences?.selected_model ?? 'sonnet'))
@@ -1235,12 +1426,14 @@ export function MagicModal() {
               const diffSection = prResult.conflict_diff
                 ? `\n\nHere is the diff showing the conflict details:\n\n\`\`\`diff\n${prResult.conflict_diff}\n\`\`\``
                 : ''
-              const baseBranch = project?.default_branch || 'main'
+              const baseBranch =
+                worktree.base_branch || project?.default_branch || 'main'
+              const baseRemote = worktree.base_remote || 'origin'
               const resolveInstructions =
                 preferences?.magic_prompts?.resolve_conflicts ??
                 DEFAULT_RESOLVE_CONFLICTS_PROMPT
 
-              const conflictPrompt = `I merged \`origin/${baseBranch}\` into this branch to resolve PR conflicts, but there are merge conflicts.
+              const conflictPrompt = `I merged \`${baseRemote}/${baseBranch}\` into this branch to resolve PR conflicts, but there are merge conflicts.
 
 Conflicts in these files:
 - ${conflictFiles}${diffSection}
@@ -1252,11 +1445,28 @@ ${resolveInstructions}`
               setExecutionMode(newSession.id, 'yolo')
               setExecutingMode(newSession.id, 'yolo')
               clearInputDraft(newSession.id)
+
+              const {
+                mcpConfig: prConflictMcpConfig,
+                enabledServers: prConflictEnabledMcp,
+              } = await resolveMcpConfigForSend({
+                worktreePath: worktree.path,
+                backend: resolvedBackend as CliBackend,
+                projectEnabled: project?.enabled_mcp_servers,
+                globalEnabled: preferences?.default_enabled_mcp_servers,
+                knownServers:
+                  project?.known_mcp_servers ?? preferences?.known_mcp_servers,
+              })
+              useChatStore
+                .getState()
+                .setEnabledMcpServers(newSession.id, prConflictEnabledMcp)
+
               invoke('update_session_state', {
                 worktreeId: selectedWorktreeId,
                 worktreePath: worktree.path,
                 sessionId: newSession.id,
                 selectedExecutionMode: 'yolo',
+                enabledMcpServers: prConflictEnabledMcp,
               }).catch(() => undefined)
 
               await invoke('send_chat_message', {
@@ -1275,6 +1485,7 @@ ${resolveInstructions}`
                     : undefined,
                 chromeEnabled: preferences?.chrome_enabled ?? false,
                 aiLanguage: preferences?.ai_language,
+                mcpConfig: prConflictMcpConfig,
               })
 
               queryClient.invalidateQueries({
@@ -1338,9 +1549,10 @@ ${resolveInstructions}`
               override?.model ??
               preferences?.magic_prompt_models?.[RESOLVE_CONFLICTS_MODEL_KEY] ??
               (resolvedBackend === 'codex'
-                ? (preferences?.selected_codex_model ?? 'gpt-5.5')
+                ? (preferences?.selected_codex_model ?? 'gpt-5.6-sol')
                 : resolvedBackend === 'opencode'
-                  ? (preferences?.selected_opencode_model ?? 'opencode/gpt-5.5')
+                  ? (preferences?.selected_opencode_model ??
+                    'opencode/gpt-5.6-sol')
                   : resolvedBackend === 'cursor'
                     ? (preferences?.selected_cursor_model ?? 'cursor/auto')
                     : (preferences?.selected_model ?? 'sonnet'))
@@ -1434,11 +1646,28 @@ ${resolveInstructions}`
             setExecutionMode(newSession.id, 'yolo')
             setExecutingMode(newSession.id, 'yolo')
             clearInputDraft(newSession.id)
+
+            const {
+              mcpConfig: conflictMcpConfig,
+              enabledServers: conflictEnabledMcp,
+            } = await resolveMcpConfigForSend({
+              worktreePath: worktree.path,
+              backend: resolvedBackend as CliBackend,
+              projectEnabled: project?.enabled_mcp_servers,
+              globalEnabled: preferences?.default_enabled_mcp_servers,
+              knownServers:
+                project?.known_mcp_servers ?? preferences?.known_mcp_servers,
+            })
+            useChatStore
+              .getState()
+              .setEnabledMcpServers(newSession.id, conflictEnabledMcp)
+
             invoke('update_session_state', {
               worktreeId: selectedWorktreeId,
               worktreePath: worktree.path,
               sessionId: newSession.id,
               selectedExecutionMode: 'yolo',
+              enabledMcpServers: conflictEnabledMcp,
             }).catch(() => undefined)
 
             await invoke('send_chat_message', {
@@ -1457,6 +1686,7 @@ ${resolveInstructions}`
                   : undefined,
               chromeEnabled: preferences?.chrome_enabled ?? false,
               aiLanguage: preferences?.ai_language,
+              mcpConfig: conflictMcpConfig,
             })
 
             queryClient.invalidateQueries({
@@ -1526,44 +1756,21 @@ ${resolveInstructions}`
             break
           }
 
-          const reviewRunId = generateId()
-          let cancelRequested = false
-          const reviewLabel =
-            reviewSource === 'coderabbit-cli'
-              ? 'CodeRabbit CLI review'
-              : 'Review'
-          const toastId = toast.loading(
-            `${reviewLabel} for ${reviewTarget}...`,
-            {
-              cancel: {
-                label: 'Cancel',
-                onClick: () => {
-                  cancelRequested = true
-                  toast.loading(`Cancelling review for ${reviewTarget}...`, {
-                    id: toastId,
-                  })
-                  invoke<boolean>('cancel_review_with_ai', { reviewRunId })
-                    .then(cancelled => {
-                      if (cancelled) {
-                        toast.info(`Review cancelled for ${reviewTarget}`, {
-                          id: toastId,
-                        })
-                      } else {
-                        toast.info(
-                          `No active review to cancel for ${reviewTarget}`,
-                          { id: toastId }
-                        )
-                      }
-                    })
-                    .catch(error => {
-                      toast.error(`Failed to cancel review: ${error}`, {
-                        id: toastId,
-                      })
-                    })
-                },
-              },
-            }
-          )
+          const reviewConfigs =
+            reviewSource === 'ai'
+              ? resolveCodeReviewConfigs({
+                  configured: preferences?.magic_code_review_configs,
+                  fallbackBackend:
+                    resolveMagicPromptBackend(
+                      preferences?.magic_prompt_backends,
+                      'code_review_backend',
+                      preferences?.default_backend
+                    ) ?? 'claude',
+                  fallbackModel:
+                    preferences?.magic_prompt_models?.code_review_model ??
+                    'sonnet',
+                })
+              : [undefined]
 
           // Fire-and-forget: detect and link PR if not already linked
           if (!worktree.pr_number) {
@@ -1590,120 +1797,187 @@ ${resolveInstructions}`
               })
           }
 
-          try {
-            const result = await invoke<ReviewResponse>(
-              reviewSource === 'coderabbit-cli'
-                ? 'run_coderabbit_review'
-                : 'run_review_with_ai',
-              reviewSource === 'coderabbit-cli'
-                ? {
+          let reviewSessionId: string | undefined
+          await startCodeReviewsSequentially(
+            reviewConfigs,
+            async reviewConfig => {
+              const reviewRunId = generateId()
+              const reviewLabel =
+                reviewSource === 'coderabbit-cli'
+                  ? 'CodeRabbit CLI review'
+                  : reviewConfig
+                    ? `Review (${reviewConfig.backend} / ${reviewConfig.model})`
+                    : 'Review'
+              const toastId = toast.loading(
+                `Starting ${reviewLabel} for ${reviewTarget}...`
+              )
+
+              try {
+                const { job } = await invoke<StartReviewJobResponse>(
+                  'start_review_job',
+                  {
+                    worktreeId: selectedWorktreeId,
                     worktreePath: worktree.path,
-                    reviewRunId,
-                    reviewType: 'all',
-                  }
-                : {
-                    worktreePath: worktree.path,
+                    source: reviewSource,
+                    backend:
+                      reviewConfig?.backend ??
+                      resolveMagicPromptBackend(
+                        preferences?.magic_prompt_backends,
+                        'code_review_backend',
+                        preferences?.default_backend
+                      ),
                     customPrompt: preferences?.magic_prompts?.code_review,
-                    model: preferences?.magic_prompt_models?.code_review_model,
+                    model:
+                      reviewConfig?.model ??
+                      preferences?.magic_prompt_models?.code_review_model,
                     customProfileName: resolveMagicPromptProvider(
                       preferences?.magic_prompt_providers,
                       'code_review_provider',
                       preferences?.default_provider
                     ),
                     reasoningEffort:
+                      reviewConfig?.reasoning_effort ??
                       preferences?.magic_prompt_efforts?.code_review_effort ??
                       null,
                     reviewRunId,
+                    reviewType:
+                      reviewSource === 'coderabbit-cli' ? 'all' : null,
+                    sessionId: reviewSessionId,
                   }
-            )
+                )
 
-            const newSession = await invoke<Session>('create_session', {
-              worktreeId: selectedWorktreeId,
-              worktreePath: worktree.path,
-              name: 'Code Review',
-            })
+                reviewSessionId ??= job.sessionId
 
-            const {
-              setReviewResults,
-              setActiveSession,
-              clearActiveWorktree,
-              copySessionSettings,
-              activeSessionIds,
-            } = useChatStore.getState()
-            const currentReviewSessionId = activeSessionIds[selectedWorktreeId]
-            setReviewResults(newSession.id, result)
+                if (job.sessionId) {
+                  const { setActiveSession, clearActiveWorktree } =
+                    useChatStore.getState()
+                  setActiveSession(selectedWorktreeId, job.sessionId)
+                  useProjectsStore.getState().selectWorktree(selectedWorktreeId)
+                  clearActiveWorktree()
+                  useUIStore
+                    .getState()
+                    .markWorktreeForAutoOpenSession(
+                      selectedWorktreeId,
+                      job.sessionId
+                    )
+                  queryClient.invalidateQueries({
+                    queryKey: chatQueryKeys.sessions(selectedWorktreeId),
+                  })
+                }
 
-            // Inherit model/mode/thinking settings from current session
-            if (currentReviewSessionId)
-              copySessionSettings(currentReviewSessionId, newSession.id)
-
-            // Navigate to ProjectCanvasView and auto-open session modal
-            setActiveSession(selectedWorktreeId, newSession.id)
-            useProjectsStore.getState().selectWorktree(selectedWorktreeId)
-            clearActiveWorktree()
-            useUIStore
-              .getState()
-              .markWorktreeForAutoOpenSession(selectedWorktreeId, newSession.id)
-
-            // Persist review results to session file
-            invoke('update_session_state', {
-              worktreeId: selectedWorktreeId,
-              worktreePath: worktree.path,
-              sessionId: newSession.id,
-              reviewResults: result,
-              // eslint-disable-next-line @typescript-eslint/no-empty-function
-            }).catch(() => {})
-
-            queryClient.invalidateQueries({
-              queryKey: chatQueryKeys.sessions(selectedWorktreeId),
-            })
-
-            const findingCount = result.findings.length
-            toast.success(
-              `${reviewSource === 'coderabbit-cli' ? 'CodeRabbit CLI review' : 'Review'} done on ${reviewTarget} (${findingCount} findings)`,
-              {
-                id: toastId,
-                action: {
-                  label: toastActionLabel('Open'),
-                  onClick: () => {
-                    const { setActiveSession, clearActiveWorktree } =
-                      useChatStore.getState()
-                    useProjectsStore
-                      .getState()
-                      .selectWorktree(selectedWorktreeId)
-                    clearActiveWorktree()
-                    setActiveSession(selectedWorktreeId, newSession.id)
-                    setTimeout(() => {
-                      window.dispatchEvent(
-                        new CustomEvent('open-session-modal', {
-                          detail: {
-                            sessionId: newSession.id,
-                            worktreeId: selectedWorktreeId,
-                            worktreePath: worktree.path,
-                          },
+                // Sonner ignores `duration` for loading toasts — dismiss explicitly.
+                toast.loading(`${reviewLabel} running for ${reviewTarget}...`, {
+                  id: toastId,
+                  cancel: {
+                    label: 'Cancel',
+                    onClick: () => {
+                      invoke<boolean>('cancel_review_job', {
+                        jobId: job.id,
+                      }).catch(error => {
+                        toast.error(`Failed to cancel review: ${error}`, {
+                          id: toastId,
                         })
-                      )
-                    }, 50)
+                      })
+                    },
                   },
-                },
+                })
+                const autoDismissTimer = window.setTimeout(() => {
+                  toast.dismiss(toastId)
+                }, 5000)
+
+                let unlistenReviewJob: (() => void) | null = null
+                let handledTerminalReviewJob = false
+                const handleTerminalReviewJob = (reviewJob: ReviewJob) => {
+                  if (reviewJob.id !== job.id) return
+                  if (reviewJob.status === 'running') return
+                  if (handledTerminalReviewJob) return
+
+                  handledTerminalReviewJob = true
+                  window.clearTimeout(autoDismissTimer)
+                  unlistenReviewJob?.()
+                  if (reviewJob.status === 'completed') {
+                    const completedSessionId = reviewJob.sessionId
+                    void refreshWorktreeSessionsCaches(
+                      queryClient,
+                      selectedWorktreeId,
+                      worktree.path
+                    ).finally(() => {
+                      queryClient.invalidateQueries({
+                        queryKey: chatQueryKeys.sessions(selectedWorktreeId),
+                      })
+                      queryClient.invalidateQueries({
+                        queryKey: ['all-sessions'],
+                      })
+                    })
+                    toast.dismiss(toastId)
+                    toast.success(
+                      `${reviewLabel} done on ${reviewTarget} (${reviewJob.findingCount ?? 0} findings)`,
+                      {
+                        action: completedSessionId
+                          ? {
+                              label: toastActionLabel('Open'),
+                              onClick: () => {
+                                const {
+                                  setActiveSession,
+                                  clearActiveWorktree,
+                                } = useChatStore.getState()
+                                useProjectsStore
+                                  .getState()
+                                  .selectWorktree(selectedWorktreeId)
+                                clearActiveWorktree()
+                                setActiveSession(
+                                  selectedWorktreeId,
+                                  completedSessionId
+                                )
+                                setTimeout(() => {
+                                  window.dispatchEvent(
+                                    new CustomEvent('open-session-modal', {
+                                      detail: {
+                                        sessionId: completedSessionId,
+                                        worktreeId: selectedWorktreeId,
+                                        worktreePath: worktree.path,
+                                      },
+                                    })
+                                  )
+                                }, 50)
+                              },
+                            }
+                          : undefined,
+                      }
+                    )
+                  } else if (reviewJob.status === 'cancelled') {
+                    toast.dismiss(toastId)
+                    toast.info(`Review cancelled for ${reviewTarget}`)
+                  } else {
+                    toast.dismiss(toastId)
+                    toast.error(
+                      `Review failed: ${reviewJob.error ?? 'Unknown error'}`
+                    )
+                  }
+                }
+
+                unlistenReviewJob = await listen<ReviewJob>(
+                  'review-job:updated',
+                  event => handleTerminalReviewJob(event.payload)
+                )
+                if (handledTerminalReviewJob) {
+                  unlistenReviewJob()
+                } else {
+                  const currentJob = await invoke<ReviewJob | null>(
+                    'get_review_job',
+                    { jobId: job.id }
+                  ).catch(() => null)
+                  if (currentJob) handleTerminalReviewJob(currentJob)
+                }
+              } catch (error) {
+                toast.error(`Failed to start review: ${error}`, {
+                  id: toastId,
+                })
+              } finally {
+                clearWorktreeLoading(selectedWorktreeId)
               }
-            )
-          } catch (error) {
-            const errorString = String(error)
-            const cancelled =
-              cancelRequested ||
-              errorString.toLowerCase().includes('cancelled') ||
-              errorString.toLowerCase().includes('canceled')
-            if (cancelled) {
-              toast.info(`Review cancelled for ${reviewTarget}`, {
-                id: toastId,
-              })
-            } else {
-              toast.error(`Review failed: ${error}`, { id: toastId })
             }
-          } finally {
-            clearWorktreeLoading(selectedWorktreeId)
-          }
+          )
           break
         }
       }
@@ -1832,6 +2106,35 @@ ${resolveInstructions}`
     worktree?.project_id,
   ])
 
+  const handleUnlinkPr = useCallback(async () => {
+    if (!selectedWorktreeId || !worktree || !hasOpenPr) return
+
+    const prNumber = worktree.pr_number
+    setIsUnlinkingPr(true)
+    setLinkPrError(null)
+    try {
+      await clearWorktreePr(selectedWorktreeId)
+      queryClient.invalidateQueries({
+        queryKey: projectsQueryKeys.worktrees(worktree.project_id),
+      })
+      queryClient.invalidateQueries({
+        queryKey: [...projectsQueryKeys.all, 'worktree', selectedWorktreeId],
+      })
+      triggerImmediateGitPoll()
+      if (worktree.project_id) fetchWorktreesStatus(worktree.project_id)
+
+      toast.success(prNumber ? `Unlinked PR #${prNumber}` : 'Unlinked PR')
+      setLinkPrDialogOpen(false)
+      setLinkPrNumber('')
+    } catch (error) {
+      const message = `Failed to unlink PR: ${error}`
+      setLinkPrError(message)
+      toast.error(message)
+    } finally {
+      setIsUnlinkingPr(false)
+    }
+  }, [hasOpenPr, queryClient, selectedWorktreeId, worktree])
+
   const confirmRevertLastCommit = useCallback(() => {
     setRevertConfirmOpen(false)
     setMagicModalOpen(false)
@@ -1940,13 +2243,15 @@ ${resolveInstructions}`
       ) {
         const type: InvestigateType =
           option === 'investigate-issue'
-            ? 'issue'
+            ? hasIssueContexts
+              ? 'issue'
+              : 'sentry-issue'
             : option === 'investigate-pr'
               ? 'pr'
               : 'advisory'
         const hasContexts =
-          type === 'issue'
-            ? hasIssueContexts
+          type === 'issue' || type === 'sentry-issue'
+            ? hasIssueContexts || hasSentryContexts
             : type === 'pr'
               ? hasPrContexts
               : hasAdvisoryContexts
@@ -2003,9 +2308,15 @@ ${resolveInstructions}`
       }
 
       // If PR already exists, open it in the browser instead of creating a new one
-      if (option === 'open-pr' && worktree?.pr_url) {
-        await openExternal(worktree.pr_url)
+      if (option === 'open-pr' && (worktree?.pr_url || worktree?.pr_number)) {
         setMagicModalOpen(false)
+        void executeGitDirectly('open-pr')
+        return
+      }
+
+      if (DIRECT_MAGIC_GIT_OPTIONS.has(option)) {
+        setMagicModalOpen(false)
+        void executeGitDirectly(option)
         return
       }
 
@@ -2153,7 +2464,7 @@ ${resolveInstructions}`
         <DialogContent
           ref={contentRef}
           tabIndex={-1}
-          className="sm:max-w-[560px] p-0 outline-none"
+          className="sm:max-w-[560px] max-h-[min(90vh,760px)] overflow-y-auto p-0 outline-none"
           onOpenAutoFocus={e => {
             e.preventDefault()
             contentRef.current?.focus()
@@ -2172,6 +2483,9 @@ ${resolveInstructions}`
               (columnSections, colIndex) => (
                 <div
                   key={colIndex}
+                  data-testid={
+                    colIndex === 0 ? 'magic-column-left' : 'magic-column-right'
+                  }
                   className={cn(colIndex === 0 && 'border-r border-border')}
                 >
                   {columnSections.map((section, sectionIndex) => (
@@ -2187,7 +2501,8 @@ ${resolveInstructions}`
                           (isOnCanvas &&
                             !CANVAS_ALLOWED_OPTIONS.has(option.id)) ||
                           (option.id === 'investigate-issue' &&
-                            !hasIssueContexts) ||
+                            !hasIssueContexts &&
+                            !hasSentryContexts) ||
                           (option.id === 'investigate-pr' && !hasPrContexts) ||
                           (option.id === 'investigate-advisory' &&
                             !hasAdvisoryContexts) ||
@@ -2196,6 +2511,7 @@ ${resolveInstructions}`
 
                         return (
                           <button
+                            type="button"
                             key={option.id}
                             onClick={() =>
                               !isDisabled && executeAction(option.id)
@@ -2258,7 +2574,7 @@ ${resolveInstructions}`
                     handleLinkPrSubmit()
                   }
                 }}
-                disabled={isDetectingLinkPr}
+                disabled={isDetectingLinkPr || isUnlinkingPr}
                 autoFocus
               />
               {isDetectingLinkPr && (
@@ -2281,24 +2597,37 @@ ${resolveInstructions}`
               </p>
             </div>
 
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="outline"
-                onClick={() => setLinkPrDialogOpen(false)}
-                disabled={isLinkingPr || isDetectingLinkPr}
-              >
-                Cancel
-              </Button>
-              <Button
-                onClick={handleLinkPrSubmit}
-                disabled={isLinkingPr || isDetectingLinkPr}
-              >
-                {isDetectingLinkPr
-                  ? 'Checking…'
-                  : isLinkingPr
-                    ? 'Linking…'
-                    : 'Link PR'}
-              </Button>
+            <div className="flex justify-between gap-2">
+              <div>
+                {hasOpenPr && (
+                  <Button
+                    variant="destructive"
+                    onClick={handleUnlinkPr}
+                    disabled={isLinkingPr || isDetectingLinkPr || isUnlinkingPr}
+                  >
+                    {isUnlinkingPr ? 'Unlinking…' : 'Unlink PR'}
+                  </Button>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setLinkPrDialogOpen(false)}
+                  disabled={isLinkingPr || isDetectingLinkPr || isUnlinkingPr}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleLinkPrSubmit}
+                  disabled={isLinkingPr || isDetectingLinkPr || isUnlinkingPr}
+                >
+                  {isDetectingLinkPr
+                    ? 'Checking…'
+                    : isLinkingPr
+                      ? 'Linking…'
+                      : 'Link PR'}
+                </Button>
+              </div>
             </div>
           </div>
         </DialogContent>
@@ -2325,7 +2654,9 @@ ${resolveInstructions}`
                 ? 'PR'
                 : investigateType === 'advisory'
                   ? 'Advisory'
-                  : 'Issue'}
+                  : investigateType === 'sentry-issue'
+                    ? 'Sentry Issue'
+                    : 'Issue'}
             </DialogTitle>
           </DialogHeader>
 
@@ -2403,9 +2734,14 @@ ${resolveInstructions}`
                         size="sm"
                         hideIcon={
                           installedBackends.filter(backend =>
-                            ['claude', 'codex', 'opencode', 'grok'].includes(
-                              backend
-                            )
+                            [
+                              'claude',
+                              'codex',
+                              'opencode',
+                              'grok',
+                              'kimi',
+                              'antigravity',
+                            ].includes(backend)
                           ).length <= 1
                         }
                         onClick={() => setInvestigateSelectionMode('custom')}
@@ -2423,7 +2759,19 @@ ${resolveInstructions}`
                           <SelectItem value="opencode">OpenCode</SelectItem>
                         )}
                         {installedBackends.includes('grok') && (
-                          <SelectItem value="grok">Grok (Beta)</SelectItem>
+                          <SelectItem value="grok">
+                            <BackendLabel backend="grok" />
+                          </SelectItem>
+                        )}
+                        {installedBackends.includes('kimi') && (
+                          <SelectItem value="kimi">
+                            <BackendLabel backend="kimi" />
+                          </SelectItem>
+                        )}
+                        {installedBackends.includes('antigravity') && (
+                          <SelectItem value="antigravity">
+                            <BackendLabel backend="antigravity" />
+                          </SelectItem>
                         )}
                       </SelectContent>
                     </Select>
@@ -2556,9 +2904,14 @@ ${resolveInstructions}`
                         size="sm"
                         hideIcon={
                           installedBackends.filter(backend =>
-                            ['claude', 'codex', 'opencode', 'grok'].includes(
-                              backend
-                            )
+                            [
+                              'claude',
+                              'codex',
+                              'opencode',
+                              'grok',
+                              'kimi',
+                              'antigravity',
+                            ].includes(backend)
                           ).length <= 1
                         }
                         onClick={() => setResolveSelectionMode('custom')}
@@ -2576,7 +2929,19 @@ ${resolveInstructions}`
                           <SelectItem value="opencode">OpenCode</SelectItem>
                         )}
                         {installedBackends.includes('grok') && (
-                          <SelectItem value="grok">Grok (Beta)</SelectItem>
+                          <SelectItem value="grok">
+                            <BackendLabel backend="grok" />
+                          </SelectItem>
+                        )}
+                        {installedBackends.includes('kimi') && (
+                          <SelectItem value="kimi">
+                            <BackendLabel backend="kimi" />
+                          </SelectItem>
+                        )}
+                        {installedBackends.includes('antigravity') && (
+                          <SelectItem value="antigravity">
+                            <BackendLabel backend="antigravity" />
+                          </SelectItem>
                         )}
                       </SelectContent>
                     </Select>

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   ArrowLeft,
   MessageSquarePlus,
@@ -24,6 +31,8 @@ import { useCursorCliStatus } from '@/services/cursor-cli'
 import { usePiCliStatus } from '@/services/pi-cli'
 import { useCommandCodeCliStatus } from '@/services/commandcode-cli'
 import { useGrokCliStatus } from '@/services/grok-cli'
+import { useKimiCliStatus } from '@/services/kimi-cli'
+import { useAntigravityCliStatus } from '@/services/antigravity-cli'
 import { useChatStore } from '@/store/chat-store'
 import { useUIStore } from '@/store/ui-store'
 import {
@@ -33,6 +42,7 @@ import {
 import type { CliBackend } from '@/types/preferences'
 import { usePreferences } from '@/services/preferences'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { resolveDefaultModelForBackend } from '@/lib/session-defaults'
 import {
   NativeCliSessionsModal,
   type NativeCliSessionKind,
@@ -46,6 +56,8 @@ const BACKEND_ORDER: CliBackend[] = [
   'pi',
   'commandcode',
   'grok',
+  'kimi',
+  'antigravity',
 ]
 
 const backendCommands: Record<CliBackend, string> = {
@@ -56,6 +68,8 @@ const backendCommands: Record<CliBackend, string> = {
   pi: 'pi',
   commandcode: 'commandcode',
   grok: 'grok',
+  kimi: 'kimi',
+  antigravity: 'antigravity',
 }
 
 const YOLO_ARGS_BY_BACKEND: Partial<Record<CliBackend, string[]>> = {
@@ -63,6 +77,8 @@ const YOLO_ARGS_BY_BACKEND: Partial<Record<CliBackend, string[]>> = {
   codex: ['--dangerously-bypass-approvals-and-sandbox'],
   cursor: ['--yolo', '--sandbox', 'disabled'],
   grok: ['--always-approve', '--sandbox', 'off'],
+  kimi: ['--yolo'],
+  antigravity: ['--approval-mode', 'yolo'],
 }
 
 export function NewSessionModeModal() {
@@ -78,6 +94,8 @@ export function NewSessionModeModal() {
     enabled: target !== null,
   })
   const grokStatus = useGrokCliStatus({ enabled: target !== null })
+  const kimiStatus = useKimiCliStatus({ enabled: target !== null })
+  const antigravityStatus = useAntigravityCliStatus({ enabled: target !== null })
   const { data: preferences } = usePreferences()
   const [nativePickerKind, setNativePickerKind] =
     useState<NativeCliSessionKind | null>(null)
@@ -89,47 +107,78 @@ export function NewSessionModeModal() {
   const open = target !== null
   const isMobile = useIsMobile()
 
-  const installedBackendChoices = useMemo(
-    () =>
-      BACKEND_ORDER.map((backend, index) => {
-        const status =
-          backend === 'codex'
-            ? codexStatus
-            : backend === 'claude'
-              ? claudeStatus
-              : backend === 'opencode'
-                ? opencodeStatus
-                : backend === 'cursor'
-                  ? cursorStatus
-                  : backend === 'pi'
-                    ? piStatus
-                    : backend === 'commandcode'
-                      ? commandcodeStatus
-                      : grokStatus
-        return {
-          backend,
-          shortcut: String(index + 2),
-          installed: Boolean(status.data?.installed),
-          command: status.data?.path ?? backendCommands[backend],
-        }
-      }).filter(choice => choice.installed),
-    [
-      claudeStatus.data?.installed,
-      claudeStatus.data?.path,
-      codexStatus.data?.installed,
-      codexStatus.data?.path,
-      cursorStatus.data?.installed,
-      cursorStatus.data?.path,
-      piStatus.data?.installed,
-      piStatus.data?.path,
-      commandcodeStatus.data?.installed,
-      commandcodeStatus.data?.path,
-      grokStatus.data?.installed,
-      grokStatus.data?.path,
-      opencodeStatus.data?.installed,
-      opencodeStatus.data?.path,
-    ]
-  )
+  const installedBackendChoices = useMemo(() => {
+    const statusByBackend: Record<
+      CliBackend,
+      { installed?: boolean; path?: string | null }
+    > = {
+      codex: {
+        installed: codexStatus.data?.installed,
+        path: codexStatus.data?.path,
+      },
+      claude: {
+        installed: claudeStatus.data?.installed,
+        path: claudeStatus.data?.path,
+      },
+      opencode: {
+        installed: opencodeStatus.data?.installed,
+        path: opencodeStatus.data?.path,
+      },
+      cursor: {
+        installed: cursorStatus.data?.installed,
+        path: cursorStatus.data?.path,
+      },
+      pi: {
+        installed: piStatus.data?.installed,
+        path: piStatus.data?.path,
+      },
+      commandcode: {
+        installed: commandcodeStatus.data?.installed,
+        path: commandcodeStatus.data?.path,
+      },
+      grok: {
+        installed: grokStatus.data?.installed,
+        path: grokStatus.data?.path,
+      },
+      kimi: {
+        installed: kimiStatus.data?.installed,
+        path: kimiStatus.data?.path,
+      },
+      antigravity: {
+        installed: antigravityStatus.data?.installed,
+        path: antigravityStatus.data?.path,
+      },
+    }
+
+    return BACKEND_ORDER.map((backend, index) => {
+      const status = statusByBackend[backend]
+      return {
+        backend,
+        shortcut: String(index + 2),
+        installed: Boolean(status.installed),
+        command: status.path ?? backendCommands[backend],
+      }
+    }).filter(choice => choice.installed)
+  }, [
+    claudeStatus.data?.installed,
+    claudeStatus.data?.path,
+    codexStatus.data?.installed,
+    codexStatus.data?.path,
+    commandcodeStatus.data?.installed,
+    commandcodeStatus.data?.path,
+    cursorStatus.data?.installed,
+    cursorStatus.data?.path,
+    grokStatus.data?.installed,
+    grokStatus.data?.path,
+    kimiStatus.data?.installed,
+    kimiStatus.data?.path,
+    antigravityStatus.data?.installed,
+    antigravityStatus.data?.path,
+    opencodeStatus.data?.installed,
+    opencodeStatus.data?.path,
+    piStatus.data?.installed,
+    piStatus.data?.path,
+  ])
 
   const isCheckingBackends =
     claudeStatus.isLoading ||
@@ -137,7 +186,10 @@ export function NewSessionModeModal() {
     opencodeStatus.isLoading ||
     cursorStatus.isLoading ||
     piStatus.isLoading ||
-    commandcodeStatus.isLoading
+    commandcodeStatus.isLoading ||
+    grokStatus.isLoading ||
+    kimiStatus.isLoading
+    || antigravityStatus.isLoading
 
   const nativePickerCommand = useMemo(() => {
     if (nativePickerKind === null || nativePickerKind === 'terminal') {
@@ -173,9 +225,17 @@ export function NewSessionModeModal() {
   const chooseChat = useCallback(() => {
     if (!target) return
     const { worktreeId, worktreePath } = target
+    const backend = (preferences?.default_backend ?? 'claude') as CliBackend
+    const model = resolveDefaultModelForBackend(backend, preferences)
+    const effortLevel =
+      backend === 'codex'
+        ? (preferences?.default_codex_reasoning_effort ?? 'high')
+        : backend === 'grok'
+          ? (preferences?.default_grok_reasoning_effort ?? 'high')
+          : (preferences?.default_effort_level ?? 'high')
     close()
     createSession.mutate(
-      { worktreeId, worktreePath },
+      { worktreeId, worktreePath, backend },
       {
         onSuccess: session => {
           const defaultExecutionMode =
@@ -183,11 +243,15 @@ export function NewSessionModeModal() {
           useChatStore
             .getState()
             .setExecutionMode(session.id, defaultExecutionMode)
+          useChatStore.getState().setSelectedModel(session.id, model)
+          useChatStore.getState().setEffortLevel(session.id, effortLevel)
           invoke('update_session_state', {
             worktreeId,
             worktreePath,
             sessionId: session.id,
             selectedExecutionMode: defaultExecutionMode,
+            selectedModel: model,
+            selectedEffortLevel: effortLevel,
           }).catch(() => undefined)
           useChatStore.getState().setActiveSession(worktreeId, session.id)
           useUIStore.getState().setSessionPrimarySurface(session.id, 'chat')
@@ -251,49 +315,42 @@ export function NewSessionModeModal() {
     setNativePickerKind(defaultKind)
   }, [chooseChat, preferences?.default_new_session_kind, target])
 
+  const onNewSessionKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+      return
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      chooseChat()
+      return
+    }
+
+    if (event.key === '1') {
+      event.preventDefault()
+      event.stopPropagation()
+      choosePlainTerminal()
+      return
+    }
+
+    const choice = installedBackendChoices.find(
+      item => item.shortcut === event.key
+    )
+    if (choice) {
+      event.preventDefault()
+      event.stopPropagation()
+      chooseBackendTerminal(choice.backend)
+    }
+  })
+
   useEffect(() => {
     if (!open || nativePickerKind !== null) return
 
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
-        return
-      }
-
-      if (event.key === 'Enter') {
-        event.preventDefault()
-        event.stopPropagation()
-        chooseChat()
-        return
-      }
-
-      if (event.key === '1') {
-        event.preventDefault()
-        event.stopPropagation()
-        choosePlainTerminal()
-        return
-      }
-
-      const choice = installedBackendChoices.find(
-        item => item.shortcut === event.key
-      )
-      if (choice) {
-        event.preventDefault()
-        event.stopPropagation()
-        chooseBackendTerminal(choice.backend)
-      }
-    }
-
+    const handleKeyDown = (event: KeyboardEvent) => onNewSessionKeyDown(event)
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
-  }, [
-    chooseBackendTerminal,
-    chooseBackendTerminalYolo,
-    chooseChat,
-    choosePlainTerminal,
-    installedBackendChoices,
-    nativePickerKind,
-    open,
-  ])
+  }, [nativePickerKind, open])
 
   return (
     <>

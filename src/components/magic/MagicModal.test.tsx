@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => {
   return {
     setMagicModalOpen: vi.fn(),
     selectWorktree: vi.fn(),
+    setActiveWorktree: vi.fn(),
+    setPendingMagicCommand: vi.fn(),
     invokeMock: vi.fn(),
     invalidateQueries: vi.fn(),
     triggerImmediateGitPoll: vi.fn(),
@@ -30,9 +32,15 @@ const mocks = vi.hoisted(() => {
     setLastSentMessage: vi.fn(),
     setError: vi.fn(),
     clearInputDraft: vi.fn(),
+    setEnabledMcpServers: vi.fn(),
     toastSuccess: vi.fn(),
     toastError: vi.fn(),
+    toastLoading: vi.fn(() => 'toast-1'),
+    startCommitJob: vi.fn(),
+    gitPush: vi.fn(),
     openExternal: vi.fn(),
+    activeWorktreePath: null as string | null,
+    worktreePaths: {} as Record<string, string>,
     worktree,
   }
 })
@@ -80,6 +88,8 @@ vi.mock('@/store/ui-store', () => ({
         setReviewCommentsModalOpen: vi.fn(),
         setReleaseNotesModalOpen: vi.fn(),
         setLinkedProjectsModalOpen: vi.fn(),
+        gitDiffSelectedFiles: new Set<string>(),
+        clearGitDiffSelectedFiles: vi.fn(),
       }),
     }
   ),
@@ -99,24 +109,28 @@ vi.mock('@/store/projects-store', () => ({
 }))
 
 vi.mock('@/store/chat-store', () => ({
+  DEFAULT_MODEL: 'claude-opus-4-8[1m]',
   useChatStore: Object.assign(
     (selector?: (state: ChatState) => unknown) => {
       const state: ChatState = {
         activeWorktreeId: null,
-        activeWorktreePath: null,
+        activeWorktreePath: mocks.activeWorktreePath,
         activeSessionIds: {},
       }
       return selector ? selector(state) : state
     },
     {
       getState: () => ({
-        activeWorktreePath: null,
+        activeWorktreePath: mocks.activeWorktreePath,
         activeSessionIds: {},
+        worktreePaths: mocks.worktreePaths as Record<string, string>,
         setWorktreeLoading: vi.fn(),
         clearWorktreeLoading: vi.fn(),
-        setActiveWorktree: vi.fn(),
-        setPendingMagicCommand: vi.fn(),
+        setActiveWorktree: mocks.setActiveWorktree,
+        setPendingMagicCommand: mocks.setPendingMagicCommand,
         registerWorktreePath: mocks.registerWorktreePath,
+        getWorktreePath: (worktreeId: string) =>
+          mocks.worktreePaths[worktreeId],
         setActiveSession: mocks.setActiveSession,
         setSelectedBackend: mocks.setSelectedBackend,
         setSelectedModel: mocks.setSelectedModel,
@@ -126,6 +140,7 @@ vi.mock('@/store/chat-store', () => ({
         setLastSentMessage: mocks.setLastSentMessage,
         setError: mocks.setError,
         clearInputDraft: mocks.clearInputDraft,
+        setEnabledMcpServers: mocks.setEnabledMcpServers,
         copySessionSettings: vi.fn(),
       }),
     }
@@ -155,6 +170,8 @@ vi.mock('@/services/projects', () => ({
       worktreePath,
       prNumber,
     }),
+  clearWorktreePr: (worktreeId: string) =>
+    mocks.invokeMock('clear_worktree_pr', { worktreeId }),
   projectsQueryKeys: {
     worktrees: (projectId: string) => ['projects', projectId, 'worktrees'],
     all: ['projects'],
@@ -171,9 +188,20 @@ vi.mock('@/services/preferences', () => ({
   usePreferences: () => ({
     data: {
       default_backend: 'claude',
+      selected_model: 'claude-opus-4-8[1m]',
       selected_codex_model: 'gpt-5.5',
-      magic_prompt_backends: { resolve_conflicts_backend: 'codex' },
-      magic_prompts: { resolve_conflicts: 'Resolve and finish.' },
+      magic_prompt_models: {
+      },
+      magic_prompt_efforts: {
+      },
+      magic_prompt_modes: {
+      },
+      magic_prompts: {
+        resolve_conflicts: 'Resolve and finish.',
+      },
+      magic_prompt_backends: {
+        resolve_conflicts_backend: 'codex',
+      },
     },
   }),
 }))
@@ -187,14 +215,20 @@ vi.mock('@/hooks/useInstalledBackends', () => ({
 }))
 
 vi.mock('@/hooks/useRemotePicker', () => ({
-  useRemotePicker: () => vi.fn(),
+  useRemotePicker: () =>
+    vi.fn((action: (remote: string) => void) => action('origin')),
 }))
 
 vi.mock('@/services/git-status', () => ({
   triggerImmediateGitPoll: mocks.triggerImmediateGitPoll,
   fetchWorktreesStatus: mocks.fetchWorktreesStatus,
-  gitPush: vi.fn(),
+  gitPush: mocks.gitPush,
   performGitPull: vi.fn(),
+  performGitSync: vi.fn(),
+}))
+
+vi.mock('@/services/commit-jobs', () => ({
+  startCommitJob: mocks.startCommitJob,
 }))
 
 vi.mock('@/lib/transport', () => ({ invoke: mocks.invokeMock }))
@@ -203,6 +237,8 @@ vi.mock('@/lib/platform', () => ({
   isMacOS: false,
   isWindows: false,
   isLinux: true,
+  getServerPlatform: vi.fn(() => 'linux'),
+  isServerWindows: vi.fn(() => false),
 }))
 vi.mock('@tanstack/react-query', async importOriginal => ({
   ...(await importOriginal()),
@@ -215,7 +251,7 @@ vi.mock('sonner', () => ({
   toast: {
     success: mocks.toastSuccess,
     error: mocks.toastError,
-    loading: vi.fn(() => 'toast-1'),
+    loading: mocks.toastLoading,
     info: vi.fn(),
     warning: vi.fn(),
   },
@@ -230,6 +266,7 @@ describe('MagicModal manual PR link', () => {
     vi.clearAllMocks()
     mocks.worktree.pr_number = null
     mocks.worktree.pr_url = null
+    mocks.activeWorktreePath = null
     mocks.invokeMock.mockImplementation((command: string) => {
       if (command === 'detect_and_link_pr') return Promise.resolve(null)
       if (command === 'link_worktree_pr') {
@@ -316,6 +353,27 @@ describe('MagicModal manual PR link', () => {
       'Linked PR #123: Fix bug',
       expect.any(Object)
     )
+  })
+
+  it('shows an unlink action for a linked PR and clears the link', async () => {
+    const user = userEvent.setup()
+    mocks.worktree.pr_number = 9822
+    mocks.worktree.pr_url = 'https://github.com/o/r/pull/9822'
+
+    render(<MagicModal />)
+
+    await user.click(screen.getByRole('button', { name: /link pr/i }))
+    await user.click(screen.getByRole('button', { name: /unlink pr/i }))
+
+    await waitFor(() => {
+      expect(mocks.invokeMock).toHaveBeenCalledWith('clear_worktree_pr', {
+        worktreeId: 'wt-1',
+      })
+    })
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ['projects', 'project-1', 'worktrees'],
+    })
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('Unlinked PR #9822')
   })
 
   it('sends resolve conflicts immediately in yolo from the direct canvas dialog', async () => {
@@ -528,6 +586,95 @@ describe('MagicModal manual PR link', () => {
     render(<MagicModal />)
 
     expect(screen.queryByRole('button', { name: /release post/i })).toBeNull()
+  })
+
+  it('shows the fork session magic command', () => {
+    render(<MagicModal />)
+
+    expect(
+      screen.getByRole('button', { name: /fork session/i })
+    ).toBeInTheDocument()
+  })
+
+  it('shows the inject session magic command', () => {
+    render(<MagicModal />)
+
+    expect(
+      screen.getByRole('button', { name: /inject session/i })
+    ).toBeInTheDocument()
+  })
+
+  it('shows the smoke test magic command', () => {
+    render(<MagicModal />)
+
+    expect(
+      screen.getByRole('button', { name: /smoke test/i })
+    ).toBeInTheDocument()
+  })
+
+  it('allows smoke test from the worktree canvas without an existing session', async () => {
+    const user = userEvent.setup()
+    render(<MagicModal />)
+
+    const smokeTest = screen.getByRole('button', { name: /smoke test/i })
+    expect(smokeTest).toBeEnabled()
+    await user.click(smokeTest)
+
+    expect(mocks.setActiveWorktree).toHaveBeenCalledWith(
+      'wt-1',
+      '/repo/worktree'
+    )
+    expect(mocks.setPendingMagicCommand).toHaveBeenCalledWith({
+      command: 'smoke-test',
+    })
+  })
+
+  it('starts commit and push actions directly with loading notifications when chat is active', async () => {
+    const user = userEvent.setup()
+    mocks.activeWorktreePath = '/repo/worktree'
+    mocks.startCommitJob.mockResolvedValue({})
+    mocks.gitPush.mockResolvedValue({ fellBack: false })
+
+    const { rerender } = render(<MagicModal />)
+
+    await user.click(screen.getByRole('button', { name: /^commit c$/i }))
+
+    expect(mocks.toastLoading).toHaveBeenCalledWith(
+      'Creating commit on feature-branch...',
+      expect.any(Object)
+    )
+    expect(mocks.startCommitJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        worktreePath: '/repo/worktree',
+        push: false,
+      }),
+      expect.any(Function)
+    )
+
+    rerender(<MagicModal />)
+    await user.click(screen.getByRole('button', { name: /^push u$/i }))
+
+    expect(mocks.toastLoading).toHaveBeenCalledWith(
+      'Pushing feature-branch...',
+      expect.any(Object)
+    )
+    expect(mocks.gitPush).toHaveBeenCalledWith('/repo/worktree', null, 'origin')
+
+    rerender(<MagicModal />)
+    await user.click(screen.getByRole('button', { name: /^commit & push p$/i }))
+
+    expect(mocks.toastLoading).toHaveBeenCalledWith(
+      'Committing and pushing on feature-branch...',
+      expect.any(Object)
+    )
+    expect(mocks.startCommitJob).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        worktreePath: '/repo/worktree',
+        push: true,
+        remote: 'origin',
+      }),
+      expect.any(Function)
+    )
   })
 
   it('reverts the last commit only after confirmation', async () => {

@@ -8,6 +8,7 @@ import { chatQueryKeys } from '@/services/chat'
 import { projectsQueryKeys } from '@/services/projects'
 import { buildMcpConfigJson } from '@/services/mcp'
 import { resolveBackend, supportsAdaptiveThinking } from '@/lib/model-utils'
+import { applyYoloInvestigationFixDirective } from '@/lib/investigation-prompt'
 import {
   DEFAULT_INVESTIGATE_ISSUE_PROMPT,
   DEFAULT_INVESTIGATE_PR_PROMPT,
@@ -15,8 +16,10 @@ import {
   DEFAULT_INVESTIGATE_ADVISORY_PROMPT,
   DEFAULT_INVESTIGATE_WORKFLOW_RUN_PROMPT,
   DEFAULT_INVESTIGATE_LINEAR_ISSUE_PROMPT,
+  DEFAULT_INVESTIGATE_SENTRY_ISSUE_PROMPT,
   DEFAULT_PARALLEL_EXECUTION_PROMPT,
   DEFAULT_MAGIC_PROMPT_MODES,
+  DEFAULT_SMOKE_TEST_PROMPT,
   resolveMagicPromptBackend,
   resolveMagicPromptProvider,
 } from '@/types/preferences'
@@ -153,7 +156,13 @@ export function useInvestigateHandlers({
 
   const handleInvestigate = useCallback(
     async (
-      type: 'issue' | 'pr' | 'security-alert' | 'advisory' | 'linear-issue',
+      type:
+        | 'issue'
+        | 'pr'
+        | 'security-alert'
+        | 'advisory'
+        | 'linear-issue'
+        | 'sentry-issue',
       override?: InvestigateOverride
     ) => {
       if (!activeSessionId || !activeWorktreeId || !activeWorktreePath) return
@@ -167,7 +176,9 @@ export function useInvestigateHandlers({
               ? 'investigate_security_alert_model'
               : type === 'linear-issue'
                 ? 'investigate_linear_issue_model'
-                : ('investigate_advisory_model' as const)
+                : type === 'sentry-issue'
+                  ? 'investigate_sentry_issue_model'
+                  : ('investigate_advisory_model' as const)
       const providerKey =
         type === 'issue'
           ? 'investigate_issue_provider'
@@ -177,7 +188,9 @@ export function useInvestigateHandlers({
               ? 'investigate_security_alert_provider'
               : type === 'linear-issue'
                 ? 'investigate_linear_issue_provider'
-                : ('investigate_advisory_provider' as const)
+                : type === 'sentry-issue'
+                  ? 'investigate_sentry_issue_provider'
+                  : ('investigate_advisory_provider' as const)
       const backendKey =
         type === 'issue'
           ? 'investigate_issue_backend'
@@ -187,7 +200,9 @@ export function useInvestigateHandlers({
               ? 'investigate_security_alert_backend'
               : type === 'linear-issue'
                 ? 'investigate_linear_issue_backend'
-                : ('investigate_advisory_backend' as const)
+                : type === 'sentry-issue'
+                  ? 'investigate_sentry_issue_backend'
+                  : ('investigate_advisory_backend' as const)
       const modeKey =
         type === 'issue'
           ? 'investigate_issue_mode'
@@ -197,7 +212,21 @@ export function useInvestigateHandlers({
               ? 'investigate_security_alert_mode'
               : type === 'linear-issue'
                 ? 'investigate_linear_issue_mode'
-                : ('investigate_advisory_mode' as const)
+                : type === 'sentry-issue'
+                  ? 'investigate_sentry_issue_mode'
+                  : ('investigate_advisory_mode' as const)
+      const effortKey =
+        type === 'issue'
+          ? 'investigate_issue_effort'
+          : type === 'pr'
+            ? 'investigate_pr_effort'
+            : type === 'security-alert'
+              ? 'investigate_security_alert_effort'
+              : type === 'linear-issue'
+                ? 'investigate_linear_issue_effort'
+                : type === 'sentry-issue'
+                  ? 'investigate_sentry_issue_effort'
+                  : ('investigate_advisory_effort' as const)
       const investigateMode =
         preferences?.magic_prompt_modes?.[modeKey] ??
         DEFAULT_MAGIC_PROMPT_MODES[modeKey]
@@ -340,6 +369,39 @@ export function useInvestigateHandlers({
           .replace(/\{linearWord\}/g, word)
           .replace(/\{linearRefs\}/g, refs)
           .replace(/\{linearContext\}/g, linearContext)
+      } else if (type === 'sentry-issue') {
+        const contexts = await invoke<
+          {
+            id: string
+            shortId: string
+            title: string
+            permalink: string
+            content: string
+          }[]
+        >('get_sentry_issue_context_contents', {
+          sessionId: activeSessionId ?? activeWorktreeId,
+          worktreeId: activeWorktreeId,
+          projectId: worktreeProjectId ?? '',
+        })
+        if (contexts.length === 0) {
+          toast.error('No Sentry issue context loaded for this worktree')
+          return
+        }
+        const refs = contexts.map(context => context.shortId).join(', ')
+        const word = contexts.length === 1 ? 'issue' : 'issues'
+        const content = contexts
+          .map(context => context.content)
+          .join('\n\n---\n\n')
+        const customPrompt =
+          preferences?.magic_prompts?.investigate_sentry_issue
+        const template =
+          customPrompt && customPrompt.trim()
+            ? customPrompt
+            : DEFAULT_INVESTIGATE_SENTRY_ISSUE_PROMPT
+        prompt = template
+          .replace(/\{sentryWord\}/g, word)
+          .replace(/\{sentryRefs\}/g, refs)
+          .replace(/\{sentryContext\}/g, content)
       } else {
         const contexts = await queryClient.fetchQuery({
           queryKey: ['investigate-contexts', 'advisory', activeWorktreeId],
@@ -363,6 +425,10 @@ export function useInvestigateHandlers({
           .replace(/\{advisoryWord\}/g, word)
           .replace(/\{advisoryRefs\}/g, refs)
       }
+
+      // When magic-prompt mode is yolo, append an unconditional fix directive
+      // and strip any anti-fix wording from the template/custom prompt.
+      prompt = applyYoloInvestigationFixDirective(prompt, investigateMode)
 
       const {
         addSendingSession,
@@ -403,6 +469,27 @@ export function useInvestigateHandlers({
         ) ??
         resolveBackend(investigateModel)
 
+      // Prefer Magic Prompt effort override; fall back to session effort only for
+      // Claude adaptive thinking. Effort-based backends (Grok/Codex/Pi/OpenCode)
+      // must not inherit Claude thinking levels like "think".
+      const investigateEffort =
+        (preferences?.magic_prompt_efforts?.[effortKey] as
+          | EffortLevel
+          | null
+          | undefined) ??
+        (investigateUseAdaptive ? selectedEffortLevelRef.current : undefined)
+      const usesEffortBackend =
+        investigateBackend === 'codex' ||
+        investigateBackend === 'opencode' ||
+        investigateBackend === 'pi' ||
+        investigateBackend === 'grok' ||
+        investigateBackend === 'kimi' ||
+        investigateBackend === 'antigravity' ||
+        investigateUseAdaptive
+      const investigateThinkingLevel = usesEffortBackend
+        ? undefined
+        : selectedThinkingLevelRef.current
+
       setSessionBackend.mutate({
         sessionId: activeSessionId,
         worktreeId: activeWorktreeId,
@@ -420,9 +507,13 @@ export function useInvestigateHandlers({
         const {
           setSelectedBackend: setZustandBackend,
           setSelectedModel: setZustandModel,
+          setEffortLevel,
         } = useChatStore.getState()
         setZustandBackend(activeSessionId, investigateBackend)
         setZustandModel(activeSessionId, investigateModel)
+        if (investigateEffort) {
+          setEffortLevel(activeSessionId, investigateEffort)
+        }
       }
       primeSessionSelection(
         activeSessionId,
@@ -439,10 +530,8 @@ export function useInvestigateHandlers({
           message: prompt,
           model: investigateModel,
           executionMode: investigateMode,
-          thinkingLevel: selectedThinkingLevelRef.current,
-          effortLevel: investigateUseAdaptive
-            ? selectedEffortLevelRef.current
-            : undefined,
+          thinkingLevel: investigateThinkingLevel,
+          effortLevel: investigateEffort,
           mcpConfig: buildMcpConfigJson(
             mcpServersDataRef.current ?? [],
             enabledMcpServersRef.current,
@@ -472,6 +561,7 @@ export function useInvestigateHandlers({
       preferences?.magic_prompts?.investigate_security_alert,
       preferences?.magic_prompts?.investigate_advisory,
       preferences?.magic_prompts?.investigate_linear_issue,
+      preferences?.magic_prompts?.investigate_sentry_issue,
       preferences?.default_provider,
       preferences?.parallel_execution_prompt_enabled,
       preferences?.magic_prompts?.parallel_execution,
@@ -479,6 +569,7 @@ export function useInvestigateHandlers({
       preferences?.magic_prompt_providers,
       preferences?.magic_prompt_backends,
       preferences?.magic_prompt_modes,
+      preferences?.magic_prompt_efforts,
       preferences?.chrome_enabled,
       preferences?.ai_language,
       setSessionProvider,
@@ -507,19 +598,21 @@ export function useInvestigateHandlers({
           ? customPrompt
           : DEFAULT_INVESTIGATE_WORKFLOW_RUN_PROMPT
 
-      const prompt = template
-        .replace(/\{workflowName\}/g, detail.workflowName)
-        .replace(/\{runUrl\}/g, detail.runUrl)
-        .replace(/\{runId\}/g, detail.runId)
-        .replace(/\{branch\}/g, detail.branch)
-        .replace(/\{displayTitle\}/g, detail.displayTitle)
-
       const investigateModel =
         preferences?.magic_prompt_models?.investigate_workflow_run_model ??
         selectedModelRef.current
       const investigateMode =
         preferences?.magic_prompt_modes?.investigate_workflow_run_mode ??
         DEFAULT_MAGIC_PROMPT_MODES.investigate_workflow_run_mode
+      const prompt = applyYoloInvestigationFixDirective(
+        template
+          .replace(/\{workflowName\}/g, detail.workflowName)
+          .replace(/\{runUrl\}/g, detail.runUrl)
+          .replace(/\{runId\}/g, detail.runId)
+          .replace(/\{branch\}/g, detail.branch)
+          .replace(/\{displayTitle\}/g, detail.displayTitle),
+        investigateMode
+      )
       const investigateProvider = resolveMagicPromptProvider(
         preferences?.magic_prompt_providers,
         'investigate_workflow_run_provider',
@@ -632,6 +725,26 @@ export function useInvestigateHandlers({
           projectForBackend?.default_backend ?? defaultBackend
         ) ?? resolveBackend(investigateModel)
 
+      // Prefer Magic Prompt effort override (e.g. Medium for Grok). Never fall
+      // through to Claude thinking levels for effort-based backends.
+      const investigateEffort =
+        (preferences?.magic_prompt_efforts?.investigate_workflow_run_effort as
+          | EffortLevel
+          | null
+          | undefined) ??
+        (investigateUseAdaptive ? selectedEffortLevelRef.current : undefined)
+      const usesEffortBackend =
+        investigateBackend === 'codex' ||
+        investigateBackend === 'opencode' ||
+        investigateBackend === 'pi' ||
+        investigateBackend === 'grok' ||
+        investigateBackend === 'kimi' ||
+        investigateBackend === 'antigravity' ||
+        investigateUseAdaptive
+      const investigateThinkingLevel = usesEffortBackend
+        ? undefined
+        : selectedThinkingLevelRef.current
+
       const sendInvestigateMessage = (targetSessionId: string) => {
         const {
           addSendingSession,
@@ -640,6 +753,7 @@ export function useInvestigateHandlers({
           setSelectedModel,
           setSelectedProvider,
           setExecutingMode,
+          setEffortLevel,
         } = useChatStore.getState()
 
         setLastSentMessage(targetSessionId, prompt)
@@ -648,6 +762,9 @@ export function useInvestigateHandlers({
         setSelectedModel(targetSessionId, investigateModel)
         setSelectedProvider(targetSessionId, investigateProvider)
         setExecutingMode(targetSessionId, investigateMode)
+        if (investigateEffort) {
+          setEffortLevel(targetSessionId, investigateEffort)
+        }
 
         setSessionBackend.mutate({
           sessionId: targetSessionId,
@@ -690,10 +807,8 @@ export function useInvestigateHandlers({
             message: prompt,
             model: investigateModel,
             executionMode: investigateMode,
-            thinkingLevel: selectedThinkingLevelRef.current,
-            effortLevel: investigateUseAdaptive
-              ? selectedEffortLevelRef.current
-              : undefined,
+            thinkingLevel: investigateThinkingLevel,
+            effortLevel: investigateEffort,
             mcpConfig: buildMcpConfigJson(
               mcpServersDataRef.current ?? [],
               enabledMcpServersRef.current,
@@ -766,6 +881,7 @@ export function useInvestigateHandlers({
       preferences?.magic_prompt_providers,
       preferences?.magic_prompt_backends,
       preferences?.magic_prompt_modes,
+      preferences?.magic_prompt_efforts,
       preferences?.chrome_enabled,
       preferences?.ai_language,
       setSessionProvider,
@@ -928,10 +1044,10 @@ export function useInvestigateHandlers({
         )
       }
 
-      // Create one session per selected review comment prompt. Use mutateAsync
-      // instead of repeated mutate(..., { onSuccess }) calls because TanStack
-      // Query only guarantees per-call callbacks for the latest consecutive
-      // mutate observer, which can leave earlier/later sessions empty.
+      // Sequential on purpose: each session must fully create + send before
+      // the next. TanStack Query only guarantees per-call callbacks for the
+      // latest consecutive mutate observer; parallel createSession races
+      // leave earlier sessions empty. Do not Promise.all.
       const baseSessionId = useChatStore.getState().activeSessionIds[worktreeId]
       for (const prompt of prompts) {
         let session: Session
@@ -1004,9 +1120,133 @@ export function useInvestigateHandlers({
     ]
   )
 
+  const handleSmokeTest = useCallback(async () => {
+    const worktreeId = activeWorktreeIdRef.current
+    const worktreePath = activeWorktreePathRef.current
+    if (!worktreeId || !worktreePath) return
+
+    let session: Session
+    try {
+      session = await createSession.mutateAsync({ worktreeId, worktreePath })
+    } catch (error) {
+      console.error('[SMOKE-TEST] Failed to create session:', error)
+      toast.error(`Failed to create smoke test session: ${error}`)
+      return
+    }
+    const sessionId = session.id
+
+    const promptTemplate =
+      preferences?.magic_prompts?.smoke_test?.trim() ||
+      DEFAULT_SMOKE_TEST_PROMPT
+    const prompt = promptTemplate.replaceAll('{worktree_id}', worktreeId)
+    const model =
+      preferences?.magic_prompt_models?.smoke_test_model ??
+      selectedModelRef.current
+    const provider = resolveMagicPromptProvider(
+      preferences?.magic_prompt_providers,
+      'smoke_test_provider',
+      preferences?.default_provider
+    )
+    const backend =
+      resolveMagicPromptBackend(
+        preferences?.magic_prompt_backends,
+        'smoke_test_backend',
+        defaultBackend
+      ) ?? resolveBackend(model)
+    const mode =
+      preferences?.magic_prompt_modes?.smoke_test_mode ??
+      DEFAULT_MAGIC_PROMPT_MODES.smoke_test_mode
+    const effort = preferences?.magic_prompt_efforts?.smoke_test_effort as
+      | EffortLevel
+      | null
+      | undefined
+    const { customProfileName } = resolveCustomProfile(model, provider)
+    const store = useChatStore.getState()
+
+    if (activeSessionId) {
+      store.copySessionSettings(activeSessionId, sessionId)
+    }
+    store.setActiveSession(worktreeId, sessionId)
+
+    store.setLastSentMessage(sessionId, prompt)
+    store.setError(sessionId, null)
+    store.addSendingSession(sessionId)
+    store.setSelectedBackend(sessionId, backend)
+    store.setSelectedModel(sessionId, model)
+    store.setSelectedProvider(sessionId, provider)
+    store.setExecutionMode(sessionId, mode)
+    store.setExecutingMode(sessionId, mode)
+    if (effort) store.setEffortLevel(sessionId, effort)
+
+    setSessionBackend.mutate({
+      sessionId,
+      worktreeId,
+      worktreePath,
+      backend,
+    })
+    setSessionModel.mutate({ sessionId, worktreeId, worktreePath, model })
+    setSessionProvider.mutate({
+      sessionId,
+      worktreeId,
+      worktreePath,
+      provider,
+    })
+    primeSessionSelection(sessionId, backend, model, provider)
+    queryClient.invalidateQueries({
+      queryKey: chatQueryKeys.sessions(worktreeId),
+    })
+
+    sendMessage.mutate(
+      {
+        sessionId,
+        worktreeId,
+        worktreePath,
+        message: prompt,
+        model,
+        executionMode: mode,
+        thinkingLevel: effort ? undefined : selectedThinkingLevelRef.current,
+        effortLevel: effort ?? undefined,
+        mcpConfig: buildMcpConfigJson(
+          mcpServersDataRef.current ?? [],
+          enabledMcpServersRef.current,
+          backend
+        ),
+        customProfileName,
+        parallelExecutionPrompt: preferences?.parallel_execution_prompt_enabled
+          ? (preferences.magic_prompts?.parallel_execution ??
+            DEFAULT_PARALLEL_EXECUTION_PROMPT)
+          : undefined,
+        chromeEnabled: preferences?.chrome_enabled ?? false,
+        aiLanguage: preferences?.ai_language,
+        backend,
+      },
+      { onSettled: () => inputRef.current?.focus() }
+    )
+  }, [
+    activeSessionId,
+    activeWorktreeIdRef,
+    activeWorktreePathRef,
+    defaultBackend,
+    createSession,
+    enabledMcpServersRef,
+    inputRef,
+    mcpServersDataRef,
+    preferences,
+    primeSessionSelection,
+    queryClient,
+    resolveCustomProfile,
+    selectedModelRef,
+    selectedThinkingLevelRef,
+    sendMessage,
+    setSessionBackend,
+    setSessionModel,
+    setSessionProvider,
+  ])
+
   return {
     handleInvestigate,
     handleInvestigateWorkflowRun,
     handleReviewComments,
+    handleSmokeTest,
   }
 }

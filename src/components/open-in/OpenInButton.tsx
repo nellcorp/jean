@@ -25,10 +25,14 @@ import {
   useOpenWorktreeInTerminal,
   useOpenWorktreeInFinder,
   useOpenBranchOnGitHub,
+  useWebEditorUrl,
 } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { getOpenInDefaultLabel } from '@/types/preferences'
-import { isNativeApp } from '@/lib/environment'
+import {
+  canOpenInEditor,
+  canOpenNativeApps,
+} from '@/lib/environment'
 import { useUIStore } from '@/store/ui-store'
 
 interface OpenInButtonProps {
@@ -48,6 +52,12 @@ export function OpenInButton({
   const openInTerminal = useOpenWorktreeInTerminal()
   const openInFinder = useOpenWorktreeInFinder()
   const openOnGitHub = useOpenBranchOnGitHub()
+
+  const canNative = canOpenNativeApps()
+  const canEditor = canOpenInEditor()
+  // In a browser (web access / remote client), the browser-based editor is
+  // always reachable via a `/code` URL — independent of native-open capability.
+  const canWebEditor = useWebEditorUrl() !== null
 
   const openAction = useCallback(
     (target: string) => {
@@ -82,16 +92,34 @@ export function OpenInButton({
     ]
   )
 
+  // Prefer the user's default when that target is available on this host.
+  const preferred = preferences?.open_in ?? 'editor'
+  const effectiveDefault =
+    preferred === 'editor' && canEditor
+      ? 'editor'
+      : (preferred === 'terminal' || preferred === 'finder') && canNative
+        ? preferred
+        : preferred === 'github' && branch
+          ? 'github'
+          : canEditor
+            ? 'editor'
+            : branch
+              ? 'github'
+              : 'editor'
+
   const defaultLabel = getOpenInDefaultLabel(
-    preferences?.open_in ?? 'editor',
+    effectiveDefault,
     preferences?.editor,
     preferences?.terminal
   )
 
-  // In web mode, render a simplified single-purpose button: "Open Editor"
-  // that launches the browser-based editor (openvscode-server). The native
-  // split-button shows Finder/Terminal/GitHub options that don't apply.
-  if (!isNativeApp()) {
+  if (!canEditor && !canNative && !canWebEditor) return null
+
+  // In web/remote mode (no native app launching), render a simplified
+  // single-purpose "Open Editor" button that launches the browser-based
+  // editor. The native split-button below shows Finder/Terminal/GitHub
+  // options that don't apply.
+  if (canWebEditor && !canNative) {
     if (!branch && !worktreePath) return null
     return (
       <Tooltip>
@@ -119,7 +147,7 @@ export function OpenInButton({
           <Button
             variant="ghost"
             className="h-7 rounded-r-none border-0 px-2.5 text-xs text-muted-foreground hover:text-foreground"
-            onClick={() => openAction(preferences?.open_in ?? 'editor')}
+            onClick={() => openAction(effectiveDefault)}
           >
             Open in {defaultLabel}
           </Button>
@@ -138,26 +166,32 @@ export function OpenInButton({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={() => openAction('editor')}>
-            <Code className="h-4 w-4" />
-            {getOpenInDefaultLabel(
-              'editor',
-              preferences?.editor,
-              preferences?.terminal
-            )}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openAction('terminal')}>
-            <Terminal className="h-4 w-4" />
-            {getOpenInDefaultLabel(
-              'terminal',
-              preferences?.editor,
-              preferences?.terminal
-            )}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openAction('finder')}>
-            <FolderOpen className="h-4 w-4" />
-            Finder
-          </DropdownMenuItem>
+          {canEditor && (
+            <DropdownMenuItem onSelect={() => openAction('editor')}>
+              <Code className="h-4 w-4" />
+              {getOpenInDefaultLabel(
+                'editor',
+                preferences?.editor,
+                preferences?.terminal
+              )}
+            </DropdownMenuItem>
+          )}
+          {canNative && (
+            <DropdownMenuItem onSelect={() => openAction('terminal')}>
+              <Terminal className="h-4 w-4" />
+              {getOpenInDefaultLabel(
+                'terminal',
+                preferences?.editor,
+                preferences?.terminal
+              )}
+            </DropdownMenuItem>
+          )}
+          {canNative && (
+            <DropdownMenuItem onSelect={() => openAction('finder')}>
+              <FolderOpen className="h-4 w-4" />
+              Finder
+            </DropdownMenuItem>
+          )}
           {branch && (
             <DropdownMenuItem onSelect={() => openAction('github')}>
               <Github className="h-4 w-4" />

@@ -5,6 +5,7 @@ import { ReviewCommentsDialog } from './ReviewCommentsDialog'
 
 const mocks = vi.hoisted(() => {
   let reviewCommentsModalOpen = true
+  let reviewCommentsMode: 'plan' | 'yolo' = 'yolo'
 
   return {
     getReviewCommentsModalOpen: () => reviewCommentsModalOpen,
@@ -14,6 +15,10 @@ const mocks = vi.hoisted(() => {
     resetReviewCommentsModalOpen: (open = true) => {
       reviewCommentsModalOpen = open
     },
+    setReviewCommentsMode: (mode: 'plan' | 'yolo') => {
+      reviewCommentsMode = mode
+    },
+    getReviewCommentsMode: () => reviewCommentsMode,
     setPendingMagicCommand: vi.fn(),
     invokeMock: vi.fn(),
   }
@@ -56,7 +61,13 @@ vi.mock('@/services/projects', () => ({
 }))
 
 vi.mock('@/services/preferences', () => ({
-  usePreferences: () => ({ data: {} }),
+  usePreferences: () => ({
+    data: {
+      magic_prompt_modes: {
+        review_comments_mode: mocks.getReviewCommentsMode(),
+      },
+    },
+  }),
 }))
 
 vi.mock('@/lib/transport', () => ({ invoke: mocks.invokeMock }))
@@ -69,6 +80,8 @@ const inlineComments = [
     diffHunk: '@@ -1 +1 @@',
     createdAt: '2026-05-25T10:00:00Z',
     author: { login: 'reviewer' },
+    isOutdated: false,
+    isResolved: false,
   },
   {
     path: 'src/other.ts',
@@ -77,6 +90,28 @@ const inlineComments = [
     diffHunk: '@@ -2 +2 @@',
     createdAt: '2026-05-24T10:00:00Z',
     author: { login: 'second-reviewer' },
+    isOutdated: false,
+    isResolved: false,
+  },
+  {
+    path: 'src/resolved.ts',
+    line: 5,
+    body: 'Already fixed finding',
+    diffHunk: '@@ -3 +3 @@',
+    createdAt: '2026-05-23T10:00:00Z',
+    author: { login: 'bot' },
+    isOutdated: false,
+    isResolved: true,
+  },
+  {
+    path: 'src/outdated.ts',
+    line: 8,
+    body: 'Line moved away',
+    diffHunk: '@@ -4 +4 @@',
+    createdAt: '2026-05-22T10:00:00Z',
+    author: { login: 'bot' },
+    isOutdated: true,
+    isResolved: false,
   },
 ]
 
@@ -84,6 +119,7 @@ describe('ReviewCommentsDialog', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.resetReviewCommentsModalOpen()
+    mocks.setReviewCommentsMode('yolo')
     mocks.invokeMock.mockImplementation(
       (command: string, _args: Record<string, unknown>) => {
         if (command === 'get_pr_review_comments') {
@@ -169,7 +205,7 @@ describe('ReviewCommentsDialog', () => {
     expect(secondRow).toHaveAttribute('data-active', 'false')
   })
 
-  it('uses cmd+enter to send selected comments to chat', async () => {
+  it('uses cmd+enter to send selected comments separately', async () => {
     const user = userEvent.setup()
     const magicCommand = vi.fn()
     window.addEventListener('magic-command', magicCommand)
@@ -179,6 +215,59 @@ describe('ReviewCommentsDialog', () => {
       await screen.findByRole('button', { name: /send to chat/i })
 
       await user.keyboard('{Meta>}{Enter}{/Meta}')
+
+      await waitFor(() => {
+        expect(magicCommand).toHaveBeenCalledTimes(1)
+      })
+      const detail = (magicCommand.mock.calls[0]?.[0] as CustomEvent).detail
+      expect(detail).toMatchObject({
+        command: 'review-comments',
+        executionMode: 'yolo',
+      })
+      expect(detail.prompts).toHaveLength(2)
+      expect(detail.prompts[0]).toContain('Please fix this')
+      expect(detail.prompts[1]).toContain('Second comment body')
+      expect(detail.prompt).toBeUndefined()
+    } finally {
+      window.removeEventListener('magic-command', magicCommand)
+    }
+  })
+
+  it('uses the configured review comments execution mode', async () => {
+    const user = userEvent.setup()
+    const magicCommand = vi.fn()
+    window.addEventListener('magic-command', magicCommand)
+    mocks.setReviewCommentsMode('plan')
+
+    try {
+      render(<ReviewCommentsDialog />)
+      await screen.findByRole('button', { name: /send to chat/i })
+
+      await user.keyboard('{Meta>}{Enter}{/Meta}')
+
+      await waitFor(() => {
+        expect(magicCommand).toHaveBeenCalledTimes(1)
+      })
+      const detail = (magicCommand.mock.calls[0]?.[0] as CustomEvent).detail
+      expect(detail).toMatchObject({
+        command: 'review-comments',
+        executionMode: 'plan',
+      })
+    } finally {
+      window.removeEventListener('magic-command', magicCommand)
+    }
+  })
+
+  it('uses shift+cmd+enter to send selected comments to chat', async () => {
+    const user = userEvent.setup()
+    const magicCommand = vi.fn()
+    window.addEventListener('magic-command', magicCommand)
+
+    try {
+      render(<ReviewCommentsDialog />)
+      await screen.findByRole('button', { name: /send separately/i })
+
+      await user.keyboard('{Shift>}{Meta>}{Enter}{/Meta}{/Shift}')
 
       await waitFor(() => {
         expect(magicCommand).toHaveBeenCalledTimes(1)
@@ -199,38 +288,17 @@ describe('ReviewCommentsDialog', () => {
     }
   })
 
-  it('uses shift+cmd+enter to send selected comments separately', async () => {
-    const user = userEvent.setup()
-    const magicCommand = vi.fn()
-    window.addEventListener('magic-command', magicCommand)
-
-    try {
-      render(<ReviewCommentsDialog />)
-      await screen.findByRole('button', { name: /send separately/i })
-
-      await user.keyboard('{Shift>}{Meta>}{Enter}{/Meta}{/Shift}')
-
-      await waitFor(() => {
-        expect(magicCommand).toHaveBeenCalledTimes(1)
-      })
-      const detail = (magicCommand.mock.calls[0]?.[0] as CustomEvent).detail
-      expect(detail).toMatchObject({
-        command: 'review-comments',
-        executionMode: 'yolo',
-      })
-      expect(detail.prompts).toHaveLength(2)
-      expect(detail.prompts[0]).toContain('Please fix this')
-      expect(detail.prompts[1]).toContain('Second comment body')
-      expect(detail.prompt).toBeUndefined()
-    } finally {
-      window.removeEventListener('magic-command', magicCommand)
-    }
-  })
-
   it('shows keyboard hints on actions and omits the cancel button', async () => {
     render(<ReviewCommentsDialog />)
 
     await screen.findByRole('button', { name: /send to chat/i })
+
+    expect(
+      screen.getAllByRole('button', { name: /send (to chat|separately)/i })
+    ).toEqual([
+      screen.getByRole('button', { name: /send to chat/i }),
+      screen.getByRole('button', { name: /send separately/i }),
+    ])
 
     expect(
       screen.queryByRole('button', { name: /cancel/i })
@@ -240,5 +308,29 @@ describe('ReviewCommentsDialog', () => {
     expect(screen.getByText('⌘')).toBeInTheDocument()
     expect(screen.getAllByText('↵')).not.toHaveLength(0)
     expect(screen.getByText('⇧')).toBeInTheDocument()
+  })
+
+  it('defaults to open review comments and hides resolved/outdated', async () => {
+    const user = userEvent.setup()
+    render(<ReviewCommentsDialog />)
+
+    await screen.findByText('Please fix this')
+
+    // Open filter is default — resolved/outdated bodies stay hidden
+    expect(screen.getByText('2 of 2 selected')).toBeInTheDocument()
+    expect(screen.getByText('Please fix this')).toBeInTheDocument()
+    expect(screen.getByText('Second comment body')).toBeInTheDocument()
+    expect(screen.queryByText('Already fixed finding')).not.toBeInTheDocument()
+    expect(screen.queryByText('Line moved away')).not.toBeInTheDocument()
+    expect(screen.getByTestId('review-filter-open')).toBeInTheDocument()
+
+    // All filter reveals resolved/outdated with status badges
+    await user.click(screen.getByTestId('review-filter-all'))
+    expect(screen.getByText('Already fixed finding')).toBeInTheDocument()
+    expect(screen.getByText('Line moved away')).toBeInTheDocument()
+    expect(screen.getByText('Resolved')).toBeInTheDocument()
+    expect(screen.getByText('Outdated')).toBeInTheDocument()
+    // Only open comments stay pre-selected
+    expect(screen.getByText('2 of 4 selected')).toBeInTheDocument()
   })
 })

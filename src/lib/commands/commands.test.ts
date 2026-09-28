@@ -152,6 +152,12 @@ describe('Command System', () => {
       expect(result.success).toBe(true)
       expect(mockContext.addProject).toHaveBeenCalled()
     })
+    it('clears the current session from the command palette', async () => {
+      const result = await executeCommand('clear-session-context', mockContext)
+
+      expect(result.success).toBe(true)
+      expect(mockContext.clearSessionHistory).toHaveBeenCalledOnce()
+    })
     it('handles non-existent command', async () => {
       const result = await executeCommand('non-existent-command', mockContext)
 
@@ -230,6 +236,13 @@ describe('Project Commands', () => {
     expect(useUIStore.getState().onboardingManuallyTriggered).toBe(true)
     expect(useUIStore.getState().onboardingDismissed).toBe(false)
     expect(useUIStore.getState().featureTourOpen).toBe(false)
+  })
+
+  it('rename session command delegates to session rename wiring', async () => {
+    const result = await executeCommand('rename-session', mockContext)
+
+    expect(result.success).toBe(true)
+    expect(mockContext.renameSession).toHaveBeenCalled()
   })
 })
 

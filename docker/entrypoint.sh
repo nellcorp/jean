@@ -125,9 +125,13 @@ trap cleanup EXIT INT TERM
 # Run jean in the foreground. When jean exits, the container exits, and
 # the trap above tears down Xvfb + openvscode-server.
 # shellcheck disable=SC2086
+# The container binds 0.0.0.0 without a token by design (published port sits
+# behind the host firewall / tailscale). Upstream refuses tokenless wildcard
+# binds unless explicitly acknowledged, so opt in here.
 exec jean \
     --headless \
     --no-token \
+    --allow-unsafe-no-token \
     --host "${JEAN_HOST}" \
     --port "${JEAN_PORT}" \
     ${JEAN_ARGS}
