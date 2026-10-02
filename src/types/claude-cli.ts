@@ -8,6 +8,7 @@
 export interface ClaudeCliStatus {
   /** Whether Claude CLI is installed */
   installed: boolean
+  managed_installed?: boolean
   /** Installed version (if any) */
   version: string | null
   /** Path to the CLI binary (if installed) */

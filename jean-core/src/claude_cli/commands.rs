@@ -13,7 +13,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use super::config::{
     ensure_cli_dir, get_cli_binary_path, get_cli_dir, get_wsl_cli_binary_path, get_wsl_cli_dir,
-    resolve_cli_binary,
+    jean_managed_installed, resolve_cli_binary,
 };
 use crate::http_server::EmitExt;
 #[cfg(target_os = "macos")]
@@ -55,6 +55,7 @@ const CLAUDE_USAGE_CACHE_TTL_SECS: u64 = 5 * 60;
 /// Stale cache is still served on 429 / transient API failures (OpenUsage pattern).
 const CLAUDE_USAGE_STALE_CACHE_MAX_SECS: u64 = 6 * 60 * 60;
 const CLAUDE_USAGE_USER_AGENT: &str = "claude-code/2.1.69";
+static CLAUDE_INSTALL_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 static CLAUDE_USAGE_FETCH_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
 fn claude_usage_fetch_lock() -> &'static AsyncMutex<()> {
@@ -66,6 +67,8 @@ fn claude_usage_fetch_lock() -> &'static AsyncMutex<()> {
 pub struct ClaudeCliStatus {
     /// Whether Claude CLI is installed
     pub installed: bool,
+    #[serde(default)]
+    pub managed_installed: bool,
     /// Installed version (if any)
     pub version: Option<String>,
     /// Path to the CLI binary (if installed)
@@ -103,6 +106,7 @@ pub struct InstallProgress {
 pub async fn check_claude_cli_installed(app: AppHandle) -> Result<ClaudeCliStatus, String> {
     log::trace!("Checking Claude CLI installation status");
 
+    let managed_installed = jean_managed_installed(&app);
     let wsl = crate::platform::get_wsl_config();
     let binary_path = resolve_cli_binary(&app);
 
@@ -122,6 +126,7 @@ pub async fn check_claude_cli_installed(app: AppHandle) -> Result<ClaudeCliStatu
             log::trace!("Claude CLI not found inside WSL distro {}", wsl.distro);
             return Ok(ClaudeCliStatus {
                 installed: false,
+                managed_installed,
                 version: None,
                 path: None,
                 supports_auth_command: false,
@@ -141,6 +146,7 @@ pub async fn check_claude_cli_installed(app: AppHandle) -> Result<ClaudeCliStatu
             .unwrap_or(false);
         return Ok(ClaudeCliStatus {
             installed: true,
+            managed_installed,
             version,
             path: Some(tool),
             supports_auth_command,
@@ -151,6 +157,7 @@ pub async fn check_claude_cli_installed(app: AppHandle) -> Result<ClaudeCliStatu
         log::trace!("Claude CLI not found at {:?}", binary_path);
         return Ok(ClaudeCliStatus {
             installed: false,
+            managed_installed,
             version: None,
             path: None,
             supports_auth_command: false,
@@ -201,6 +208,7 @@ pub async fn check_claude_cli_installed(app: AppHandle) -> Result<ClaudeCliStatu
 
     Ok(ClaudeCliStatus {
         installed: true,
+        managed_installed,
         version,
         path: Some(binary_path.to_string_lossy().to_string()),
         supports_auth_command,
@@ -415,8 +423,15 @@ fn verify_checksum(data: &[u8], expected: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn try_acquire_claude_install() -> Result<tokio::sync::MutexGuard<'static, ()>, String> {
+    CLAUDE_INSTALL_LOCK
+        .try_lock()
+        .map_err(|_| "Claude CLI installation is already in progress".to_string())
+}
+
 /// Install Claude CLI by downloading the binary directly from Anthropic's distribution bucket
 pub async fn install_claude_cli(app: AppHandle, version: Option<String>) -> Result<(), String> {
+    let _install_guard = try_acquire_claude_install()?;
     log::trace!("Installing Claude CLI, version: {:?}", version);
 
     // Check if any Claude processes are running - cannot replace binary while in use
@@ -1519,6 +1534,35 @@ fn emit_progress(app: &AppHandle, stage: &str, message: &str, percent: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_install_lock_rejects_concurrent_install_and_releases() {
+        let guard = try_acquire_claude_install().unwrap();
+        assert_eq!(
+            try_acquire_claude_install().unwrap_err(),
+            "Claude CLI installation is already in progress"
+        );
+        drop(guard);
+        assert!(try_acquire_claude_install().is_ok());
+    }
+
+    #[test]
+    fn status_serializes_managed_installation_independently_of_selected_source() {
+        for installed in [false, true] {
+            for managed_installed in [false, true] {
+                let status = ClaudeCliStatus {
+                    installed,
+                    managed_installed,
+                    version: None,
+                    path: None,
+                    supports_auth_command: false,
+                };
+                let value = serde_json::to_value(status).unwrap();
+                assert_eq!(value["installed"], installed);
+                assert_eq!(value["managed_installed"], managed_installed);
+            }
+        }
+    }
 
     #[test]
     fn wsl_credentials_path_uses_wsl_home() {

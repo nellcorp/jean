@@ -558,6 +558,14 @@ When adding entirely new systems:
 6. **Test everything** - Use quality gates to maintain code health
 7. **Document patterns** - Keep docs current as patterns evolve
 
+### CLI source preferences and installation status
+
+Auto-detect a system CLI source only when its source field is absent from saved preferences. Never overwrite an explicit managed or PATH choice during loading.
+
+Claude's installation status describes the binary available for execution, including fallback. Its separate `managed_installed` field describes the Jean-managed copy. Settings derives selected-source display status without changing backend availability for onboarding or chat.
+
+The managed Claude card can install while PATH is selected. Installation resolves the latest stable version through the existing installer, then selects the managed source only after success. A backend mutex rejects concurrent installations across all entry points.
+
 ### Cross-platform CLI resolution and launch
 
 When resolving external CLIs from PATH, use `crate::platform::detect_cli_in_path()` or

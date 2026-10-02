@@ -214,8 +214,10 @@ import {
   setRemotePollInterval,
 } from '@/services/git-status'
 import { getPathUpdateAction } from '@/lib/cli-update'
+import { getClaudeSourceStatus } from '@/lib/claude-cli-status'
 import { BackendPaneHeader, SettingsSection } from '../SettingsSection'
 import { BackendCliSourceCards } from '../BackendCliSourceCards'
+import { ClaudeManagedInstallButton } from '../ClaudeManagedInstallButton'
 import { AiLanguageField } from './AiLanguageField'
 import {
   resolveDefaultModelForBackend,
@@ -425,7 +427,12 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
   const { data: kimiPathDetection } = useKimiPathDetection()
 
   // CLI status hooks
-  const { data: cliStatus, isLoading: isCliLoading } = useClaudeCliStatus()
+  const { data: rawCliStatus, isLoading: isCliLoading } = useClaudeCliStatus()
+  const cliStatus = getClaudeSourceStatus(
+    rawCliStatus,
+    preferences?.claude_cli_source ?? 'jean',
+    pathDetection?.found
+  )
   const isPathSource = preferences?.claude_cli_source === 'path'
   const { data: claudeVersions, isLoading: isClaudeVersionsLoading } =
     useAvailableCliVersions({ enabled: isPathSource && !!cliStatus?.installed })
@@ -1978,6 +1985,13 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                   value={preferences?.claude_cli_source ?? 'jean'}
                   onValueChange={handleClaudeSourceChange}
                   backendName="Claude CLI"
+                  managedAction={
+                    cliStatus?.managed_installed === false ? (
+                      <ClaudeManagedInstallButton
+                        managedInstalled={cliStatus.managed_installed}
+                      />
+                    ) : undefined
+                  }
                   path={pathDetection?.path}
                   pathVersion={pathDetection?.version}
                   pathFound={!!pathDetection?.found}

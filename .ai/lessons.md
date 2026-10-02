@@ -37,3 +37,13 @@
 - A new streaming backend needs two parser paths: the live response parser and the run-log reconstruction parser.
 - Route persisted runs by the per-run backend or model prefix before using a generic fallback parser.
 - Test history reload with the backend's real NDJSON format. Live streaming success does not prove that the response survives a query refresh or app reload.
+
+## Make managed installation reachable before source selection
+
+- Offer installation directly on the managed-source card even when PATH is selected; do not require selecting an absent installation first.
+- Track managed installation separately from effective execution availability. Settings can show the selected source as missing without hiding a usable fallback backend elsewhere.
+
+## Typecheck test mocks before handing back
+
+- Verify module exports before referencing fixtures in partial mocks. Missing exports can silently return undefined at runtime.
+- Run `bun run typecheck` alongside targeted tests; passing runtime tests alone does not validate typed mock setup.

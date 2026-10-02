@@ -727,10 +727,7 @@ fn maybe_auto_select_system_coderabbit(
     preferences: &mut AppPreferences,
     raw_preferences: Option<&Value>,
 ) -> bool {
-    let coderabbit_source_missing = raw_preferences
-        .and_then(Value::as_object)
-        .map(|object| !object.contains_key("coderabbit_cli_source"))
-        .unwrap_or(true);
+    let coderabbit_source_missing = cli_source_missing(raw_preferences, "coderabbit_cli_source");
 
     if coderabbit_source_missing && coderabbit_cli::should_auto_use_system_coderabbit(app) {
         preferences.coderabbit_cli_source = "path".to_string();
@@ -740,27 +737,38 @@ fn maybe_auto_select_system_coderabbit(
     false
 }
 
-/// When Jean-managed Claude/Codex/OpenCode is missing but a system PATH install
-/// exists, switch the preference to `"path"` so Settings UI, auth, and status
-/// checks agree with the binary actually used (issue #387).
-///
-/// Runtime `resolve_cli_binary` also falls back to PATH when Jean-managed is
-/// missing; this persists the source so the UI does not show a misleading
-/// "Jean" selection.
-fn maybe_auto_select_system_cli_sources(app: &AppHandle, preferences: &mut AppPreferences) -> bool {
+fn cli_source_missing(raw_preferences: Option<&Value>, field: &str) -> bool {
+    raw_preferences
+        .and_then(Value::as_object)
+        .map(|object| !object.contains_key(field))
+        .unwrap_or(true)
+}
+
+/// Auto-select PATH only for preferences without an explicit source choice.
+fn maybe_auto_select_system_cli_sources(
+    app: &AppHandle,
+    preferences: &mut AppPreferences,
+    raw_preferences: Option<&Value>,
+) -> bool {
     let mut changed = false;
 
-    if preferences.claude_cli_source == "jean" && claude_cli::should_auto_use_system(app) {
+    if cli_source_missing(raw_preferences, "claude_cli_source")
+        && claude_cli::should_auto_use_system(app)
+    {
         log::info!("Auto-selecting Claude CLI source=path (Jean-managed missing, system found)");
         preferences.claude_cli_source = "path".to_string();
         changed = true;
     }
-    if preferences.codex_cli_source == "jean" && codex_cli::should_auto_use_system(app) {
+    if cli_source_missing(raw_preferences, "codex_cli_source")
+        && codex_cli::should_auto_use_system(app)
+    {
         log::info!("Auto-selecting Codex CLI source=path (Jean-managed missing, system found)");
         preferences.codex_cli_source = "path".to_string();
         changed = true;
     }
-    if preferences.opencode_cli_source == "jean" && opencode_cli::should_auto_use_system(app) {
+    if cli_source_missing(raw_preferences, "opencode_cli_source")
+        && opencode_cli::should_auto_use_system(app)
+    {
         log::info!("Auto-selecting OpenCode CLI source=path (Jean-managed missing, system found)");
         preferences.opencode_cli_source = "path".to_string();
         changed = true;
@@ -776,7 +784,7 @@ fn maybe_auto_select_system_cli_preferences(
     raw_preferences: Option<&Value>,
 ) -> bool {
     let mut changed = maybe_auto_select_system_coderabbit(app, preferences, raw_preferences);
-    changed |= maybe_auto_select_system_cli_sources(app, preferences);
+    changed |= maybe_auto_select_system_cli_sources(app, preferences, raw_preferences);
     changed
 }
 
@@ -905,12 +913,34 @@ fn resolve_http_server_bind_host(prefs: &AppPreferences) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_global_system_prompt, default_model, migrate_smoke_test_preferences,
-        parse_cli_args_from, resolve_headless_bind_host, resolve_headless_token_required,
-        resolve_http_server_bind_host, server_preferences_value, validate_headless_security,
-        AppPreferences,
+        cli_source_missing, default_global_system_prompt, default_model,
+        migrate_smoke_test_preferences, parse_cli_args_from, resolve_headless_bind_host,
+        resolve_headless_token_required, resolve_http_server_bind_host, server_preferences_value,
+        validate_headless_security, AppPreferences,
     };
     use serde_json::json;
+
+    #[test]
+    fn cli_auto_selection_only_applies_to_absent_raw_source_fields() {
+        for field in [
+            "claude_cli_source",
+            "codex_cli_source",
+            "opencode_cli_source",
+            "coderabbit_cli_source",
+        ] {
+            assert!(cli_source_missing(None, field));
+            assert!(cli_source_missing(Some(&json!({})), field));
+            for source in [json!("jean"), json!("path"), json!(""), json!(null)] {
+                let mut raw = json!({});
+                raw[field] = source;
+                assert!(!cli_source_missing(Some(&raw), field));
+            }
+            assert!(cli_source_missing(Some(&json!({"theme": "dark"})), field));
+        }
+        let raw = json!({"claude_cli_source": "jean"});
+        assert!(!cli_source_missing(Some(&raw), "claude_cli_source"));
+        assert!(cli_source_missing(Some(&raw), "codex_cli_source"));
+    }
 
     #[test]
     fn server_preferences_exclude_client_fields_and_redact_secrets() {
