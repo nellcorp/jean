@@ -12,6 +12,7 @@ import {
   Globe,
   Github,
   Rabbit,
+  GraduationCap,
   Sparkles,
   Terminal,
   type LucideIcon,
@@ -87,6 +88,7 @@ import { IntegrationsPane } from './panes/IntegrationsPane'
 import { ExperimentalPane } from './panes/ExperimentalPane'
 import { WebAccessPane } from './panes/WebAccessPane'
 import { OpinionatedPane } from './panes/OpinionatedPane'
+import { SkillsPane } from './panes/SkillsPane'
 import {
   searchPreferenceEntries,
   type PreferenceSearchEntry,
@@ -219,6 +221,12 @@ const navigationEntries: NavigationEntry[] = [
   },
   {
     type: 'item',
+    id: 'skills',
+    name: 'Skills',
+    icon: GraduationCap,
+  },
+  {
+    type: 'item',
     id: 'opinionated',
     name: 'Opinionated',
     icon: Sparkles,
@@ -306,6 +314,7 @@ const paneIconMap: Record<PreferencePane, LucideIcon> = {
   github: Github,
   coderabbit: Rabbit,
   opinionated: Sparkles,
+  skills: GraduationCap,
   providers: Blocks,
   usage: BarChart3,
   appearance: Palette,
@@ -358,6 +367,8 @@ const getPaneTitle = (pane: PreferencePane): string => {
       return 'Experimental'
     case 'opinionated':
       return 'Opinionated'
+    case 'skills':
+      return 'Skills'
     case 'web-access':
       return 'Web Access'
     default:
@@ -995,6 +1006,11 @@ export function PreferencesDialog() {
               {activePane === 'opinionated' && (
                 <div id="pref-pane-opinionated" className="min-w-0 max-w-full">
                   <OpinionatedPane />
+                </div>
+              )}
+              {activePane === 'skills' && (
+                <div id="pref-pane-skills" className="min-w-0 max-w-full">
+                  <SkillsPane />
                 </div>
               )}
               {activePane === 'web-access' && (

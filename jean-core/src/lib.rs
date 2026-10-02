@@ -66,6 +66,7 @@ mod platform;
 mod prerequisites;
 mod projects;
 mod server_update;
+mod skills;
 mod terminal;
 mod version;
 
