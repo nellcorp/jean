@@ -47,3 +47,8 @@
 
 - Verify module exports before referencing fixtures in partial mocks. Missing exports can silently return undefined at runtime.
 - Run `bun run typecheck` alongside targeted tests; passing runtime tests alone does not validate typed mock setup.
+
+## Keep small fixes fast
+
+- Finish production edits and review before the final Docker build; do not trigger another expensive image build for a late review correction.
+- Reuse a cached Rust quality container and report a short ETA when verification dominates the task.
