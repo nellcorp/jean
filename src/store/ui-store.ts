@@ -27,6 +27,7 @@ export type PreferencePane =
   | 'experimental'
   | 'web-access'
   | 'opinionated'
+  | 'skills'
 
 export type OnboardingStartStep = 'claude' | 'gh' | null
 

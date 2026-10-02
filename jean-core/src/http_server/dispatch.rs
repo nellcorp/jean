@@ -1994,6 +1994,38 @@ pub async fn dispatch_command(
             crate::claude_cli::delete_claude_output_style(path, worktree_path).await?;
             Ok(Value::Null)
         }
+        "list_jean_skills" => {
+            let result = crate::skills::list_jean_skills().await?;
+            to_value(result)
+        }
+        "list_skill_backends" => {
+            let result = crate::skills::list_skill_backends().await?;
+            to_value(result)
+        }
+        "read_jean_skill" => {
+            let slug: String = from_field(&args, "slug")?;
+            let result = crate::skills::read_jean_skill(slug).await?;
+            to_value(result)
+        }
+        "save_jean_skill" => {
+            let content: String = from_field(&args, "content")?;
+            let name: Option<String> = from_field_opt(&args, "name")?;
+            let description: Option<String> = from_field_opt(&args, "description")?;
+            let backends: Option<Vec<String>> = from_field_opt(&args, "backends")?;
+            let previous_slug: Option<String> = field_opt(&args, "previousSlug", "previous_slug")?;
+            let result =
+                crate::skills::save_jean_skill(content, name, description, backends, previous_slug)
+                    .await?;
+            emit_cache_invalidation(app, &["cli-skills"]);
+            to_value(result)
+        }
+        "delete_jean_skill" => {
+            let slug: String = from_field(&args, "slug")?;
+            let backends: Option<Vec<String>> = from_field_opt(&args, "backends")?;
+            let result = crate::skills::delete_jean_skill(slug, backends).await?;
+            emit_cache_invalidation(app, &["cli-skills"]);
+            to_value(result)
+        }
         "list_codex_skills" => {
             let worktree_path: Option<String> = field_opt(&args, "worktreePath", "worktree_path")?;
             let result = crate::projects::list_codex_skills(worktree_path).await?;

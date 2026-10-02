@@ -13307,12 +13307,7 @@ fn collect_skills_from_dir_inner(
 
         let description = std::fs::read_to_string(&skill_file)
             .ok()
-            .and_then(|content| {
-                content
-                    .lines()
-                    .next()
-                    .and_then(|line| line.strip_prefix("# ").map(|s| s.to_string()))
-            });
+            .and_then(|content| skill_description(&content));
 
         skills.insert(
             name.clone(),
@@ -13323,6 +13318,29 @@ fn collect_skills_from_dir_inner(
             },
         );
     }
+}
+
+/// Read a skill's description from its YAML frontmatter, falling back to a
+/// leading `# Heading` for skills written without frontmatter.
+fn skill_description(content: &str) -> Option<String> {
+    let (frontmatter_raw, body) = split_frontmatter(content);
+
+    if let Some(raw) = frontmatter_raw {
+        if let Ok(mapping) = serde_yaml::from_str::<serde_yaml::Mapping>(raw) {
+            if let Some(description) = mapping
+                .get(serde_yaml::Value::String("description".to_string()))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(description.to_string());
+            }
+        }
+    }
+
+    body.lines()
+        .find_map(|line| line.strip_prefix("# ").map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
 }
 
 /// Collect commands from a directory into a map (later inserts override earlier ones)
@@ -13933,6 +13951,27 @@ mod tests {
         let mut skills = std::collections::HashMap::new();
         collect_skills_from_dir(root, &mut skills);
         skills
+    }
+
+    #[test]
+    fn skill_description_prefers_frontmatter_over_heading() {
+        let description = skill_description(
+            "---\nname: architect\ndescription: Sketch types first\n---\n\n# Architect\n",
+        );
+        assert_eq!(description.as_deref(), Some("Sketch types first"));
+    }
+
+    #[test]
+    fn skill_description_falls_back_to_heading() {
+        assert_eq!(
+            skill_description("# Plain Heading\n\nbody").as_deref(),
+            Some("Plain Heading")
+        );
+        assert_eq!(
+            skill_description("---\nname: a\n---\n\n# After Frontmatter\n").as_deref(),
+            Some("After Frontmatter")
+        );
+        assert!(skill_description("just text\n").is_none());
     }
 
     #[test]
