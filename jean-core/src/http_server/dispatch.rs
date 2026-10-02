@@ -1945,6 +1945,55 @@ pub async fn dispatch_command(
             let result = crate::projects::list_claude_commands(worktree_path).await?;
             to_value(result)
         }
+        "list_claude_output_styles" => {
+            let worktree_path: Option<String> = field_opt(&args, "worktreePath", "worktree_path")?;
+            let result = crate::claude_cli::list_claude_output_styles(worktree_path).await?;
+            to_value(result)
+        }
+        "read_claude_output_style" => {
+            let path: String = from_field(&args, "path")?;
+            let result = crate::claude_cli::read_claude_output_style(path).await?;
+            to_value(result)
+        }
+        "save_claude_output_style" => {
+            let name: String = from_field(&args, "name")?;
+            let body: String = from_field(&args, "body")?;
+            let description: Option<String> = from_field_opt(&args, "description")?;
+            let keep_coding_instructions: Option<bool> =
+                field_opt(&args, "keepCodingInstructions", "keep_coding_instructions")?;
+            let scope: String = from_field(&args, "scope")?;
+            let worktree_path: Option<String> = field_opt(&args, "worktreePath", "worktree_path")?;
+            let result = crate::claude_cli::save_claude_output_style(
+                name,
+                body,
+                description,
+                keep_coding_instructions,
+                scope,
+                worktree_path,
+            )
+            .await?;
+            to_value(result)
+        }
+        "install_claude_output_style" => {
+            let slug: String = from_field(&args, "slug")?;
+            let scope: Option<String> = from_field_opt(&args, "scope")?;
+            let worktree_path: Option<String> = field_opt(&args, "worktreePath", "worktree_path")?;
+            let overwrite: Option<bool> = from_field_opt(&args, "overwrite")?;
+            let result = crate::claude_cli::install_claude_output_style(
+                slug,
+                scope,
+                worktree_path,
+                overwrite,
+            )
+            .await?;
+            to_value(result)
+        }
+        "delete_claude_output_style" => {
+            let path: String = from_field(&args, "path")?;
+            let worktree_path: Option<String> = field_opt(&args, "worktreePath", "worktree_path")?;
+            crate::claude_cli::delete_claude_output_style(path, worktree_path).await?;
+            Ok(Value::Null)
+        }
         "list_codex_skills" => {
             let worktree_path: Option<String> = field_opt(&args, "worktreePath", "worktree_path")?;
             let result = crate::projects::list_codex_skills(worktree_path).await?;
@@ -3259,6 +3308,22 @@ pub async fn dispatch_command(
                 worktree_path,
                 session_id,
                 provider,
+            )
+            .await?;
+            emit_cache_invalidation(app, &["session", "sessions"]);
+            Ok(Value::Null)
+        }
+        "set_session_output_style" => {
+            let worktree_id: String = field(&args, "worktreeId", "worktree_id")?;
+            let worktree_path: String = field(&args, "worktreePath", "worktree_path")?;
+            let session_id: String = field(&args, "sessionId", "session_id")?;
+            let output_style: Option<String> = field_opt(&args, "outputStyle", "output_style")?;
+            crate::chat::set_session_output_style(
+                app.clone(),
+                worktree_id,
+                worktree_path,
+                session_id,
+                output_style,
             )
             .await?;
             emit_cache_invalidation(app, &["session", "sessions"]);

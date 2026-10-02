@@ -72,6 +72,7 @@ import {
   getProviderDisplayName,
 } from '@/components/chat/toolbar/toolbar-utils'
 import { DesktopBackendModelPicker } from '@/components/chat/toolbar/DesktopBackendModelPicker'
+import { OutputStyleDropdown } from '@/components/chat/toolbar/OutputStyleDropdown'
 import { ExecutionModeDropdown } from '@/components/chat/toolbar/ExecutionModeDropdown'
 import { DockBurgerButton } from '@/components/chat/toolbar/DockBurgerButton'
 import type { ModelReasoningCapability } from '@/services/model-catalog'
@@ -84,6 +85,9 @@ interface DesktopToolbarControlsProps {
   selectedBackend: CliBackend
   selectedModel: string
   selectedProvider: string | null
+  selectedOutputStyle?: string | null
+  claudeCliVersion?: string | null
+  onOutputStyleChange?: (style: string | null) => void
   selectedThinkingLevel: ThinkingLevel
   selectedEffortLevel: EffortLevel
   executionMode: ExecutionMode
@@ -152,6 +156,9 @@ export function DesktopToolbarControls({
   selectedBackend,
   selectedModel,
   selectedProvider,
+  selectedOutputStyle = null,
+  claudeCliVersion,
+  onOutputStyleChange,
   selectedThinkingLevel,
   selectedEffortLevel,
   executionMode,
@@ -168,7 +175,7 @@ export function DesktopToolbarControls({
   displayStatus,
   checkStatus: _checkStatus,
   mergeableStatus,
-  activeWorktreePath: _activeWorktreePath,
+  activeWorktreePath,
   availableMcpServers: _availableMcpServers,
   enabledMcpServers: _enabledMcpServers,
   isHealthChecking: _isHealthChecking,
@@ -753,6 +760,20 @@ export function DesktopToolbarControls({
               )}
             </DropdownMenuContent>
           </DropdownMenu>
+        </>
+      )}
+
+      {selectedBackend === 'claude' && onOutputStyleChange && (
+        <>
+          <div className="hidden @xl:block h-4 w-px bg-border/50" />
+          <OutputStyleDropdown
+            selectedOutputStyle={selectedOutputStyle}
+            worktreePath={activeWorktreePath}
+            cliVersion={claudeCliVersion}
+            disabled={hasPendingQuestions}
+            onOutputStyleChange={onOutputStyleChange}
+            className="hidden @xl:flex"
+          />
         </>
       )}
 

@@ -94,6 +94,9 @@ export const ChatToolbar = memo(function ChatToolbar({
   selectedBackend,
   selectedModel,
   selectedProvider,
+  selectedOutputStyle = null,
+  claudeCliVersion,
+  onOutputStyleChange,
   selectedThinkingLevel,
   selectedEffortLevel,
   useAdaptiveThinking,
@@ -537,6 +540,9 @@ export const ChatToolbar = memo(function ChatToolbar({
               selectedBackend={selectedBackend}
               selectedModel={selectedModel}
               selectedProvider={selectedProvider}
+              selectedOutputStyle={selectedOutputStyle}
+              claudeCliVersion={claudeCliVersion}
+              onOutputStyleChange={onOutputStyleChange}
               backendModelLabel={backendModelLabel}
               backendModelLabelText={backendModelLabelText}
               hasMultipleBackendModelChoices={hasMultipleBackendModelChoices}
@@ -619,6 +625,9 @@ export const ChatToolbar = memo(function ChatToolbar({
               selectedBackend={selectedBackend}
               selectedModel={selectedModel}
               selectedProvider={selectedProvider}
+              selectedOutputStyle={selectedOutputStyle}
+              claudeCliVersion={claudeCliVersion}
+              onOutputStyleChange={onOutputStyleChange}
               selectedThinkingLevel={selectedThinkingLevel}
               selectedEffortLevel={selectedEffortLevel}
               executionMode={executionMode}

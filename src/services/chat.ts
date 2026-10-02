@@ -2342,6 +2342,59 @@ export function useSetSessionProvider() {
 }
 
 /**
+ * Hook to set the selected Claude output style for a session
+ */
+export function useSetSessionOutputStyle() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({
+      worktreeId,
+      worktreePath,
+      sessionId,
+      outputStyle,
+    }: {
+      worktreeId: string
+      worktreePath: string
+      sessionId: string
+      outputStyle: string | null
+    }): Promise<void> => {
+      if (!isTauri()) {
+        throw new Error('Not in Tauri context')
+      }
+
+      logger.debug('Setting session output style', { sessionId, outputStyle })
+      await invoke('set_session_output_style', {
+        worktreeId,
+        worktreePath,
+        sessionId,
+        outputStyle,
+      })
+      logger.info('Session output style saved')
+    },
+    onSuccess: (_, { sessionId, worktreeId }) => {
+      queryClient.invalidateQueries({
+        queryKey: chatQueryKeys.session(sessionId),
+      })
+      queryClient.invalidateQueries({
+        queryKey: chatQueryKeys.sessions(worktreeId),
+      })
+    },
+    onError: error => {
+      if (isWsDisconnectError(error)) return
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof error === 'string'
+            ? error
+            : 'Unknown error occurred'
+      logger.error('Failed to save output style selection', { error })
+      toast.error('Failed to save output style', { description: message })
+    },
+  })
+}
+
+/**
  * Hook to set the selected thinking level for a session
  */
 export function useSetSessionThinkingLevel() {

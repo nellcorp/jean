@@ -47,6 +47,10 @@ export interface ChatToolbarProps {
   selectedBackend: Backend
   selectedModel: string
   selectedProvider: string | null
+  /** Active Claude output style (null = Default). */
+  selectedOutputStyle?: string | null
+  /** Installed Claude CLI version, for version-gated output styles. */
+  claudeCliVersion?: string | null
   selectedThinkingLevel: ThinkingLevel
   selectedEffortLevel: EffortLevel
   useAdaptiveThinking: boolean
@@ -101,6 +105,7 @@ export interface ChatToolbarProps {
   onModelChange: (model: ClaudeModel) => void
   onBackendModelChange: (backend: CliBackend, model: string) => void
   onProviderChange: (provider: string | null) => void
+  onOutputStyleChange?: (style: string | null) => void
   customCliProfiles: CustomCliProfile[]
   /** Codex custom model_provider profiles from Settings → Providers */
   customCodexProviders?: CodexProviderProfile[]

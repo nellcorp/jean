@@ -53,6 +53,8 @@ interface UseToolbarHandlersParams {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   setSessionProvider: { mutate: (args: any) => void }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  setSessionOutputStyle: { mutate: (args: any) => void }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   setSessionThinkingLevel: { mutate: (args: any) => void }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   setSessionEffortLevel: { mutate: (args: any) => void }
@@ -83,6 +85,7 @@ export function useToolbarHandlers({
   setSessionModel,
   setSessionBackend,
   setSessionProvider,
+  setSessionOutputStyle,
   setSessionThinkingLevel,
   setSessionEffortLevel,
   setExecutionMode,
@@ -288,6 +291,48 @@ export function useToolbarHandlers({
     ]
   )
 
+  const handleToolbarOutputStyleChange = useCallback(
+    (outputStyle: string | null) => {
+      if (activeSessionId && activeWorktreeId && activeWorktreePath) {
+        useChatStore
+          .getState()
+          .setSelectedOutputStyle(activeSessionId, outputStyle)
+        // Optimistically update the session cache so a mid-session switch is
+        // not overridden by a stale selected_output_style before invalidate.
+        queryClient.setQueryData(
+          chatQueryKeys.session(activeSessionId),
+          (old: Session | null | undefined) =>
+            old
+              ? applySessionSettingToSession(
+                  old,
+                  'outputStyle',
+                  outputStyle ?? ''
+                )
+              : old
+        )
+        setSessionOutputStyle.mutate({
+          sessionId: activeSessionId,
+          worktreeId: activeWorktreeId,
+          worktreePath: activeWorktreePath,
+          outputStyle,
+        })
+        invoke('broadcast_session_setting', {
+          sessionId: activeSessionId,
+          key: 'outputStyle',
+          value: outputStyle ?? '',
+        }).catch(() => undefined)
+      }
+      window.dispatchEvent(new CustomEvent('focus-chat-input'))
+    },
+    [
+      activeSessionId,
+      activeWorktreeId,
+      activeWorktreePath,
+      queryClient,
+      setSessionOutputStyle,
+    ]
+  )
+
   const handleToolbarThinkingLevelChange = useCallback(
     (level: ThinkingLevel) => {
       const sessionId = activeSessionIdRef.current
@@ -427,6 +472,7 @@ export function useToolbarHandlers({
     handleToolbarBackendModelChange,
     handleTabBackendSwitch,
     handleToolbarProviderChange,
+    handleToolbarOutputStyleChange,
     handleToolbarThinkingLevelChange,
     handleToolbarEffortLevelChange,
     handleToggleMcpServer,

@@ -13,6 +13,7 @@ export type SessionSettingKey =
   | 'effortLevel'
   | 'executionMode'
   | 'provider'
+  | 'outputStyle'
   | 'waitingForInput'
 
 /** Sentinels / empty mean "use backend default" (Anthropic / OpenAI). */
@@ -66,6 +67,11 @@ export function applySessionSettingToSession(
       return {
         ...session,
         selected_provider: normalizeProviderSettingValue(value),
+      }
+    case 'outputStyle':
+      return {
+        ...session,
+        selected_output_style: value === '' ? undefined : value,
       }
     case 'waitingForInput':
       // Handled in Zustand (useStreamingEvents), not session metadata

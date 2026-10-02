@@ -451,6 +451,41 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Resolve the Claude output style for a send: session choice, else the global
+/// preference default. Names that no longer resolve to a style on disk are
+/// dropped so a stale selection cannot break the turn.
+async fn resolve_output_style(
+    app: &AppHandle,
+    worktree_path: &str,
+    session_output_style: Option<String>,
+) -> Option<String> {
+    use crate::claude_cli::output_styles::DEFAULT_OUTPUT_STYLE;
+
+    let selected = match normalize_optional_string(session_output_style) {
+        Some(style) => Some(style),
+        None => normalize_optional_string(
+            crate::load_preferences(app.clone())
+                .await
+                .ok()
+                .and_then(|prefs| prefs.default_output_style),
+        ),
+    }
+    .filter(|style| style != DEFAULT_OUTPUT_STYLE)?;
+
+    let known = crate::claude_cli::output_styles::list_claude_output_styles(Some(
+        worktree_path.to_string(),
+    ))
+    .await
+    .unwrap_or_default();
+
+    if known.iter().any(|style| style.name == selected) {
+        Some(selected)
+    } else {
+        log::warn!("Ignoring unknown Claude output style '{selected}'");
+        None
+    }
+}
+
 /// Resolve the model used for a send.
 ///
 /// Precedence:
@@ -710,6 +745,7 @@ pub async fn list_sessions_summary(
                 "backend": session.backend,
                 "selectedModel": session.selected_model,
                 "selectedProvider": session.selected_provider,
+                "selectedOutputStyle": session.selected_output_style,
                 "selectedExecutionMode": session.selected_execution_mode,
                 "createdAt": session.created_at,
                 "updatedAt": session.updated_at,
@@ -759,6 +795,7 @@ pub async fn get_session_status(
         "backend": metadata.backend,
         "selectedModel": metadata.selected_model,
         "selectedProvider": metadata.selected_provider,
+        "selectedOutputStyle": metadata.selected_output_style,
         "selectedExecutionMode": metadata.selected_execution_mode,
         "waitingForInput": metadata.waiting_for_input,
         "waitingForInputType": metadata.waiting_for_input_type,
@@ -2963,6 +3000,7 @@ pub async fn send_chat_message(
     let session_selected_thinking_level = session.selected_thinking_level.clone();
     let session_selected_effort_level = session.selected_effort_level.clone();
     let session_selected_provider = session.selected_provider.clone();
+    let session_selected_output_style = session.selected_output_style.clone();
 
     // Note: User message is stored in NDJSON run entry (run.user_message),
     // not in sessions JSON. Messages are loaded from NDJSON on demand.
@@ -3432,6 +3470,11 @@ pub async fn send_chat_message(
         _ => mcp_config.clone(),
     };
     let thread_custom_profile = custom_profile_name.clone();
+    let thread_output_style = if effective_backend == Backend::Claude {
+        resolve_output_style(&app, &worktree_path, session_selected_output_style).await
+    } else {
+        None
+    };
     let thread_codex_provider = if effective_backend == Backend::Codex {
         let prefs_for_codex = crate::load_preferences(app.clone()).await.ok();
         custom_profile_name.as_ref().and_then(|name| {
@@ -3528,6 +3571,7 @@ pub async fn send_chat_message(
                         thread_mcp_config.as_deref(),
                         chrome,
                         thread_custom_profile.as_deref(),
+                        thread_output_style.as_deref(),
                         thread_include_recap,
                         Some(make_pid_callback()),
                     ) {
@@ -5641,6 +5685,7 @@ pub async fn clear_session_history(
             let selected_thinking_level = session.selected_thinking_level.clone();
             let selected_effort_level = session.selected_effort_level.clone();
             let selected_provider = session.selected_provider.clone();
+            let selected_output_style = session.selected_output_style.clone();
 
             session.messages.clear();
             session.claude_session_id = None;
@@ -5656,6 +5701,7 @@ pub async fn clear_session_history(
             session.selected_thinking_level = selected_thinking_level;
             session.selected_effort_level = selected_effort_level;
             session.selected_provider = selected_provider;
+            session.selected_output_style = selected_output_style;
 
             log::trace!("Session history cleared");
             Ok(())
@@ -5744,6 +5790,27 @@ pub async fn set_session_provider(
         if let Some(session) = sessions.find_session_mut(&session_id) {
             session.selected_provider = provider;
             log::trace!("Provider selection saved");
+            Ok(())
+        } else {
+            Err(format!("Session not found: {session_id}"))
+        }
+    })
+}
+
+/// Set the selected Claude output style for a session
+pub async fn set_session_output_style(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    session_id: String,
+    output_style: Option<String>,
+) -> Result<(), String> {
+    log::trace!("Setting output style for session {session_id}: {output_style:?}");
+
+    with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
+        if let Some(session) = sessions.find_session_mut(&session_id) {
+            session.selected_output_style = output_style;
+            log::trace!("Output style selection saved");
             Ok(())
         } else {
             Err(format!("Session not found: {session_id}"))

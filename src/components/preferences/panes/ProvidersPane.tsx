@@ -22,6 +22,9 @@ import {
   PREDEFINED_PI_PROVIDERS,
 } from '@/types/preferences'
 import { SettingsSection } from '../SettingsSection'
+import { useClaudeOutputStyles } from '@/services/output-styles'
+import { DEFAULT_OUTPUT_STYLE } from '@/types/output-styles'
+import { OutputStylesEditor } from './OutputStylesEditor'
 
 export const ProvidersPane: React.FC = () => {
   const { data: preferences } = usePreferences()
@@ -49,6 +52,15 @@ export const ProvidersPane: React.FC = () => {
   const handleDefaultProviderChange = (value: string) => {
     patchPreferences.mutate({
       default_provider: value === 'default' ? null : value,
+    })
+  }
+
+  const defaultOutputStyle = preferences?.default_output_style ?? null
+  const { data: outputStyles = [] } = useClaudeOutputStyles(null)
+
+  const handleDefaultOutputStyleChange = (value: string) => {
+    patchPreferences.mutate({
+      default_output_style: value === DEFAULT_OUTPUT_STYLE ? null : value,
     })
   }
 
@@ -93,6 +105,43 @@ export const ProvidersPane: React.FC = () => {
             </Select>
           </div>
         )}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Output Styles"
+        description="Output styles set Claude's role, tone, and response format for a whole session. Pick one per session from the chat toolbar. Stored as markdown under ~/.claude/output-styles."
+        anchorId="pref-providers-section-output-styles"
+      >
+        <OutputStylesEditor />
+
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium">Default Output Style</p>
+            <p className="text-xs text-muted-foreground">
+              Style used for new Claude sessions
+            </p>
+          </div>
+          <Select
+            value={defaultOutputStyle ?? DEFAULT_OUTPUT_STYLE}
+            onValueChange={handleDefaultOutputStyleChange}
+          >
+            <SelectTrigger className="w-full sm:w-80">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={DEFAULT_OUTPUT_STYLE}>
+                {DEFAULT_OUTPUT_STYLE}
+              </SelectItem>
+              {outputStyles
+                .filter(style => style.source !== 'bundled' || style.installed)
+                .map(style => (
+                  <SelectItem key={style.name} value={style.name}>
+                    {style.name}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
+        </div>
       </SettingsSection>
 
       <SettingsSection

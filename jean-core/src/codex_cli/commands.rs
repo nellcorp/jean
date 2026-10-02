@@ -23,7 +23,7 @@ const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 
 /// Emergency fallback version when API fails AND no cache exists.
-const FALLBACK_CODEX_VERSION: &str = "0.116.0-alpha.12";
+const FALLBACK_CODEX_VERSION: &str = "0.160.0";
 const CODEX_VERSIONS_CACHE_FILE: &str = "codex-versions-cache.json";
 
 /// Extract version number from a tag like "v0.104.0" or "vrust-v0.104.0"

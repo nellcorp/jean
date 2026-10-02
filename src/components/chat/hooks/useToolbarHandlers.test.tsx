@@ -57,6 +57,7 @@ function renderHandlers(
       setSessionModel: { mutate: vi.fn() },
       setSessionBackend: { mutate: vi.fn() },
       setSessionProvider: { mutate: vi.fn() },
+      setSessionOutputStyle: { mutate: vi.fn() },
       setSessionThinkingLevel: { mutate: vi.fn() },
       setSessionEffortLevel,
       setExecutionMode: vi.fn(),
@@ -149,6 +150,61 @@ describe('useToolbarHandlers', () => {
       key: 'provider',
       value: 'MiniMax',
     })
+  })
+
+  it('persists an output style selection across store, cache, and backend', () => {
+    const setSessionOutputStyle = { mutate: vi.fn() }
+    const { result, queryClient } = renderHandlers({ setSessionOutputStyle })
+
+    act(() => {
+      result.current.handleToolbarOutputStyleChange('Explanatory')
+    })
+
+    expect(useChatStore.getState().selectedOutputStyles['session-1']).toBe(
+      'Explanatory'
+    )
+    expect(setSessionOutputStyle.mutate).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      worktreeId: 'worktree-1',
+      worktreePath: '/tmp/worktree',
+      outputStyle: 'Explanatory',
+    })
+    expect(
+      queryClient.getQueryData<Session>(chatQueryKeys.session('session-1'))
+        ?.selected_output_style
+    ).toBe('Explanatory')
+    expect(invokeMock).toHaveBeenCalledWith('broadcast_session_setting', {
+      sessionId: 'session-1',
+      key: 'outputStyle',
+      value: 'Explanatory',
+    })
+  })
+
+  it('clears the output style when switching back to Default', () => {
+    const setSessionOutputStyle = { mutate: vi.fn() }
+    const { result, queryClient } = renderHandlers({ setSessionOutputStyle })
+    queryClient.setQueryData(chatQueryKeys.session('session-1'), {
+      ...baseSession,
+      selected_output_style: 'Concise',
+    })
+
+    act(() => {
+      result.current.handleToolbarOutputStyleChange(null)
+    })
+
+    expect(
+      useChatStore.getState().selectedOutputStyles['session-1']
+    ).toBeNull()
+    expect(setSessionOutputStyle.mutate).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      worktreeId: 'worktree-1',
+      worktreePath: '/tmp/worktree',
+      outputStyle: null,
+    })
+    expect(
+      queryClient.getQueryData<Session>(chatQueryKeys.session('session-1'))
+        ?.selected_output_style
+    ).toBeUndefined()
   })
 
   it('clears provider selection when switching back to the default', () => {
