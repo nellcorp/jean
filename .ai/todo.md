@@ -290,3 +290,19 @@
 - Reload the session. Confirm the separator stays above the same prompt.
 
 ---
+
+# Managed Claude installation
+
+- [x] Preserve explicit CLI source selections; separate Settings source display from effective/managed installation status.
+- [x] Add Install latest action to Claude managed card with progress, backend concurrency guard, success-only source switch, tests.
+- [x] Run quality gates and browser verification; build jean:dev.
+- [ ] Review diff, update/create PR, refresh local handoff.
+
+Docs: https://tanstack.com/query/latest/docs/framework/react/guides/mutations ; https://www.radix-ui.com/primitives/docs/components/radio-group
+
+## Managed Claude review
+
+- Full Docker `bun run check:all` passed: 307 frontend files / 2,146 tests; 1,136 jean-core and 13 Tauri tests, one pre-existing ignored Rust test. Typecheck, lint, format, clippy passed.
+- Final `jean:dev` built. Old-image source reset reproduced; new-image explicit selections persist. Actual managed install resolved 2.1.287 without changing system 2.1.186.
+- Agent-browser desktop and Playwright mobile light/dark visual checks passed, including progress, success-only source switch, button removal, correct selected-source status, and no overflow.
+- Independent review approved. Four existing test files repaired for async status races / live CDN nondeterminism, with no additional production behavior changes.

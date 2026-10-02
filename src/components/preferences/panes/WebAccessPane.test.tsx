@@ -29,7 +29,8 @@ describe('WebAccessPane in browser/headless mode', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     invokeMock.mockImplementation((command: string) => {
-      if (command === 'load_preferences') return Promise.resolve(defaultPreferences)
+      if (command === 'load_preferences')
+        return Promise.resolve(defaultPreferences)
       if (command === 'get_http_server_status') {
         return Promise.resolve({
           running: true,
@@ -51,7 +52,9 @@ describe('WebAccessPane in browser/headless mode', () => {
     await waitFor(() => {
       expect(screen.getByText('Enable HTTP server')).toBeInTheDocument()
     })
-    expect(screen.queryByText(/only available in the desktop app/i)).not.toBeInTheDocument()
-    expect(screen.getByDisplayValue('secret-token')).toBeInTheDocument()
+    expect(
+      screen.queryByText(/only available in the desktop app/i)
+    ).not.toBeInTheDocument()
+    expect(await screen.findByDisplayValue('secret-token')).toBeInTheDocument()
   })
 })
