@@ -6,6 +6,8 @@
 mod commands;
 mod config;
 pub mod mcp;
+pub mod output_styles;
 
 pub use commands::*;
 pub use config::*;
+pub use output_styles::*;

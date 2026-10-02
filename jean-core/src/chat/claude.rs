@@ -4,6 +4,7 @@ use super::types::{
     is_claude_compaction_summary_text, CompactMetadata, ContentBlock, EffortLevel,
     PermissionDenial, PermissionDeniedEvent, ThinkingLevel, ToolCall, UsageData,
 };
+use crate::claude_cli::output_styles::DEFAULT_OUTPUT_STYLE;
 use crate::http_server::EmitExt;
 use crate::projects::github_issues::{
     get_github_contexts_dir, get_session_advisory_refs, get_session_issue_refs,
@@ -394,6 +395,76 @@ pub fn apply_custom_profile_env(cmd: &mut std::process::Command, profile_name: O
     }
 }
 
+/// Merge Jean-managed settings over a custom CLI profile's settings JSON.
+///
+/// Claude CLI's `--settings` is a non-variadic option, so passing it twice makes
+/// the last one win and silently discards the first. Both sources must therefore
+/// be combined into a single value. Jean's keys take precedence on conflict.
+fn merge_claude_settings(
+    profile_settings: Option<&str>,
+    jean_settings: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let profile_obj =
+        profile_settings.and_then(|raw| match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(map)) => Some(map),
+            Ok(_) => {
+                log::warn!("CLI profile settings is not a JSON object; ignoring");
+                None
+            }
+            Err(e) => {
+                log::warn!("Invalid CLI profile JSON: {e}");
+                None
+            }
+        });
+    let jean_obj = jean_settings.and_then(|value| value.as_object());
+
+    match (profile_obj, jean_obj) {
+        (None, None) => None,
+        (None, Some(jean)) => Some(serde_json::Value::Object(jean.clone())),
+        (Some(profile), None) => Some(serde_json::Value::Object(profile)),
+        (Some(mut profile), Some(jean)) => {
+            for (key, value) in jean {
+                profile.insert(key.clone(), value.clone());
+            }
+            Some(serde_json::Value::Object(profile))
+        }
+    }
+}
+
+/// Write merged settings to a per-session file so profile secrets never appear
+/// in the process arguments. Returns the path to pass to `--settings`.
+fn write_merged_settings_file(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    settings: &serde_json::Value,
+) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?
+        .join("runs")
+        .join(session_id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+
+    let path = dir.join("claude-settings.json");
+    let temp_path = dir.join("claude-settings.json.tmp");
+    let contents = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("Failed to serialize settings: {e}"))?;
+    std::fs::write(&temp_path, contents)
+        .map_err(|e| format!("Failed to write {}: {e}", temp_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    std::fs::rename(&temp_path, &path)
+        .map_err(|e| format!("Failed to finalize {}: {e}", path.display()))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 fn should_mirror_custom_profile_env_for_detached() -> bool {
     cfg!(windows) && !crate::platform::get_wsl_config().enabled
 }
@@ -455,6 +526,7 @@ fn build_claude_args(
     mcp_config: Option<&str>,
     chrome_enabled: bool,
     custom_profile_name: Option<&str>,
+    output_style: Option<&str>,
     include_recap: bool,
 ) -> (Vec<String>, Vec<(String, String)>) {
     let mut args = Vec::new();
@@ -553,13 +625,24 @@ fn build_claude_args(
         args.push("ExitPlanMode".to_string());
     }
 
-    // Custom profile settings: resolve name → file path, pass to --settings (secrets stay in file, not in ps)
+    // Custom profile settings: read the profile file so it can be merged with
+    // Jean's own settings below (a single --settings flag wins; two would not).
+    let mut profile_settings: Option<String> = None;
+    let mut profile_path: Option<std::path::PathBuf> = None;
     if let Some(name) = custom_profile_name {
         if !name.is_empty() {
             if let Ok(path) = crate::get_cli_profile_path(name) {
                 if path.exists() {
-                    args.push("--settings".to_string());
-                    args.push(path.to_string_lossy().to_string());
+                    match std::fs::read_to_string(&path) {
+                        Ok(contents) => {
+                            profile_settings = Some(contents);
+                            profile_path = Some(path);
+                        }
+                        Err(e) => log::warn!(
+                            "Failed to read CLI profile '{name}' at {}: {e}",
+                            path.display()
+                        ),
+                    }
                 } else {
                     log::warn!(
                         "CLI profile file not found for '{name}': {}",
@@ -628,10 +711,43 @@ fn build_claude_args(
         ));
     }
 
-    // Emit --settings if we have any settings to pass
-    if let Some(settings) = &settings_json {
-        args.push("--settings".to_string());
-        args.push(settings.to_string());
+    // Output style: Claude CLI's `outputStyle` settings key. Unset = Default.
+    if let Some(style) = output_style {
+        let style = style.trim();
+        if !style.is_empty() && style != DEFAULT_OUTPUT_STYLE {
+            let obj = settings_json.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(map) = obj.as_object_mut() {
+                map.insert(
+                    "outputStyle".to_string(),
+                    serde_json::Value::String(style.to_string()),
+                );
+            }
+        }
+    }
+
+    // Emit a single --settings: profile settings merged with Jean's (Jean wins).
+    if let Some(merged) = merge_claude_settings(profile_settings.as_deref(), settings_json.as_ref())
+    {
+        if profile_settings.is_some() {
+            // The profile may hold API keys, so write them to a file instead of
+            // exposing them in the process arguments.
+            match write_merged_settings_file(app, session_id, &merged) {
+                Ok(path) => {
+                    args.push("--settings".to_string());
+                    args.push(path);
+                }
+                Err(e) => {
+                    log::warn!("Failed to write merged Claude settings ({e}); falling back to the profile file alone");
+                    if let Some(path) = &profile_path {
+                        args.push("--settings".to_string());
+                        args.push(path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        } else {
+            args.push("--settings".to_string());
+            args.push(merged.to_string());
+        }
     }
 
     // Allowed tools
@@ -1193,6 +1309,7 @@ pub fn execute_claude_detached(
     mcp_config: Option<&str>,
     chrome_enabled: bool,
     custom_profile_name: Option<&str>,
+    output_style: Option<&str>,
     include_recap: bool,
     pid_callback: Option<Box<dyn FnOnce(u32) + Send>>,
 ) -> Result<(u32, ClaudeResponse), String> {
@@ -1238,6 +1355,7 @@ pub fn execute_claude_detached(
         mcp_config,
         chrome_enabled,
         custom_profile_name,
+        output_style,
         include_recap,
     );
 
@@ -2702,6 +2820,61 @@ mod tests {
 
         assert_eq!(metadata.trigger, "auto");
         assert_eq!(metadata.pre_tokens, 170298);
+    }
+
+    #[test]
+    fn merge_claude_settings_lets_jean_keys_win() {
+        let profile = r#"{"env":{"ANTHROPIC_API_KEY":"secret"},"fastMode":false}"#;
+        let jean = serde_json::json!({"fastMode": true, "outputStyle": "Explanatory"});
+
+        let merged = merge_claude_settings(Some(profile), Some(&jean)).unwrap();
+
+        assert_eq!(merged["fastMode"], serde_json::json!(true));
+        assert_eq!(merged["outputStyle"], serde_json::json!("Explanatory"));
+        assert_eq!(
+            merged["env"]["ANTHROPIC_API_KEY"],
+            serde_json::json!("secret")
+        );
+    }
+
+    #[test]
+    fn merge_claude_settings_preserves_profile_env_when_jean_settings_present() {
+        // Regression: two --settings flags made the last one win, silently
+        // dropping the profile's credentials.
+        let profile = r#"{"env":{"ANTHROPIC_BASE_URL":"https://example.test"}}"#;
+        let jean = serde_json::json!({"effortLevel": "high"});
+
+        let merged = merge_claude_settings(Some(profile), Some(&jean)).unwrap();
+
+        assert_eq!(
+            merged["env"]["ANTHROPIC_BASE_URL"],
+            serde_json::json!("https://example.test")
+        );
+        assert_eq!(merged["effortLevel"], serde_json::json!("high"));
+    }
+
+    #[test]
+    fn merge_claude_settings_handles_single_and_empty_sources() {
+        assert!(merge_claude_settings(None, None).is_none());
+        let jean = serde_json::json!({"fastMode": true});
+        assert_eq!(
+            merge_claude_settings(None, Some(&jean)).unwrap(),
+            serde_json::json!({"fastMode": true})
+        );
+        assert_eq!(
+            merge_claude_settings(Some(r#"{"env":{}}"#), None).unwrap(),
+            serde_json::json!({"env": {}})
+        );
+    }
+
+    #[test]
+    fn merge_claude_settings_ignores_unparseable_profile() {
+        let jean = serde_json::json!({"fastMode": true});
+        assert_eq!(
+            merge_claude_settings(Some("not json"), Some(&jean)).unwrap(),
+            serde_json::json!({"fastMode": true})
+        );
+        assert!(merge_claude_settings(Some("[1,2]"), None).is_none());
     }
 
     #[test]

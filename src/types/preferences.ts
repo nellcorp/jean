@@ -1264,6 +1264,7 @@ export interface AppPreferences {
   sync_zoom_levels?: boolean // Keep desktop and mobile zoom levels in sync (default true)
   custom_cli_profiles: CustomCliProfile[] // Custom CLI settings profiles (e.g., OpenRouter, MiniMax)
   default_provider: string | null // Default Claude provider profile name (null = Anthropic direct)
+  default_output_style?: string | null // Default Claude output style name (null = Default)
   /** Codex custom model_provider profiles (OpenRouter, OpenAI-compatible, etc.) */
   custom_codex_providers: CodexProviderProfile[]
   /** Default Codex provider profile name (null = Codex default / ChatGPT OpenAI) */
@@ -2399,6 +2400,7 @@ export const defaultPreferences: AppPreferences = {
   sync_zoom_levels: true,
   custom_cli_profiles: [],
   default_provider: null,
+  default_output_style: null,
   custom_codex_providers: [],
   default_codex_provider: null,
   custom_pi_providers: [],

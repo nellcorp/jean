@@ -165,6 +165,9 @@ interface ChatUIState {
   // Selected provider per session (null = default Anthropic, or custom profile name)
   selectedProviders: Record<string, string | null>
 
+  // Selected Claude output style per session (null = Default)
+  selectedOutputStyles: Record<string, string | null>
+
   // Enabled MCP servers per session (server names that are active)
   enabledMcpServers: Record<string, string[]>
 
@@ -484,6 +487,7 @@ interface ChatUIState {
 
   // Actions - Selected provider (session-based)
   setSelectedProvider: (sessionId: string, provider: string | null) => void
+  setSelectedOutputStyle: (sessionId: string, outputStyle: string | null) => void
 
   // Actions - Copy all per-session settings from one session to another
   copySessionSettings: (fromSessionId: string, toSessionId: string) => void
@@ -755,6 +759,7 @@ export const useChatStore = create<ChatUIState>()(
       selectedBackends: {},
       selectedModels: {},
       selectedProviders: {},
+      selectedOutputStyles: {},
       enabledMcpServers: {},
       scheduledWakeups: {},
       answeredQuestions: {},
@@ -2252,6 +2257,22 @@ export const useChatStore = create<ChatUIState>()(
           'setSelectedProvider'
         ),
 
+      // Selected Claude output style (session-based)
+      setSelectedOutputStyle: (sessionId: string, outputStyle: string | null) =>
+        set(
+          state => {
+            if (state.selectedOutputStyles[sessionId] === outputStyle) return state
+            return {
+              selectedOutputStyles: {
+                ...state.selectedOutputStyles,
+                [sessionId]: outputStyle,
+              },
+            }
+          },
+          undefined,
+          'setSelectedOutputStyle'
+        ),
+
       // Copy all per-session settings from one session to another
       copySessionSettings: (fromId, toId) =>
         set(
@@ -2285,6 +2306,13 @@ export const useChatStore = create<ChatUIState>()(
               updates.selectedProviders = {
                 ...state.selectedProviders,
                 [toId]: sp,
+              }
+            }
+            const os = state.selectedOutputStyles[fromId]
+            if (os !== undefined) {
+              updates.selectedOutputStyles = {
+                ...state.selectedOutputStyles,
+                [toId]: os,
               }
             }
             const ms = state.enabledMcpServers[fromId]

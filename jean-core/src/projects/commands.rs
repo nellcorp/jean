@@ -13091,7 +13091,7 @@ struct CommandFrontmatter {
     allowed_tools: Option<AllowedToolsFrontmatter>,
 }
 
-fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
+pub(crate) fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
     let mut lines = content.split_inclusive('\n');
     let Some(first_line) = lines.next() else {
         return (None, content);

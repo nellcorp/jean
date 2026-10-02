@@ -252,6 +252,8 @@ export interface Session {
   selected_effort_level?: EffortLevel
   /** Selected provider (custom CLI profile name) for this session */
   selected_provider?: string
+  /** Selected Claude output style for this session (undefined = Default) */
+  selected_output_style?: string
   /** Selected execution mode for this session (plan/build/yolo) */
   selected_execution_mode?: ExecutionMode
   /** Whether session naming has been attempted for this session */

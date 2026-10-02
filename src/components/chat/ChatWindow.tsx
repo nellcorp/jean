@@ -37,6 +37,7 @@ import {
   useSetSessionEffortLevel,
   useSetSessionBackend,
   useSetSessionProvider,
+  useSetSessionOutputStyle,
   useCreateSession,
   useLoadOlderMessages,
   markPlanApproved as markPlanApprovedService,
@@ -656,6 +657,7 @@ export function ChatWindow({
   const setSessionEffortLevel = useSetSessionEffortLevel()
   const setSessionBackend = useSetSessionBackend()
   const setSessionProvider = useSetSessionProvider()
+  const setSessionOutputStyle = useSetSessionOutputStyle()
 
   // Fetch worktree data for PR link display
   const { data: worktree } = useWorktree(activeWorktreeId ?? null)
@@ -798,6 +800,17 @@ export function ChatWindow({
   // switches apply immediately (session query can lag until invalidate).
   const sessionProvider =
     zustandProvider !== undefined ? zustandProvider : session?.selected_provider
+
+  // Per-session Claude output style: zustand → persisted session → global default
+  const zustandOutputStyle = useChatStore(state =>
+    deferredSessionId ? state.selectedOutputStyles[deferredSessionId] : undefined
+  )
+  const selectedOutputStyle =
+    (zustandOutputStyle !== undefined
+      ? zustandOutputStyle
+      : (session?.selected_output_style ?? null)) ??
+    preferences?.default_output_style ??
+    null
 
   // Installed backends (only these should be selectable)
   const { installedBackends } = useInstalledBackends()
@@ -2376,6 +2389,7 @@ export function ChatWindow({
     handleToolbarBackendModelChange,
     handleTabBackendSwitch,
     handleToolbarProviderChange,
+    handleToolbarOutputStyleChange,
     handleToolbarThinkingLevelChange,
     handleToolbarEffortLevelChange,
     handleToggleMcpServer,
@@ -2401,6 +2415,7 @@ export function ChatWindow({
     setSessionModel,
     setSessionBackend,
     setSessionProvider,
+    setSessionOutputStyle,
     setSessionThinkingLevel,
     setSessionEffortLevel,
     setExecutionMode,
@@ -3789,6 +3804,11 @@ export function ChatWindow({
                                     }
                                     selectedModel={selectedModel}
                                     selectedProvider={selectedProvider}
+                                    selectedOutputStyle={selectedOutputStyle}
+                                    claudeCliVersion={cliStatus?.version ?? null}
+                                    onOutputStyleChange={
+                                      handleToolbarOutputStyleChange
+                                    }
                                     providerLocked={
                                       (session?.messages?.length ?? 0) > 0
                                     }

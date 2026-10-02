@@ -304,6 +304,8 @@ pub struct AppPreferences {
     #[serde(default)]
     pub default_provider: Option<String>, // Default Claude provider profile name (None = Anthropic direct)
     #[serde(default)]
+    pub default_output_style: Option<String>, // Default Claude output style name (None = Default)
+    #[serde(default)]
     pub custom_codex_providers: Vec<CodexProviderProfile>, // Codex custom model_provider profiles
     #[serde(default)]
     pub default_codex_provider: Option<String>, // Default Codex provider profile name (None = built-in)
@@ -2827,6 +2829,7 @@ impl Default for AppPreferences {
             sync_zoom_levels: default_sync_zoom_levels(),
             custom_cli_profiles: Vec::new(),
             default_provider: None,
+            default_output_style: None,
             custom_codex_providers: Vec::new(),
             default_codex_provider: None,
             custom_pi_providers: Vec::new(),

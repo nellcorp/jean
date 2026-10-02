@@ -20,6 +20,7 @@ import {
   GitPullRequestArrow,
   Globe,
   Paperclip,
+  Palette,
   Play,
   Plug,
   Settings,
@@ -31,6 +32,9 @@ import {
   Bug,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
+import { compareVersions } from '@/lib/version-utils'
+import { useClaudeOutputStyles } from '@/services/output-styles'
+import { DEFAULT_OUTPUT_STYLE } from '@/types/output-styles'
 import { toast } from 'sonner'
 import {
   DropdownMenu,
@@ -127,6 +131,9 @@ interface MobileSettingsMenuProps {
   selectedBackend: CliBackend
   selectedModel: string
   selectedProvider: string | null
+  selectedOutputStyle?: string | null
+  claudeCliVersion?: string | null
+  onOutputStyleChange?: (style: string | null) => void
   backendModelLabel: ReactNode
   backendModelLabelText: string
   hasMultipleBackendModelChoices: boolean
@@ -189,6 +196,9 @@ export function MobileSettingsMenu({
   selectedBackend,
   selectedModel,
   selectedProvider,
+  selectedOutputStyle = null,
+  claudeCliVersion,
+  onOutputStyleChange,
   backendModelLabel,
   backendModelLabelText,
   hasMultipleBackendModelChoices,
@@ -342,6 +352,12 @@ export function MobileSettingsMenu({
   const providerDisplayName = getProviderDisplayName(
     selectedProvider,
     selectedBackend
+  )
+  const { data: allOutputStyles = [] } = useClaudeOutputStyles(null)
+  // Bundled presets need an install step, which the mobile menu does not offer.
+  const outputStyles = useMemo(
+    () => allOutputStyles.filter(style => style.installed),
+    [allOutputStyles]
   )
   const showClaudeProviders =
     customCliProfiles.length > 0 && selectedBackend === 'claude'
@@ -612,6 +628,53 @@ export function MobileSettingsMenu({
                     ))}
                   </DropdownMenuRadioGroup>
                 )}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          )}
+
+          {selectedBackend === 'claude' && onOutputStyleChange && (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Palette className="mr-2 h-4 w-4 text-muted-foreground" />
+                <span>Output style</span>
+                <span className="ml-auto truncate text-xs text-muted-foreground">
+                  {selectedOutputStyle ?? DEFAULT_OUTPUT_STYLE}
+                </span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
+                <DropdownMenuRadioGroup
+                  value={selectedOutputStyle ?? DEFAULT_OUTPUT_STYLE}
+                  onValueChange={value =>
+                    onOutputStyleChange(
+                      value === DEFAULT_OUTPUT_STYLE ? null : value
+                    )
+                  }
+                >
+                  <DropdownMenuRadioItem
+                    value={DEFAULT_OUTPUT_STYLE}
+                    onSelect={keepMenuOpenOnSelect}
+                  >
+                    {DEFAULT_OUTPUT_STYLE}
+                  </DropdownMenuRadioItem>
+                  {outputStyles.length > 0 && <DropdownMenuSeparator />}
+                  {outputStyles.map(style => (
+                    <DropdownMenuRadioItem
+                      key={`${style.source}:${style.name}`}
+                      value={style.name}
+                      disabled={Boolean(
+                        style.minCliVersion &&
+                          claudeCliVersion &&
+                          compareVersions(
+                            claudeCliVersion,
+                            style.minCliVersion
+                          ) < 0
+                      )}
+                      onSelect={keepMenuOpenOnSelect}
+                    >
+                      {style.name}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
               </DropdownMenuSubContent>
             </DropdownMenuSub>
           )}
