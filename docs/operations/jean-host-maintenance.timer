@@ -1,0 +1,8 @@
+[Unit]
+Description=Jean host maintenance at 02:00 UTC
+[Timer]
+OnCalendar=2026-10-04 02:00:00 UTC
+AccuracySec=1s
+Persistent=true
+[Install]
+WantedBy=timers.target
