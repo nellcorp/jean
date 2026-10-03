@@ -1,5 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { invoke } from '@/lib/transport'
+import { invoke, invokeForServer } from '@/lib/transport'
+import { parseServerResourceKey } from '@/lib/server-resource'
+import { LOCAL_SERVER_ID } from '@/types/server-resource'
 import { logger } from '@/lib/logger'
 import type {
   LinearIssue,
@@ -11,18 +13,42 @@ import type {
 import { isTauri, useProjects } from './projects'
 import { usePreferences } from './preferences'
 
+function invokeProject<T>(
+  command: string,
+  args: { projectId: string } & Record<string, unknown>
+): Promise<T> {
+  const reference = parseServerResourceKey(args.projectId)
+  const resourceArgs: { projectId: string } & Record<string, unknown> = {
+    ...args,
+    projectId: reference?.resourceId ?? args.projectId,
+  }
+  for (const key of ['sessionId', 'worktreeId']) {
+    const value = resourceArgs[key]
+    if (typeof value === 'string') {
+      resourceArgs[key] = parseServerResourceKey(value)?.resourceId ?? value
+    }
+  }
+  return reference && reference.serverId !== LOCAL_SERVER_ID
+    ? invokeForServer<T>(reference.serverId, command, resourceArgs)
+    : invoke<T>(command, resourceArgs)
+}
+
 function hasValue(value: string | null | undefined): boolean {
   return !!value?.trim()
 }
 
 function useHasLinearAccess(projectId: string | null): boolean {
   const { data: projects } = useProjects()
-  const { data: preferences } = usePreferences()
+  const serverId =
+    parseServerResourceKey(projectId ?? '')?.serverId ?? LOCAL_SERVER_ID
+  const { data: preferences } = usePreferences(serverId)
   const project = projects?.find(p => p.id === projectId)
 
   return (
     hasValue(project?.linear_api_key ?? null) ||
-    hasValue(preferences?.linear_api_key ?? null)
+    hasValue(preferences?.linear_api_key ?? null) ||
+    (serverId !== LOCAL_SERVER_ID &&
+      preferences?.linear_api_key_configured === true)
   )
 }
 
@@ -87,7 +113,7 @@ export function useLinearTeams(
 
       try {
         logger.debug('Fetching Linear teams', { projectId })
-        const result = await invoke<LinearTeam[]>('list_linear_teams', {
+        const result = await invokeProject<LinearTeam[]>('list_linear_teams', {
           projectId,
         })
         logger.info('Linear teams loaded', { count: result.length })
@@ -122,9 +148,12 @@ export function useLinearProjects(
 
       try {
         logger.debug('Fetching Linear projects', { projectId })
-        const result = await invoke<LinearProject[]>('list_linear_projects', {
-          projectId,
-        })
+        const result = await invokeProject<LinearProject[]>(
+          'list_linear_projects',
+          {
+            projectId,
+          }
+        )
         logger.info('Linear projects loaded', { count: result.length })
         return result
       } catch (error) {
@@ -159,7 +188,7 @@ export function useLinearIssues(
 
       try {
         logger.debug('Fetching Linear issues', { projectId })
-        const result = await invoke<LinearIssueListResult>(
+        const result = await invokeProject<LinearIssueListResult>(
           'list_linear_issues',
           { projectId }
         )
@@ -194,10 +223,13 @@ export function useSearchLinearIssues(
 
       try {
         logger.debug('Searching Linear issues', { projectId, query })
-        const result = await invoke<LinearIssue[]>('search_linear_issues', {
-          projectId,
-          query,
-        })
+        const result = await invokeProject<LinearIssue[]>(
+          'search_linear_issues',
+          {
+            projectId,
+            query,
+          }
+        )
         logger.info('Linear issue search returned', { count: result.length })
         return result
       } catch (error) {
@@ -231,7 +263,7 @@ export function useLoadedLinearIssueContexts(
       }
 
       try {
-        return await invoke<LoadedLinearIssueContext[]>(
+        return await invokeProject<LoadedLinearIssueContext[]>(
           'list_loaded_linear_issue_contexts',
           { sessionId, worktreeId, projectId }
         )
@@ -272,7 +304,7 @@ export function useGetLinearIssueByNumber(
           projectId,
           itemNumber,
         })
-        const result = await invoke<LinearIssue | null>(
+        const result = await invokeProject<LinearIssue | null>(
           'get_linear_issue_by_number',
           { projectId, issueNumber: itemNumber }
         )
@@ -323,7 +355,7 @@ export async function loadLinearIssueContext(
   projectId: string,
   issueId: string
 ): Promise<LoadedLinearIssueContext> {
-  return invoke<LoadedLinearIssueContext>('load_linear_issue_context', {
+  return invokeProject<LoadedLinearIssueContext>('load_linear_issue_context', {
     sessionId,
     projectId,
     issueId,
@@ -338,7 +370,7 @@ export async function removeLinearIssueContext(
   projectId: string,
   identifier: string
 ): Promise<void> {
-  return invoke('remove_linear_issue_context', {
+  return invokeProject('remove_linear_issue_context', {
     sessionId,
     projectId,
     identifier,

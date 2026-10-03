@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,22 +11,23 @@ use tauri::AppHandle;
 use uuid::Uuid;
 
 use super::naming::{spawn_naming_task, NamingRequest};
-use super::registry::{cancel_process, cancel_process_if_running};
+use super::registry::{
+    cancel_process, cancel_process_if_running, has_active_send, release_active_send, SendClaim,
+};
 use super::run_log;
 use super::storage::{
     cleanup_combined_context_files, delete_session_data, get_base_index_path, get_data_dir,
-    get_index_path, get_session_dir, load_metadata, load_sessions, save_metadata,
-    with_existing_metadata_mut, with_metadata_mut, with_sessions_mut,
+    get_index_path, get_session_dir, load_index, load_metadata, load_sessions, save_metadata,
+    with_existing_metadata_mut, with_index_mut, with_metadata_mut, with_sessions_mut,
 };
 use super::types::{
     AllSessionsEntry, AllSessionsResponse, Backend, ChatMessage, ClaudeContext, EffortLevel,
-    LabelData, MessageRole, RunStatus, Session, ThinkingLevel, WorktreeIndex, WorktreeSessions,
+    LabelData, MessageRole, RunStatus, Session, SessionUnreadSummary, ThinkingLevel, WorktreeIndex,
+    WorktreeSessions,
 };
 use crate::claude_cli::resolve_cli_binary;
 use crate::http_server::EmitExt;
-use crate::projects::github_issues::{
-    add_issue_reference, add_pr_reference, get_session_issue_refs, get_session_pr_refs,
-};
+use crate::projects::github_issues::{get_preferred_issue_refs, get_preferred_pr_refs};
 use crate::projects::storage::load_projects_data;
 use crate::projects::types::{SessionType, Worktree};
 
@@ -35,7 +35,7 @@ const QUEUE_DEFAULT_ALLOWED_TOOLS: [&str; 4] = ["Bash(git:*)", "Read", "Glob", "
 const IMAGE_ONLY_DEFAULT_PROMPT: &str = "Please check this image and tell me what is wrong.";
 const TEXT_ONLY_DEFAULT_PROMPT: &str = "Please check the attached text as reference.";
 
-fn resumed_grok_tail_error_event(
+fn resumed_tail_error_event(
     session_id: &str,
     worktree_id: &str,
     error: &str,
@@ -106,20 +106,6 @@ When specifying subagent_type for Task tool calls, always use the fully qualifie
 static BACKEND_QUEUE_DRAINING: Lazy<Mutex<HashSet<String>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
-/// Sessions with a `send_chat_message` call currently in flight.
-///
-/// The registry-based "actively managed" guard only catches duplicates after a
-/// process/turn is registered, leaving a window where two concurrent sends
-/// (frontend queue processor vs backend queue drain vs another client) both
-/// pass the check and spawn duplicate runs. This claim is taken atomically at
-/// `send_chat_message` entry and held for the whole call — unless cancel
-/// releases it early so a follow-up send is not stuck (#329).
-///
-/// Values are generation tokens so an early cancel release cannot be clobbered
-/// by a later `Drop` from the cancelled claim after a new claim was acquired.
-static ACTIVE_SENDS: Lazy<Mutex<HashMap<String, u64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-static SEND_CLAIM_GENERATION: AtomicU64 = AtomicU64::new(1);
-
 /// Whether a session has no prior user messages for auto-naming purposes.
 ///
 /// After the NDJSON migration, `Session.messages` is always empty (messages are
@@ -148,57 +134,16 @@ fn should_auto_name_branch(worktree: Option<&Worktree>) -> bool {
                 // Existing-branch worktrees record that branch as their own base.
                 // Its user-selected name must be preserved.
                 && worktree.base_branch.as_deref() != Some(worktree.branch.as_str())
+                // Only Jean's random placeholder names are eligible. Names created
+                // from PRs, issues, alerts, Sentry, or explicit user input already
+                // describe the work and must survive the first prompt.
+                && crate::projects::is_generated_workspace_name(&worktree.name)
         })
         .unwrap_or(true)
 }
 
-/// RAII claim on a session's send slot — released on drop (any return path).
-struct SendClaim {
-    session_id: String,
-    generation: u64,
-}
-
-impl SendClaim {
-    fn try_acquire(session_id: &str) -> Option<Self> {
-        let mut active = ACTIVE_SENDS.lock().unwrap();
-        if active.contains_key(session_id) {
-            return None;
-        }
-        let generation = SEND_CLAIM_GENERATION.fetch_add(1, Ordering::Relaxed);
-        active.insert(session_id.to_string(), generation);
-        Some(Self {
-            session_id: session_id.to_string(),
-            generation,
-        })
-    }
-}
-
-impl Drop for SendClaim {
-    fn drop(&mut self) {
-        let mut active = ACTIVE_SENDS.lock().unwrap();
-        // Only clear if we still own the slot — cancel may have released early
-        // and a newer send may already hold a different generation.
-        if active.get(&self.session_id) == Some(&self.generation) {
-            active.remove(&self.session_id);
-        }
-    }
-}
-
-/// Release the in-flight send claim for a session after cancel so a follow-up
-/// prompt is not rejected with "Session already has an active request" while
-/// the cancelled worker finishes teardown (#329).
-fn release_active_send(session_id: &str) {
-    if ACTIVE_SENDS.lock().unwrap().remove(session_id).is_some() {
-        log::info!("[SendChat] released active send claim after cancel session={session_id}");
-    }
-}
-
-fn has_active_send(session_id: &str) -> bool {
-    ACTIVE_SENDS.lock().unwrap().contains_key(session_id)
-}
-
 fn should_forward_cancel_request(session_id: &str) -> bool {
-    has_active_send(session_id) || super::registry::is_session_actively_managed(session_id)
+    super::registry::is_session_actively_managed(session_id)
 }
 
 fn clear_stale_pending_cancel_before_send(session_id: &str) {
@@ -260,11 +205,18 @@ fn resolve_codex_global_system_prompt(
     preferences_prompt: Option<&str>,
     execution_mode: Option<&str>,
 ) -> String {
-    preferences_prompt
+    if let Some(custom_prompt) = preferences_prompt
         .map(str::trim)
         .filter(|prompt| !is_codex_default_global_system_prompt(prompt))
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| codex_default_global_system_prompt(execution_mode))
+    {
+        return custom_prompt.to_string();
+    }
+
+    format!(
+        "{}\n\n{}",
+        crate::default_global_system_prompt(),
+        codex_default_global_system_prompt(execution_mode)
+    )
 }
 
 fn append_codex_execution_mode_instruction(parts: &mut Vec<String>, execution_mode: Option<&str>) {
@@ -416,9 +368,14 @@ fn should_clear_stale_resumed_claude_session(
     has_tool_calls: bool,
     has_content_blocks: bool,
     has_usage: bool,
-    _was_cancelled: bool,
+    was_cancelled: bool,
 ) -> bool {
-    was_resuming && !has_content && !has_tool_calls && !has_content_blocks && !has_usage
+    was_resuming
+        && !was_cancelled
+        && !has_content
+        && !has_tool_calls
+        && !has_content_blocks
+        && !has_usage
 }
 
 fn default_model_for_backend(
@@ -486,6 +443,14 @@ async fn resolve_output_style(
     }
 }
 
+fn resolve_global_system_prompt(preferences_prompt: Option<&str>) -> String {
+    preferences_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(crate::default_global_system_prompt)
+}
+
 /// Resolve the model used for a send.
 ///
 /// Precedence:
@@ -526,17 +491,10 @@ fn build_kimi_system_prompt(
     if let Some(language) = ai_language.map(str::trim).filter(|value| !value.is_empty()) {
         parts.push(format!("Respond to the user in {language}."));
     }
-    if let Ok(preferences) = crate::load_preferences_sync(app) {
-        if let Some(prompt) = preferences
-            .magic_prompts
-            .global_system_prompt
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            parts.push(prompt.to_string());
-        }
-    }
+    let preferences = crate::load_preferences_sync(app).ok();
+    parts.push(resolve_global_system_prompt(preferences.as_ref().and_then(
+        |prefs| prefs.magic_prompts.global_system_prompt.as_deref(),
+    )));
     if let Some(prompt) = parallel_prompt
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -688,39 +646,6 @@ pub async fn get_sessions(
         }
     }
 
-    // Propagate issue/PR references from worktree_id to session IDs
-    // (create_worktree stores refs under worktree_id, but toolbar queries by session_id)
-    let worktree_issue_keys = get_session_issue_refs(&app, &worktree_id).unwrap_or_default();
-    let worktree_pr_keys = get_session_pr_refs(&app, &worktree_id).unwrap_or_default();
-
-    if !worktree_issue_keys.is_empty() || !worktree_pr_keys.is_empty() {
-        for session in &sessions.sessions {
-            let session_issues = get_session_issue_refs(&app, &session.id).unwrap_or_default();
-            let session_prs = get_session_pr_refs(&app, &session.id).unwrap_or_default();
-
-            if session_issues.is_empty() && !worktree_issue_keys.is_empty() {
-                for key in &worktree_issue_keys {
-                    if let Some(number_str) = key.rsplit('-').next() {
-                        if let Ok(number) = number_str.parse::<u32>() {
-                            let repo_key = &key[..key.len() - number_str.len() - 1];
-                            let _ = add_issue_reference(&app, repo_key, number, &session.id);
-                        }
-                    }
-                }
-            }
-            if session_prs.is_empty() && !worktree_pr_keys.is_empty() {
-                for key in &worktree_pr_keys {
-                    if let Some(number_str) = key.rsplit('-').next() {
-                        if let Ok(number) = number_str.parse::<u32>() {
-                            let repo_key = &key[..key.len() - number_str.len() - 1];
-                            let _ = add_pr_reference(&app, repo_key, number, &session.id);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     Ok(sessions)
 }
 
@@ -857,6 +782,94 @@ pub async fn list_all_sessions(app: AppHandle) -> Result<AllSessionsResponse, St
     Ok(AllSessionsResponse { entries })
 }
 
+/// Return only the unread-session count across all projects.
+///
+/// The unread badge does not need session objects or message history. Keeping
+/// this result as a scalar prevents the frontend from retaining every session
+/// in a global TanStack Query cache just to render a badge.
+pub async fn get_unread_session_count(app: AppHandle) -> Result<usize, String> {
+    log::trace!("Counting unread sessions across all worktrees");
+
+    let projects_data = load_projects_data(&app)?;
+    let mut unread_count = 0;
+
+    for project in &projects_data.projects {
+        for worktree in projects_data
+            .worktrees_for_project(&project.id)
+            .into_iter()
+            .filter(|worktree| worktree.archived_at.is_none())
+        {
+            let index = load_index(&app, &worktree.id)?;
+            let mut legacy_summaries = HashMap::new();
+
+            for entry in &index.sessions {
+                if entry.archived_at.is_some() {
+                    continue;
+                }
+
+                let summary = if let Some(summary) = &entry.unread_summary {
+                    summary.clone()
+                } else {
+                    // Older indexes do not contain summaries. Read each legacy
+                    // metadata file once, then persist the compact result so
+                    // future count checks stay index-only.
+                    match load_metadata(&app, &entry.id) {
+                        Ok(Some(metadata)) => {
+                            let summary = metadata.to_unread_summary();
+                            legacy_summaries.insert(entry.id.clone(), summary.clone());
+                            summary
+                        }
+                        Ok(None) => {
+                            let summary = SessionUnreadSummary::default();
+                            legacy_summaries.insert(entry.id.clone(), summary.clone());
+                            summary
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "Failed to load legacy unread metadata for session {}: {error}",
+                                entry.id
+                            );
+                            continue;
+                        }
+                    }
+                };
+
+                if summary.is_unread() {
+                    unread_count += 1;
+                }
+            }
+
+            if !legacy_summaries.is_empty() {
+                let migration_result = with_index_mut(&app, &worktree.id, |index| {
+                    for (session_id, summary) in &legacy_summaries {
+                        if let Some(entry) = index.find_session_mut(session_id) {
+                            if entry.unread_summary.is_none() {
+                                entry.unread_summary = Some(summary.clone());
+                            }
+                        }
+                    }
+                    Ok(())
+                });
+                if let Err(error) = migration_result {
+                    log::warn!(
+                        "Failed to persist unread index migration for worktree {}: {error}",
+                        worktree.id
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(unread_count)
+}
+
+fn is_unread_session(session: &Session) -> bool {
+    if session.archived_at.is_some() {
+        return false;
+    }
+    SessionUnreadSummary::from_session(session).is_unread()
+}
+
 /// Get a single session with message history.
 ///
 /// `limit`: optional max number of recent runs to load. When `None`, loads all runs
@@ -898,6 +911,12 @@ pub async fn get_session(
     session.messages = messages;
     session.total_runs = loaded.total_runs;
     session.loaded_run_start_index = loaded.loaded_run_start_index;
+
+    // The backend is the only queue consumer. Resume persisted prompts when a
+    // session is opened after a restart; the drain checks active/waiting state.
+    if !session.queued_messages.is_empty() && session.archived_at.is_none() {
+        trigger_backend_queue_drain(app, worktree_id, worktree_path, session_id);
+    }
     Ok(session)
 }
 
@@ -1054,29 +1073,6 @@ pub async fn create_session(
         Ok(session)
     })?;
 
-    // Copy issue/PR context references from worktree_id to new session_id
-    // (worktree creation stores refs under worktree_id, but toolbar queries by session_id)
-    if let Ok(issue_keys) = get_session_issue_refs(&app, &worktree_id) {
-        for key in &issue_keys {
-            if let Some(number_str) = key.rsplit('-').next() {
-                if let Ok(number) = number_str.parse::<u32>() {
-                    let repo_key = &key[..key.len() - number_str.len() - 1];
-                    let _ = add_issue_reference(&app, repo_key, number, &session.id);
-                }
-            }
-        }
-    }
-    if let Ok(pr_keys) = get_session_pr_refs(&app, &worktree_id) {
-        for key in &pr_keys {
-            if let Some(number_str) = key.rsplit('-').next() {
-                if let Ok(number) = number_str.parse::<u32>() {
-                    let repo_key = &key[..key.len() - number_str.len() - 1];
-                    let _ = add_pr_reference(&app, repo_key, number, &session.id);
-                }
-            }
-        }
-    }
-
     emit_sessions_cache_invalidation(&app);
     Ok(session)
 }
@@ -1197,8 +1193,7 @@ async fn drain_backend_queue(
         )
         .await
         {
-            // Lost a send race against another consumer (frontend queue
-            // processor or another client). Re-insert at the queue front so
+            // Lost a send race against a direct client send. Re-insert at the queue front so
             // the message is NOT lost — the active run's completion re-triggers
             // the drain and retries it.
             if e.contains("already has an active request") {
@@ -1618,14 +1613,28 @@ pub async fn rename_session(
 ) -> Result<(), String> {
     log::trace!("Renaming session {session_id} to: {new_name}");
 
-    with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
+    let old_name = with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
         if let Some(session) = sessions.find_session_mut(&session_id) {
-            session.name = new_name;
-            Ok(())
+            // A manual name wins: skip auto-naming on the first prompt.
+            session.session_naming_completed = true;
+            Ok(std::mem::replace(&mut session.name, new_name.clone()))
         } else {
             Err(format!("Session not found: {session_id}"))
         }
-    })
+    })?;
+
+    // Notify all clients so an in-flight auto-naming indicator is cleared
+    // and caches show the manual name immediately.
+    let _ = app.emit_all(
+        "session-renamed",
+        &super::naming::SessionNameResult {
+            session_id,
+            worktree_id,
+            old_name,
+            new_name,
+        },
+    );
+    Ok(())
 }
 
 /// Regenerate session name using AI based on the first user message
@@ -1868,8 +1877,10 @@ fn plan_mode_content_waits_for_approval(
     // rejected WebFetch in plan mode) must not park the session on plan approval.
     // Grok waits only when a real/synthetic ExitPlanMode tool is present
     // (`has_blocking_tool` path via inject_synthetic_plan on plan-like content).
-    matches!(backend, Backend::Codex | Backend::Opencode | Backend::Kimi)
-        && execution_mode == Some("plan")
+    matches!(
+        backend,
+        Backend::Claude | Backend::Codex | Backend::Opencode | Backend::Kimi
+    ) && execution_mode == Some("plan")
         && has_content
         && !has_plan_tool
 }
@@ -1982,10 +1993,8 @@ pub async fn close_session(
             };
         }
 
-        // When the last non-archived session is closed, leave the worktree empty
-        // (active_session_id = None). Frontend navigates to the project picker
-        // (issue #501) instead of auto-creating a fallback "Session 1".
         // If non-archived sessions remain but active is unset, pick the first.
+        // The command creates a new empty session after this write when none remain.
         let first_non_archived = sessions
             .sessions
             .iter()
@@ -2003,6 +2012,23 @@ pub async fn close_session(
         );
         Ok(sessions.active_session_id.clone())
     })?;
+
+    if new_active.is_none() {
+        let session = create_session(
+            app.clone(),
+            worktree_id,
+            worktree_path,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        return Ok(Some(session.id));
+    }
 
     emit_sessions_cache_invalidation(&app);
     Ok(new_active)
@@ -2099,10 +2125,8 @@ pub async fn archive_session(
         };
         sessions.active_session_id = new_active;
 
-        // When the last non-archived session is archived/deleted, leave the worktree
-        // empty (active_session_id = None). Frontend navigates to the project picker
-        // (issue #501) instead of auto-creating a fallback "Session 1".
         // If non-archived sessions remain but active is unset, pick the first.
+        // The command creates a new empty session after this write when none remain.
         let first_non_archived = sessions
             .sessions
             .iter()
@@ -2127,6 +2151,23 @@ pub async fn archive_session(
         }
         Ok(sessions.active_session_id.clone())
     })?;
+
+    if new_active.is_none() {
+        let session = create_session(
+            app.clone(),
+            worktree_id,
+            worktree_path,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        return Ok(Some(session.id));
+    }
 
     emit_sessions_cache_invalidation(&app);
     Ok(new_active)
@@ -2571,17 +2612,10 @@ pub async fn set_active_session(
 pub async fn set_session_last_opened(app: AppHandle, session_id: String) -> Result<(), String> {
     log::trace!("Setting last_opened_at for session: {session_id}");
 
-    if let Ok(Some(mut metadata)) = load_metadata(&app, &session_id) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        metadata.last_opened_at = Some(now);
-        if metadata.primary_surface.as_deref() == Some("terminal") {
-            metadata.waiting_for_input = false;
-            metadata.waiting_for_input_type = None;
-        }
-        save_metadata(&app, &metadata)?;
+    if load_metadata(&app, &session_id)?.is_some() {
+        with_existing_metadata_mut(&app, &session_id, |metadata| {
+            acknowledge_session_opened(metadata, current_unix_time());
+        })?;
         // Broadcast so other clients (native ↔ web) drop stale last_opened_at.
         emit_sessions_cache_invalidation(&app);
     }
@@ -2602,21 +2636,15 @@ pub async fn set_sessions_last_opened_bulk(
         session_ids.len()
     );
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = current_unix_time();
 
     let mut updated = false;
     let mut result = Ok(());
     for session_id in &session_ids {
-        if let Ok(Some(mut metadata)) = load_metadata(&app, session_id) {
-            metadata.last_opened_at = Some(now);
-            if metadata.primary_surface.as_deref() == Some("terminal") {
-                metadata.waiting_for_input = false;
-                metadata.waiting_for_input_type = None;
-            }
-            if let Err(error) = save_metadata(&app, &metadata) {
+        if load_metadata(&app, session_id)?.is_some() {
+            if let Err(error) = with_existing_metadata_mut(&app, session_id, |metadata| {
+                acknowledge_session_opened(metadata, now);
+            }) {
                 result = Err(error);
                 break;
             }
@@ -2625,6 +2653,22 @@ pub async fn set_sessions_last_opened_bulk(
     }
 
     finish_bulk_update(updated, result, || emit_sessions_cache_invalidation(&app))
+}
+
+fn current_unix_time() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn acknowledge_session_opened(metadata: &mut super::types::SessionMetadata, now: u64) {
+    // Never acknowledge an older snapshot than the latest persisted activity.
+    metadata.last_opened_at = Some(now.max(metadata.updated_at()));
+    if metadata.primary_surface.as_deref() == Some("terminal") {
+        metadata.waiting_for_input = false;
+        metadata.waiting_for_input_type = None;
+    }
 }
 
 /// Auto-name a native terminal session from its first prompt. Terminal
@@ -2787,26 +2831,25 @@ pub async fn send_chat_message(
 
     clear_stale_pending_cancel_before_send(&session_id);
 
-    // Guard: atomically claim the session's send slot for the duration of this
-    // call. Closes the race window where two concurrent sends (queue processor
-    // vs backend drain vs another client) both pass the registry check below
-    // before either registers a process.
-    let Some(_send_claim) = SendClaim::try_acquire(&session_id) else {
-        log::warn!(
-            "[SendChat] REJECTED session={session_id} — concurrent send in flight (duplicate send)"
-        );
-        return Err("Session already has an active request".to_string());
-    };
-
-    // Guard: reject if this session already has an active process being tailed.
-    // Without this, a double-send (frontend race, page reload, etc.) creates
-    // duplicate run entries and orphans the first process in the registry.
+    // Check existing managed work before taking our own active-send claim.
+    // is_session_actively_managed includes active-send claims, so checking it
+    // after acquisition would reject every new send as its own duplicate.
     if super::registry::is_session_actively_managed(&session_id) {
         log::warn!(
             "[SendChat] REJECTED session={session_id} — already actively managed (duplicate send)"
         );
         return Err("Session already has an active request".to_string());
     }
+
+    // Atomically claim the session's send slot for the duration of this call.
+    // Two callers can pass the check above concurrently, but only one can take
+    // this claim before either caller registers a process.
+    let Some(_send_claim) = SendClaim::try_acquire(&session_id) else {
+        log::warn!(
+            "[SendChat] REJECTED session={session_id} — concurrent send in flight (duplicate send)"
+        );
+        return Err("Session already has an active request".to_string());
+    };
 
     // Load sessions
     let mut sessions = load_sessions(&app, &worktree_path, &worktree_id)?;
@@ -2947,20 +2990,6 @@ pub async fn send_chat_message(
         }
     }
 
-    // Notify all clients that a message is being sent (for real-time sync).
-    // Include user_message so cross-client viewers can show it immediately
-    // without refetching (avoids race with optimistic updates).
-    if let Err(e) = app.emit_all(
-        "chat:sending",
-        &serde_json::json!({
-            "session_id": session_id,
-            "worktree_id": worktree_id,
-            "user_message": message,
-        }),
-    ) {
-        log::error!("Failed to emit chat:sending event: {e}");
-    }
-
     // Find the session
     let session = match sessions.find_session_mut(&session_id) {
         Some(s) => s,
@@ -3053,6 +3082,21 @@ pub async fn send_chat_message(
         "[SendChat] resolved session={session_id} model={model:?} backend={effective_backend:?} execution_mode={execution_mode:?}"
     );
 
+    // Notify all clients only after resolving inherited session settings. This
+    // lets remote and MCP-started turns show the mode that is actually running
+    // instead of briefly falling back to plan mode.
+    if let Err(e) = app.emit_all(
+        "chat:sending",
+        &serde_json::json!({
+            "session_id": session_id,
+            "worktree_id": worktree_id,
+            "user_message": message,
+            "execution_mode": execution_mode,
+        }),
+    ) {
+        log::error!("Failed to emit chat:sending event: {e}");
+    }
+
     // Sync session.backend when model-based resolution overrides it
     // (e.g. user switched from Claude model to Codex model mid-session).
     // Without this, run_log reload uses the stale backend to pick the parser.
@@ -3071,9 +3115,12 @@ pub async fn send_chat_message(
         if let Some(session) = sessions.find_session_mut(&session_id) {
             session.waiting_for_input = false;
             session.is_reviewing = false;
-            if session.status_override.as_deref() == Some("review") {
-                session.status_override = None;
-            }
+            // A new prompt supersedes denials from the previous turn.
+            session.pending_permission_denials.clear();
+            session.denied_message_context = None;
+            // A new run returns the session to automatic status, so fresh
+            // plan/question/permission prompts are not hidden by a manual pin.
+            session.status_override = None;
             session.waiting_for_input_type = None;
         }
         Ok(())
@@ -3300,6 +3347,15 @@ pub async fn send_chat_message(
         Some(effective_backend.clone()),
         custom_profile_name.as_deref(),
     )?;
+
+    // Recent sessions are built from run metadata. Invalidate only after the
+    // run is durable so a new session's first prompt cannot race the refetch.
+    if let Err(e) = app.emit_all(
+        "cache:invalidate",
+        &serde_json::json!({ "keys": ["recent-worktrees"] }),
+    ) {
+        log::error!("Failed to emit cache:invalidate for recent sessions: {e}");
+    }
 
     // Get file paths for detached execution
     let input_file = run_log_writer.input_file_path()?;
@@ -3575,8 +3631,56 @@ pub async fn send_chat_message(
                         thread_include_recap,
                         Some(make_pid_callback()),
                     ) {
-                        Ok((pid, response)) => {
+                        Ok((pid, mut response)) => {
                             log::trace!("execute_claude_detached succeeded (PID: {pid})");
+
+                            // `--resume` with an unknown id: CLI printed "No conversation
+                            // found" and exited. Clear the stale id and retry once fresh.
+                            if response.session_not_found {
+                                if let Some(stale_id) = claude_session_id_for_call.take() {
+                                    log::warn!(
+                                        "Claude session {stale_id} not found, clearing stored session ID and retrying without --resume"
+                                    );
+                                    if let Err(e) = with_sessions_mut(
+                                        &thread_app,
+                                        &thread_worktree_path,
+                                        &thread_worktree_id,
+                                        |sessions| {
+                                            if let Some(session) =
+                                                sessions.find_session_mut(&thread_session_id)
+                                            {
+                                                session.claude_session_id = None;
+                                            }
+                                            Ok(())
+                                        },
+                                    ) {
+                                        break Err(format!(
+                                            "Session expired and failed to clear stale session state: {e}"
+                                        ));
+                                    }
+                                    // Same output file is reused (CLI appends): drop the
+                                    // failed attempt so the retry tail starts clean.
+                                    if let Err(e) = super::run_log::truncate_run_output_to_header(
+                                        &thread_output_file,
+                                    ) {
+                                        log::warn!(
+                                            "Failed to reset Claude output before retry: {e}"
+                                        );
+                                    }
+                                    continue;
+                                }
+                                // Not resuming, so a retry cannot help: surface it.
+                                let _ = thread_app.emit_all(
+                                    "chat:error",
+                                    &super::claude::ErrorEvent {
+                                        session_id: thread_session_id.clone(),
+                                        worktree_id: thread_worktree_id.clone(),
+                                        error: "Claude CLI failed: No conversation found to resume"
+                                            .to_string(),
+                                    },
+                                );
+                                response.error_emitted = true;
+                            }
 
                             if should_clear_stale_resumed_claude_session(
                                 claude_session_id_for_call.is_some(),
@@ -3605,6 +3709,10 @@ pub async fn send_chat_message(
                                 );
                             }
 
+                            let waiting_for_plan = thread_execution_mode.as_deref() == Some("plan")
+                                && !response.content.is_empty()
+                                && !response.tool_calls.iter().any(is_pending_plan_tool_call);
+
                             break Ok((
                                 pid,
                                 UnifiedResponse {
@@ -3613,8 +3721,8 @@ pub async fn send_chat_message(
                                     tool_calls: response.tool_calls,
                                     content_blocks: response.content_blocks,
                                     cancelled: response.cancelled,
-                                    waiting_for_plan: false,
-                                    error_emitted: false,
+                                    waiting_for_plan,
+                                    error_emitted: response.error_emitted,
                                     usage: response.usage,
                                     backend: Backend::Claude,
                                 },
@@ -3736,8 +3844,8 @@ pub async fn send_chat_message(
                 // Build combined instructions file (system prompt equivalent for Codex)
                 let codex_instructions_file = {
                     use crate::projects::github_issues::{
-                        get_github_contexts_dir, get_session_advisory_refs, get_session_issue_refs,
-                        get_session_pr_refs, get_session_security_refs,
+                        get_github_contexts_dir, get_session_advisory_refs,
+                        get_session_security_refs,
                     };
                     use crate::projects::linear_issues::get_session_linear_refs;
                     use crate::projects::storage::load_projects_data;
@@ -3845,15 +3953,11 @@ pub async fn send_chat_message(
                     // Collect context file paths (issues, PRs, saved contexts)
                     let mut all_context_paths: Vec<std::path::PathBuf> = Vec::new();
 
-                    let mut issue_keys =
-                        get_session_issue_refs(&thread_app, &thread_session_id).unwrap_or_default();
-                    if let Ok(wt_keys) = get_session_issue_refs(&thread_app, &thread_worktree_id) {
-                        for key in wt_keys {
-                            if !issue_keys.contains(&key) {
-                                issue_keys.push(key);
-                            }
-                        }
-                    }
+                    let issue_keys = get_preferred_issue_refs(
+                        &thread_app,
+                        &thread_session_id,
+                        &thread_worktree_id,
+                    );
                     if !issue_keys.is_empty() {
                         if let Ok(contexts_dir) = get_github_contexts_dir(&thread_app) {
                             for key in &issue_keys {
@@ -3871,15 +3975,8 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    let mut pr_keys =
-                        get_session_pr_refs(&thread_app, &thread_session_id).unwrap_or_default();
-                    if let Ok(wt_keys) = get_session_pr_refs(&thread_app, &thread_worktree_id) {
-                        for key in wt_keys {
-                            if !pr_keys.contains(&key) {
-                                pr_keys.push(key);
-                            }
-                        }
-                    }
+                    let pr_keys =
+                        get_preferred_pr_refs(&thread_app, &thread_session_id, &thread_worktree_id);
                     if !pr_keys.is_empty() {
                         if let Ok(contexts_dir) = get_github_contexts_dir(&thread_app) {
                             for key in &pr_keys {
@@ -4091,7 +4188,7 @@ pub async fn send_chat_message(
                             tool_calls: response.tool_calls,
                             content_blocks: response.content_blocks,
                             cancelled: response.cancelled,
-                            waiting_for_plan: false,
+                            waiting_for_plan: response.waiting_for_plan,
                             error_emitted: response.error_emitted,
                             usage: response.usage,
                             backend: Backend::Codex,
@@ -4143,8 +4240,8 @@ pub async fn send_chat_message(
 
                 let system_prompt = {
                     use crate::projects::github_issues::{
-                        get_github_contexts_dir, get_session_advisory_refs, get_session_issue_refs,
-                        get_session_pr_refs, get_session_security_refs,
+                        get_github_contexts_dir, get_session_advisory_refs,
+                        get_session_security_refs,
                     };
                     use crate::projects::linear_issues::get_session_linear_refs;
                     use crate::projects::storage::load_projects_data;
@@ -4159,24 +4256,13 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    // Global system prompt from preferences
-                    if let Ok(prefs_path) = crate::get_preferences_path(&thread_app) {
-                        if let Ok(contents) = std::fs::read_to_string(&prefs_path) {
-                            if let Ok(prefs) =
-                                serde_json::from_str::<crate::AppPreferences>(&contents)
-                            {
-                                if let Some(prompt) = prefs
-                                    .magic_prompts
-                                    .global_system_prompt
-                                    .as_deref()
-                                    .map(|s| s.trim())
-                                    .filter(|s| !s.is_empty())
-                                {
-                                    system_prompt_parts.push(prompt.to_string());
-                                }
-                            }
-                        }
-                    }
+                    // Global system prompt from preferences, with the shared default fallback.
+                    let preferences = crate::load_preferences_sync(&thread_app).ok();
+                    system_prompt_parts.push(resolve_global_system_prompt(
+                        preferences
+                            .as_ref()
+                            .and_then(|prefs| prefs.magic_prompts.global_system_prompt.as_deref()),
+                    ));
 
                     // Parallel execution prompt
                     if let Some(prompt) = &thread_parallel_prompt {
@@ -4250,15 +4336,11 @@ pub async fn send_chat_message(
                     // Collect and inline context files (issues, PRs, saved contexts)
                     let mut context_content = String::new();
 
-                    let mut issue_keys =
-                        get_session_issue_refs(&thread_app, &thread_session_id).unwrap_or_default();
-                    if let Ok(wt_keys) = get_session_issue_refs(&thread_app, &thread_worktree_id) {
-                        for key in wt_keys {
-                            if !issue_keys.contains(&key) {
-                                issue_keys.push(key);
-                            }
-                        }
-                    }
+                    let issue_keys = get_preferred_issue_refs(
+                        &thread_app,
+                        &thread_session_id,
+                        &thread_worktree_id,
+                    );
                     if !issue_keys.is_empty() {
                         if let Ok(contexts_dir) = get_github_contexts_dir(&thread_app) {
                             for key in &issue_keys {
@@ -4277,15 +4359,8 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    let mut pr_keys =
-                        get_session_pr_refs(&thread_app, &thread_session_id).unwrap_or_default();
-                    if let Ok(wt_keys) = get_session_pr_refs(&thread_app, &thread_worktree_id) {
-                        for key in wt_keys {
-                            if !pr_keys.contains(&key) {
-                                pr_keys.push(key);
-                            }
-                        }
-                    }
+                    let pr_keys =
+                        get_preferred_pr_refs(&thread_app, &thread_session_id, &thread_worktree_id);
                     if !pr_keys.is_empty() {
                         if let Ok(contexts_dir) = get_github_contexts_dir(&thread_app) {
                             for key in &pr_keys {
@@ -4514,23 +4589,10 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    if let Ok(prefs_path) = crate::get_preferences_path(&thread_app) {
-                        if let Ok(contents) = std::fs::read_to_string(&prefs_path) {
-                            if let Ok(prefs) =
-                                serde_json::from_str::<crate::AppPreferences>(&contents)
-                            {
-                                if let Some(prompt) = prefs
-                                    .magic_prompts
-                                    .global_system_prompt
-                                    .as_deref()
-                                    .map(|s| s.trim())
-                                    .filter(|s| !s.is_empty())
-                                {
-                                    parts.push(prompt.to_string());
-                                }
-                            }
-                        }
-                    }
+                    let preferences = crate::load_preferences_sync(&thread_app).ok();
+                    parts.push(resolve_global_system_prompt(preferences.as_ref().and_then(
+                        |prefs| prefs.magic_prompts.global_system_prompt.as_deref(),
+                    )));
 
                     if let Some(prompt) = &thread_parallel_prompt {
                         let prompt = prompt.trim();
@@ -4692,23 +4754,10 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    if let Ok(prefs_path) = crate::get_preferences_path(&thread_app) {
-                        if let Ok(contents) = std::fs::read_to_string(&prefs_path) {
-                            if let Ok(prefs) =
-                                serde_json::from_str::<crate::AppPreferences>(&contents)
-                            {
-                                if let Some(prompt) = prefs
-                                    .magic_prompts
-                                    .global_system_prompt
-                                    .as_deref()
-                                    .map(|s| s.trim())
-                                    .filter(|s| !s.is_empty())
-                                {
-                                    parts.push(prompt.to_string());
-                                }
-                            }
-                        }
-                    }
+                    let preferences = crate::load_preferences_sync(&thread_app).ok();
+                    parts.push(resolve_global_system_prompt(preferences.as_ref().and_then(
+                        |prefs| prefs.magic_prompts.global_system_prompt.as_deref(),
+                    )));
 
                     if let Some(prompt) = &thread_parallel_prompt {
                         let prompt = prompt.trim();
@@ -4835,23 +4884,10 @@ pub async fn send_chat_message(
                         }
                     }
 
-                    if let Ok(prefs_path) = crate::get_preferences_path(&thread_app) {
-                        if let Ok(contents) = std::fs::read_to_string(&prefs_path) {
-                            if let Ok(prefs) =
-                                serde_json::from_str::<crate::AppPreferences>(&contents)
-                            {
-                                if let Some(prompt) = prefs
-                                    .magic_prompts
-                                    .global_system_prompt
-                                    .as_deref()
-                                    .map(|s| s.trim())
-                                    .filter(|s| !s.is_empty())
-                                {
-                                    parts.push(prompt.to_string());
-                                }
-                            }
-                        }
-                    }
+                    let preferences = crate::load_preferences_sync(&thread_app).ok();
+                    parts.push(resolve_global_system_prompt(preferences.as_ref().and_then(
+                        |prefs| prefs.magic_prompts.global_system_prompt.as_deref(),
+                    )));
 
                     if let Some(prompt) = &thread_parallel_prompt {
                         let prompt = prompt.trim();
@@ -4922,6 +4958,15 @@ pub async fn send_chat_message(
 
                     if super::should_include_recap_instruction(&thread_app, thread_include_recap) {
                         parts.push(super::RECAP_INSTRUCTION.to_string());
+                    }
+
+                    let loaded_context = super::context_instructions::build_loaded_context_content(
+                        &thread_app,
+                        &thread_session_id,
+                        &thread_worktree_id,
+                    );
+                    if !loaded_context.is_empty() {
+                        parts.push(loaded_context);
                     }
 
                     if parts.is_empty() {
@@ -5073,7 +5118,7 @@ pub async fn send_chat_message(
         let _ = tx.send(result);
     });
 
-    let (pid, unified_response) = match rx.await {
+    let (pid, mut unified_response) = match rx.await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             // Thread completed with an error — clean up registrations owned by
@@ -5352,8 +5397,13 @@ pub async fn send_chat_message(
     let has_resume_worthy_payload = has_assistant_payload || has_persisted_visible_codex_artifacts;
 
     // Handle error_emitted: backend emitted chat:error during execution (e.g., Codex usage limit).
-    // Treat like undo_send so the user message doesn't persist in history.
-    if unified_response.error_emitted {
+    // With no output, treat like undo_send so the user message doesn't persist in history.
+    // After partial output (e.g. Claude API error / error_max_turns mid-turn), keep the
+    // partial reply and resume id by finishing the run as cancelled-with-content below.
+    if unified_response.error_emitted && has_assistant_payload {
+        unified_response.cancelled = true;
+    }
+    if unified_response.error_emitted && !has_assistant_payload {
         if let Err(e) = run_log_writer.cancel(None, None) {
             log::warn!("Failed to cancel run log after error: {e}");
         }
@@ -5379,6 +5429,7 @@ pub async fn send_chat_message(
             execution_mode: None,
             thinking_level: None,
             effort_level: None,
+            custom_profile_name: None,
             recovered: false,
             usage: None,
         });
@@ -5474,6 +5525,7 @@ pub async fn send_chat_message(
             execution_mode: None,
             thinking_level: None,
             effort_level: None,
+            custom_profile_name: None,
             recovered: false,
             usage: None,
         });
@@ -5522,6 +5574,7 @@ pub async fn send_chat_message(
         execution_mode: None,
         thinking_level: None,
         effort_level: None,
+        custom_profile_name: None,
         recovered: false,
         usage: unified_response.usage.clone(),
     };
@@ -5623,14 +5676,18 @@ pub async fn send_chat_message(
                     }
                     .to_string(),
                 );
+                if !has_question_tool {
+                    session.pending_plan_message_id = Some(assistant_msg_id.clone());
+                }
             } else if is_plan_mode_with_content {
-                // Codex/OpenCode plan-mode with content → waiting for plan approval
+                // Plain-text plan-mode response → waiting for plan approval
                 session.waiting_for_input = true;
                 session.is_reviewing = false;
                 if session.status_override.as_deref() == Some("review") {
                     session.status_override = None;
                 }
                 session.waiting_for_input_type = Some("plan".to_string());
+                session.pending_plan_message_id = Some(assistant_msg_id.clone());
             } else {
                 // Normal completion
                 apply_non_waiting_completion_state(session);
@@ -5645,6 +5702,26 @@ pub async fn send_chat_message(
 
     // Emit cache invalidation so all clients (native + web) refetch authoritative state
     emit_sessions_cache_invalidation(&app);
+
+    // Claude CLI runs a `/goal` loop to completion inside one `--print` run, so a
+    // finished (not cancelled) run means the goal was met, judged impossible, or
+    // cleared. Only a bare `/goal` status check leaves it active.
+    if response_backend == Backend::Claude && !was_cancelled && message.trim() != "/goal" {
+        clear_claude_goal_banner(&app, &worktree_id, &worktree_path, &session_id);
+    }
+
+    // Claude and Codex send the authoritative completion event after the run log
+    // and session metadata are persisted. This also carries plain-text plan state.
+    if matches!(response_backend, Backend::Claude | Backend::Codex) && !was_cancelled {
+        let _ = app.emit_all(
+            "chat:done",
+            &serde_json::json!({
+                "session_id": session_id,
+                "worktree_id": worktree_id,
+                "waiting_for_plan": is_plan_mode_with_content,
+            }),
+        );
+    }
 
     if was_cancelled {
         log::info!("[SendChat] EXIT session={session_id} reason=cancelled_with_content");
@@ -5670,6 +5747,10 @@ pub async fn clear_session_history(
     session_id: String,
 ) -> Result<(), String> {
     log::trace!("Clearing chat history for session: {session_id}");
+
+    if super::registry::is_session_actively_managed(&session_id) {
+        return Err("Cannot clear context while the session is running".to_string());
+    }
 
     // Delete NDJSON run data first (outside lock - separate file)
     if let Err(e) = delete_session_data(&app, &session_id) {
@@ -5776,6 +5857,28 @@ pub async fn set_session_effort_level(
     })
 }
 
+/// Set the selected execution mode for a session.
+pub async fn set_session_execution_mode(
+    app: AppHandle,
+    worktree_id: String,
+    worktree_path: String,
+    session_id: String,
+    execution_mode: String,
+) -> Result<(), String> {
+    if !matches!(execution_mode.as_str(), "plan" | "build" | "yolo") {
+        return Err(format!("Unsupported execution mode: {execution_mode}"));
+    }
+
+    with_sessions_mut(&app, &worktree_path, &worktree_id, |sessions| {
+        if let Some(session) = sessions.find_session_mut(&session_id) {
+            session.selected_execution_mode = Some(execution_mode);
+            Ok(())
+        } else {
+            Err(format!("Session not found: {session_id}"))
+        }
+    })
+}
+
 /// Set the selected provider (custom CLI profile) for a session
 pub async fn set_session_provider(
     app: AppHandle,
@@ -5850,7 +5953,7 @@ pub async fn set_session_backend(
 }
 
 // =============================================================================
-// Codex `/goal` long-horizon mode (codex backend only)
+// `/goal` long-horizon mode (Codex app-server goals; Claude banner mirror)
 // =============================================================================
 //
 // Wraps the codex app-server experimental `thread/goal/{set,get,clear}` RPCs.
@@ -5949,8 +6052,8 @@ pub fn codex_goal_clear(
 }
 
 /// Resolve the codex thread ID for a session, returning `None` if no thread
-/// has been started yet. Errors only when the session is missing or the
-/// backend is not codex.
+/// has been started yet or the session is a Claude session. Errors only when
+/// the session is missing or the backend supports no goals.
 fn codex_thread_id_for_session(
     app: &AppHandle,
     worktree_id: &str,
@@ -5961,10 +6064,13 @@ fn codex_thread_id_for_session(
         let session = sessions
             .find_session(session_id)
             .ok_or_else(|| format!("Session not found: {session_id}"))?;
-        if !matches!(session.backend, super::types::Backend::Codex) {
-            return Err("/goal is only available on codex sessions".to_string());
+        match session.backend {
+            super::types::Backend::Codex => Ok(session.codex_thread_id.clone()),
+            // Claude CLI owns its goal natively (`/goal` is sent as the prompt);
+            // Jean only persists the objective for the banner.
+            super::types::Backend::Claude => Ok(None),
+            _ => Err("/goal is only available on Codex and Claude sessions".to_string()),
         }
-        Ok(session.codex_thread_id.clone())
     })
 }
 
@@ -5984,10 +6090,17 @@ pub fn flush_pending_codex_goal(app: &AppHandle, session_id: &str, thread_id: &s
 }
 
 fn codex_goal_set_params(thread_id: &str, objective: &str) -> serde_json::Value {
+    // Keep the app-server goal paused. An active native goal owns a sequence
+    // of autonomous turns, but Jean tracks one RunEntry and one cancellable
+    // turn at a time. Starting the native runner here makes Jean report idle
+    // after its first turn while Codex continues in the background. It also
+    // makes later prompts conflict with that hidden turn. Jean sends the goal
+    // as a normal managed turn instead, which preserves streaming,
+    // cancellation, and crash recovery.
     serde_json::json!({
         "threadId": thread_id,
         "objective": objective,
-        "status": "active",
+        "status": "paused",
     })
 }
 
@@ -6024,6 +6137,24 @@ pub(crate) fn persist_codex_goal(
     Ok(())
 }
 
+/// Drop the persisted goal banner for a Claude session, if one is set.
+fn clear_claude_goal_banner(
+    app: &AppHandle,
+    worktree_id: &str,
+    worktree_path: &str,
+    session_id: &str,
+) {
+    let has_goal = super::storage::with_existing_metadata_mut(app, session_id, |meta| {
+        meta.codex_goal.is_some()
+    })
+    .unwrap_or(false);
+    if has_goal {
+        if let Err(e) = persist_codex_goal(app, worktree_id, worktree_path, session_id, None) {
+            log::warn!("Failed to clear Claude goal banner: {e}");
+        }
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 struct CodexGoalEvent {
     session_id: String,
@@ -6044,6 +6175,15 @@ pub async fn cancel_chat_message(
             "Ignoring cancel request for idle session: {session_id} (no active send/process)"
         );
         super::registry::cleanup_session_registrations(&session_id);
+        // No live process, but metadata may still say Running/Resumable after a
+        // Jean crash. Finish those runs so the session stops showing as busy.
+        match super::run_log::finish_orphaned_runs(&app, &session_id) {
+            Ok(true) => {
+                super::registry::emit_cancelled_event(&app, &session_id, &worktree_id, false)
+            }
+            Ok(false) => {}
+            Err(e) => log::warn!("Failed to finish orphaned runs for {session_id}: {e}"),
+        }
         return Ok(false);
     }
     let cancelled = cancel_process(&app, &session_id, &worktree_id)?;
@@ -6293,11 +6433,7 @@ fn save_image_to_disk(
     let filename = format!("image-{timestamp}-{short_uuid}.{ext}");
     let file_path = images_dir.join(&filename);
 
-    let temp_path = file_path.with_extension("tmp");
-    std::fs::write(&temp_path, data).map_err(|e| format!("Failed to write image file: {e}"))?;
-
-    std::fs::rename(&temp_path, &file_path)
-        .map_err(|e| format!("Failed to finalize image file: {e}"))?;
+    crate::platform::write_file_atomically(&file_path, data)?;
 
     let path_str = file_path
         .to_str()
@@ -6455,6 +6591,51 @@ use super::types::{ReadTextResponse, SaveTextResponse};
 
 /// Maximum text file size in bytes (10MB)
 const MAX_TEXT_SIZE: usize = 10 * 1024 * 1024;
+const MAX_FILE_SIZE: usize = 50 * 1024 * 1024;
+
+/// Save an arbitrary uploaded file and return a path that agents can read.
+pub async fn save_pasted_file(
+    app: AppHandle,
+    data: String,
+    filename: String,
+) -> Result<SaveTextResponse, String> {
+    let bytes = STANDARD
+        .decode(&data)
+        .map_err(|error| format!("Invalid base64 data: {error}"))?;
+    if bytes.len() > MAX_FILE_SIZE {
+        return Err(format!(
+            "File too large: {} bytes. Maximum size: {MAX_FILE_SIZE} bytes (50MB)",
+            bytes.len()
+        ));
+    }
+
+    let original = std::path::Path::new(&filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("attachment");
+    let safe_name: String = original
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .take(160)
+        .collect();
+    let stored_name = format!("{}-{safe_name}", &Uuid::new_v4().to_string()[..8]);
+    let file_path = get_pastes_dir(&app)?.join(&stored_name);
+    crate::platform::write_file_atomically(&file_path, &bytes)?;
+
+    Ok(SaveTextResponse {
+        id: Uuid::new_v4().to_string(),
+        filename: original.to_string(),
+        path: file_path.to_string_lossy().into_owned(),
+        size: bytes.len(),
+    })
+}
 
 /// Save pasted text to the app data directory
 ///
@@ -6481,12 +6662,7 @@ pub async fn save_pasted_text(
     let filename = pasted_text_filename(filename.as_deref());
     let file_path = pastes_dir.join(&filename);
 
-    // Write file atomically (temp file + rename)
-    let temp_path = file_path.with_extension("tmp");
-    std::fs::write(&temp_path, &content).map_err(|e| format!("Failed to write text file: {e}"))?;
-
-    std::fs::rename(&temp_path, &file_path)
-        .map_err(|e| format!("Failed to finalize text file: {e}"))?;
+    crate::platform::write_file_atomically(&file_path, content.as_bytes())?;
 
     let path_str = file_path
         .to_str()
@@ -6595,12 +6771,7 @@ pub async fn update_pasted_text(
         return Err("Invalid path: must be within allowed directories".to_string());
     }
 
-    // Write file atomically (temp file + rename)
-    let temp_path = file_path.with_extension("tmp");
-    std::fs::write(&temp_path, &content).map_err(|e| format!("Failed to write text file: {e}"))?;
-
-    std::fs::rename(&temp_path, &file_path)
-        .map_err(|e| format!("Failed to finalize text file: {e}"))?;
+    crate::platform::write_file_atomically(&file_path, content.as_bytes())?;
 
     log::trace!("Text file updated: {path}");
     Ok(size)
@@ -7262,13 +7433,7 @@ pub async fn save_context_file(
 
     let file_path = contexts_dir.join(&filename);
 
-    // Write content atomically (temp file + rename)
-    let temp_path = file_path.with_extension("tmp");
-    std::fs::write(&temp_path, &content)
-        .map_err(|e| format!("Failed to write context file: {e}"))?;
-
-    std::fs::rename(&temp_path, &file_path)
-        .map_err(|e| format!("Failed to finalize context file: {e}"))?;
+    crate::platform::write_file_atomically(&file_path, content.as_bytes())?;
 
     let path_str = file_path
         .to_str()
@@ -7489,7 +7654,8 @@ fn format_messages_for_summary(messages: &[ChatMessage]) -> String {
 /// For --json-schema, Claude returns structured output via a tool call named "StructuredOutput"
 fn extract_text_from_stream_json(output: &str) -> Result<String, String> {
     let mut text_content = String::new();
-    let mut structured_output: Option<serde_json::Value> = None;
+    // Final `result.structured_output`, else the last StructuredOutput call.
+    let mut structured_output = super::claude::extract_claude_structured_output(output);
 
     log::trace!("Parsing stream-json output ({} bytes)", output.len());
 
@@ -7520,21 +7686,6 @@ fn extract_text_from_stream_json(output: &str) -> Result<String, String> {
                         if block_type == Some("text") {
                             if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                                 text_content.push_str(text);
-                            }
-                        }
-
-                        // Handle StructuredOutput tool call (from --json-schema)
-                        if block_type == Some("tool_use") {
-                            let tool_name = block.get("name").and_then(|n| n.as_str());
-                            log::trace!(
-                                "Found tool_use block: name={:?}, block={block}",
-                                tool_name
-                            );
-                            if tool_name == Some("StructuredOutput") {
-                                if let Some(input) = block.get("input") {
-                                    log::trace!("Found StructuredOutput input: {input}");
-                                    structured_output = Some(input.clone());
-                                }
                             }
                         }
                     }
@@ -7627,7 +7778,7 @@ fn execute_summarization_claude(
     magic_backend: Option<&str>,
     reasoning_effort: Option<&str>,
 ) -> Result<ContextSummaryResponse, String> {
-    let model_str = model.unwrap_or("claude-opus-4-8[1m]");
+    let model_str = model.unwrap_or("claude-opus-5-5");
 
     // Per-operation backend > project/global default_backend
     let backend = resolve_magic_prompt_backend(app, magic_backend, worktree_id);
@@ -7940,13 +8091,7 @@ pub async fn generate_context_from_session(
             (new_filename, new_path, false)
         };
 
-    // Write content atomically
-    let temp_path = file_path.with_extension("tmp");
-    std::fs::write(&temp_path, &summary)
-        .map_err(|e| format!("Failed to write context file: {e}"))?;
-
-    std::fs::rename(&temp_path, &file_path)
-        .map_err(|e| format!("Failed to finalize context file: {e}"))?;
+    crate::platform::write_file_atomically(&file_path, summary.as_bytes())?;
 
     // Update session mapping in metadata
     metadata
@@ -8440,6 +8585,9 @@ pub async fn resume_session(
                         {
                             let _ = writer.crash();
                         }
+                        let (event_name, event) =
+                            resumed_tail_error_event(&session_id_clone, &worktree_id_clone, &error);
+                        let _ = app_clone.emit_all(event_name, &event);
                     }
                 }
             });
@@ -8577,44 +8725,53 @@ pub async fn resume_session(
             let run_id_clone = run_id.clone();
 
             tauri::async_runtime::spawn(async move {
-                let emit_done = |app: &tauri::AppHandle, sid: &str, wid: &str| {
-                    let _ = app.emit_all(
-                        "chat:done",
-                        &serde_json::json!({ "session_id": sid, "worktree_id": wid, "waiting_for_plan": false }),
-                    );
-                };
-
-                let (grok_session_id, usage, cancelled) = match super::grok::tail_grok_output(
-                    &app_clone,
-                    &session_id_clone,
-                    &worktree_id_clone,
-                    &output_file,
-                    pid,
-                ) {
-                    Ok(response) => (response.session_id, response.usage, response.cancelled),
-                    Err(e) => {
-                        log::error!("Resume Grok tail failed for run: {run_id_clone}, error: {e}");
-                        super::registry::unregister_process(&session_id_clone);
-                        if let Ok(mut writer) =
-                            RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
-                        {
-                            if let Err(e) = writer.crash() {
-                                log::error!("Failed to mark Grok run as crashed: {e}");
+                let (grok_session_id, usage, cancelled, final_content) =
+                    match super::grok::tail_grok_output(
+                        &app_clone,
+                        &session_id_clone,
+                        &worktree_id_clone,
+                        &output_file,
+                        pid,
+                    ) {
+                        Ok(response) => (
+                            response.session_id,
+                            response.usage,
+                            response.cancelled,
+                            response.content,
+                        ),
+                        Err(e) => {
+                            log::error!(
+                                "Resume Grok tail failed for run: {run_id_clone}, error: {e}"
+                            );
+                            super::registry::unregister_process(&session_id_clone);
+                            if let Ok(mut writer) =
+                                RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
+                            {
+                                if let Err(e) = writer.crash() {
+                                    log::error!("Failed to mark Grok run as crashed: {e}");
+                                }
                             }
+                            let (event_name, event) =
+                                resumed_tail_error_event(&session_id_clone, &worktree_id_clone, &e);
+                            let _ = app_clone.emit_all(event_name, &event);
+                            return;
                         }
-                        let (event_name, event) = resumed_grok_tail_error_event(
-                            &session_id_clone,
-                            &worktree_id_clone,
-                            &e,
-                        );
-                        let _ = app_clone.emit_all(event_name, &event);
-                        return;
-                    }
-                };
+                    };
 
                 super::registry::unregister_process(&session_id_clone);
                 if cancelled {
-                    emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
+                    // tail_grok_output does not emit chat:done for a cancel.
+                    // Send the text already on disk so a client that missed the
+                    // replay still keeps the partial reply.
+                    let _ = app_clone.emit_all(
+                        "chat:done",
+                        &serde_json::json!({
+                            "session_id": session_id_clone,
+                            "worktree_id": worktree_id_clone,
+                            "waiting_for_plan": false,
+                            "content": final_content,
+                        }),
+                    );
                 }
 
                 if let Ok(mut writer) =
@@ -8623,8 +8780,13 @@ pub async fn resume_session(
                     let assistant_message_id = uuid::Uuid::new_v4().to_string();
                     // Do not pass grok id as claude_session_id — complete() only
                     // knows Claude's resume field. Persist grok_session_id below.
-                    if let Err(e) = writer.complete(&assistant_message_id, None, usage.clone()) {
-                        log::error!("Failed to mark resumed Grok run completed: {e}");
+                    let finish = if cancelled {
+                        writer.cancel(Some(&assistant_message_id), None)
+                    } else {
+                        writer.complete(&assistant_message_id, None, usage.clone())
+                    };
+                    if let Err(e) = finish {
+                        log::error!("Failed to finish resumed Grok run: {e}");
                     }
                 }
 
@@ -8673,92 +8835,109 @@ pub async fn resume_session(
             });
         }
 
-        // Clone values for the async task
+        // Clone values for the tail thread
         let app_clone = app.clone();
         let session_id_clone = session_id.clone();
         let worktree_id_clone = worktree_id.clone();
         let run_id_clone = run_id.clone();
+        let execution_mode = run.execution_mode.clone();
 
-        // Spawn a task to tail the output file
-        tauri::async_runtime::spawn(async move {
+        // tail_claude_output is a blocking poll loop (std::thread::sleep), so run
+        // it on its own OS thread instead of starving an async runtime worker.
+        std::thread::spawn(move || {
             log::trace!("Starting tail task for run: {run_id_clone}, session: {session_id_clone}");
 
             // Helper: emit chat:done so frontend clears sending state
-            let emit_done = |app: &tauri::AppHandle, sid: &str, wid: &str| {
-                let _ = app.emit_all(
+            let emit_done = |waiting_for_plan: bool| {
+                let _ = app_clone.emit_all(
                     "chat:done",
-                    &serde_json::json!({ "session_id": sid, "worktree_id": wid, "waiting_for_plan": false }),
+                    &serde_json::json!({
+                        "session_id": session_id_clone,
+                        "worktree_id": worktree_id_clone,
+                        "waiting_for_plan": waiting_for_plan,
+                    }),
                 );
             };
 
             // Tail the output file — Claude backend only (Codex handled above)
-            let (resume_id, usage, cancelled) = {
-                match super::claude::tail_claude_output(
-                    &app_clone,
-                    &session_id_clone,
-                    &worktree_id_clone,
-                    &output_file,
-                    pid,
-                ) {
-                    Ok(response) => (response.session_id, response.usage, response.cancelled),
-                    Err(e) => {
-                        log::error!(
-                            "Resume Claude tail failed for run: {run_id_clone}, error: {e}"
-                        );
-                        super::registry::unregister_process(&session_id_clone);
-                        if let Ok(mut writer) =
-                            RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
-                        {
-                            if let Err(e) = writer.crash() {
-                                log::error!("Failed to mark run as crashed: {e}");
-                            }
+            let tail_result = super::claude::tail_claude_output(
+                &app_clone,
+                &session_id_clone,
+                &worktree_id_clone,
+                &output_file,
+                pid,
+            );
+            // PID-scoped: never remove a newer run's registration.
+            super::registry::unregister_process_if_owned(&session_id_clone, pid);
+
+            let response = match tail_result {
+                Ok(response) => response,
+                Err(e) => {
+                    log::error!("Resume Claude tail failed for run: {run_id_clone}, error: {e}");
+                    if let Ok(mut writer) =
+                        RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
+                    {
+                        if let Err(e) = writer.crash() {
+                            log::error!("Failed to mark run as crashed: {e}");
                         }
-                        emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
-                        return;
                     }
+                    // tail_claude_output already emitted chat:error for this.
+                    return;
                 }
             };
 
-            // Unregister from process registry now that tailing is complete
-            super::registry::unregister_process(&session_id_clone);
-
+            let completed =
+                !response.cancelled && !response.error_emitted && !response.session_not_found;
+            let has_payload = !response.content.is_empty()
+                || !response.tool_calls.is_empty()
+                || !response.content_blocks.is_empty();
             log::trace!(
-                "Resume completed for run: {run_id_clone}, resume_id: {:?}, cancelled: {cancelled}",
-                resume_id
+                "Resume completed for run: {run_id_clone}, resume_id: {:?}, cancelled: {}, error: {}",
+                response.session_id,
+                response.cancelled,
+                response.error_emitted
             );
 
-            // If tail detected dead process (cancelled=true), it skipped emitting chat:done.
-            // Emit it here so the frontend clears sending state.
-            if cancelled {
-                emit_done(&app_clone, &session_id_clone, &worktree_id_clone);
+            // Persist run status first, then emit the terminal event (same order
+            // as the send path) so a refetch on chat:done sees the final state.
+            if let Ok(mut writer) =
+                RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
+            {
+                let assistant_message_id = uuid::Uuid::new_v4().to_string();
+                let resume_sid = Some(response.session_id.as_str()).filter(|id| !id.is_empty());
+                let finish = if completed {
+                    writer.complete(&assistant_message_id, resume_sid, response.usage.clone())
+                } else {
+                    // Process died, user cancelled, or the turn failed: the run did
+                    // not complete. Keep partial output and its resume id.
+                    writer.cancel(
+                        has_payload.then_some(assistant_message_id.as_str()),
+                        resume_sid.filter(|_| has_payload),
+                    )
+                };
+                if let Err(e) = finish {
+                    log::error!("Failed to finish resumed run: {e}");
+                }
+
+                // Clean up input file if it exists
+                if let Err(e) =
+                    super::run_log::delete_input_file(&app_clone, &session_id_clone, &run_id_clone)
+                {
+                    log::trace!("Could not delete input file (may not exist): {e}");
+                }
             }
 
-            // Create a RunLogWriter to update the manifest
-            {
-                if let Ok(mut writer) =
-                    RunLogWriter::resume(&app_clone, &session_id_clone, &run_id_clone)
-                {
-                    let assistant_message_id = uuid::Uuid::new_v4().to_string();
-                    let resume_sid = if resume_id.is_empty() {
-                        None
-                    } else {
-                        Some(resume_id.as_str())
-                    };
-                    if let Err(e) =
-                        writer.complete(&assistant_message_id, resume_sid, usage.clone())
-                    {
-                        log::error!("Failed to mark run as completed: {e}");
-                    }
-
-                    // Clean up input file if it exists
-                    if let Err(e) = super::run_log::delete_input_file(
-                        &app_clone,
-                        &session_id_clone,
-                        &run_id_clone,
-                    ) {
-                        log::trace!("Could not delete input file (may not exist): {e}");
-                    }
-                }
+            // Exactly one terminal event: chat:error was already emitted for a
+            // failed turn; otherwise chat:done (tail never emits it itself).
+            if !response.error_emitted {
+                let waiting_for_plan = completed
+                    && plan_mode_content_waits_for_approval(
+                        &Backend::Claude,
+                        execution_mode.as_deref(),
+                        !response.content.is_empty(),
+                        response.tool_calls.iter().any(is_pending_plan_tool_call),
+                    );
+                emit_done(waiting_for_plan);
             }
         });
     }
@@ -8780,7 +8959,8 @@ pub async fn check_resumable_sessions(
 
     // This calls recover_incomplete_runs which updates statuses and returns info.
     // Note: recover_incomplete_runs skips sessions that are actively managed
-    // (in PROCESS_REGISTRY or CANCEL_FLAGS) to avoid corrupting their metadata.
+    // (including sends still preparing a backend process) to avoid corrupting
+    // their metadata.
     let recovered = super::run_log::recover_incomplete_runs(&app)?;
 
     let mut resumable: Vec<_> = recovered.into_iter().filter(|r| r.resumable).collect();
@@ -9832,13 +10012,13 @@ async fn steer_text_into_pi_turn(
 }
 
 /// Drain steerable queued messages straight into the running Codex turn
-/// (when the `codex_auto_steer_enabled` preference is on, default true).
+/// (when the `codex_auto_steer_enabled` preference is on; default is off).
 /// Pops from the queue front in FIFO order and stops at the first message
 /// that can't be steered (attachments) so queue order is preserved.
 async fn drain_queue_into_codex_turn(app: &AppHandle, worktree_id: &str, session_id: &str) {
     let auto_steer = crate::load_preferences_sync(app)
         .map(|p| p.codex_auto_steer_enabled)
-        .unwrap_or(true);
+        .unwrap_or(false);
     if !auto_steer {
         return;
     }
@@ -9927,7 +10107,7 @@ pub(crate) fn trigger_codex_queue_steer(app: AppHandle, worktree_id: String, ses
 }
 
 /// Drain steerable queued messages into a running OpenCode session via
-/// `prompt_async` (when `opencode_auto_steer_enabled` is on, default true).
+/// `prompt_async` (when `opencode_auto_steer_enabled` is on; default is off).
 async fn drain_queue_into_opencode_turn(
     app: &AppHandle,
     worktree_id: &str,
@@ -9936,7 +10116,7 @@ async fn drain_queue_into_opencode_turn(
 ) {
     let auto_steer = crate::load_preferences_sync(app)
         .map(|p| p.opencode_auto_steer_enabled)
-        .unwrap_or(true);
+        .unwrap_or(false);
     if !auto_steer {
         return;
     }
@@ -10040,7 +10220,7 @@ pub(crate) fn trigger_opencode_queue_steer(
 async fn drain_queue_into_pi_turn(app: &AppHandle, worktree_id: &str, session_id: &str) {
     let auto_steer = crate::load_preferences_sync(app)
         .map(|p| p.pi_auto_steer_enabled)
-        .unwrap_or(true);
+        .unwrap_or(false);
     if !auto_steer {
         return;
     }
@@ -10125,11 +10305,11 @@ async fn drain_queue_into_pi_turn(app: &AppHandle, worktree_id: &str, session_id
 }
 
 /// Drain steerable queued messages into a running Grok ACP turn via
-/// `_x.ai/interject` (when `grok_auto_steer_enabled` is on, default true).
+/// `_x.ai/interject` (when `grok_auto_steer_enabled` is on; default is off).
 async fn drain_queue_into_grok_turn(app: &AppHandle, worktree_id: &str, session_id: &str) {
     let auto_steer = crate::load_preferences_sync(app)
         .map(|p| p.grok_auto_steer_enabled)
-        .unwrap_or(true);
+        .unwrap_or(false);
     if !auto_steer {
         return;
     }
@@ -10292,12 +10472,68 @@ mod tests {
     #[test]
     fn resumed_grok_host_error_uses_chat_error_event() {
         let (event_name, event) =
-            resumed_grok_tail_error_event("session-1", "worktree-1", "rate limit reached");
+            resumed_tail_error_event("session-1", "worktree-1", "rate limit reached");
 
         assert_eq!(event_name, "chat:error");
         assert_eq!(event.session_id, "session-1");
         assert_eq!(event.worktree_id, "worktree-1");
         assert_eq!(event.error, "rate limit reached");
+    }
+
+    fn unread_test_session() -> Session {
+        let mut session = Session::new("Session".to_string(), 0, Backend::Claude);
+        session.updated_at = 20;
+        session.last_opened_at = Some(10);
+        session
+    }
+
+    #[test]
+    fn unread_session_count_matches_finished_unopened_activity() {
+        let mut session = unread_test_session();
+        session.last_run_status = Some(RunStatus::Completed);
+
+        assert!(is_unread_session(&session));
+
+        session.last_opened_at = Some(session.updated_at);
+        assert!(!is_unread_session(&session));
+    }
+
+    #[test]
+    fn opening_session_acknowledges_latest_run_without_clearing_chat_input() {
+        let mut metadata = super::super::types::SessionMetadata::new(
+            "session-1".to_string(),
+            "worktree-1".to_string(),
+            "Session".to_string(),
+            0,
+        );
+        metadata.waiting_for_input = true;
+        metadata.waiting_for_input_type = Some("question".to_string());
+
+        acknowledge_session_opened(&mut metadata, 10);
+
+        assert_eq!(metadata.last_opened_at, Some(metadata.updated_at()));
+        assert!(!metadata.to_unread_summary().is_unread());
+        assert!(metadata.waiting_for_input);
+    }
+
+    #[test]
+    fn unread_session_count_includes_waiting_and_review_activity() {
+        let mut waiting = unread_test_session();
+        waiting.waiting_for_input = true;
+        assert!(is_unread_session(&waiting));
+
+        let mut review = unread_test_session();
+        review.review_results = Some(serde_json::json!({ "status": "completed" }));
+        assert!(is_unread_session(&review));
+    }
+
+    #[test]
+    fn archived_sessions_are_never_unread() {
+        let mut session = unread_test_session();
+        session.archived_at = Some(30);
+        session.last_run_status = Some(RunStatus::Completed);
+
+        assert!(!is_unread_session(&session));
     }
 
     #[test]
@@ -10389,10 +10625,25 @@ mod tests {
     }
 
     #[test]
-    fn newly_created_branch_can_still_be_automatically_named() {
+    fn custom_worktree_name_is_not_automatically_renamed() {
         let worktree = naming_test_worktree("random-workspace", Some("main"));
 
+        assert!(!should_auto_name_branch(Some(&worktree)));
+    }
+
+    #[test]
+    fn generated_workspace_name_can_be_automatically_renamed() {
+        let worktree = naming_test_worktree("fuzzy-tiger", Some("main"));
+
         assert!(should_auto_name_branch(Some(&worktree)));
+    }
+
+    #[test]
+    fn issue_worktree_name_is_not_automatically_renamed() {
+        let mut worktree = naming_test_worktree("issue-42-fix-login", Some("main"));
+        worktree.issue_number = Some(42);
+
+        assert!(!should_auto_name_branch(Some(&worktree)));
     }
 
     #[test]
@@ -10467,6 +10718,7 @@ mod tests {
             }),
             output: Some("<tool_use_error>Error: No such tool available: AskUserQuestion. AskUserQuestion exists but is not enabled in this context. Use one of the available tools instead.</tool_use_error>".to_string()),
             parent_tool_use_id: None,
+            is_error: None,
         };
 
         assert!(!is_pending_blocking_tool_call(&tool));
@@ -10480,6 +10732,7 @@ mod tests {
             input: serde_json::json!({}),
             output: None,
             parent_tool_use_id: None,
+            is_error: None,
         };
 
         assert!(!is_pending_blocking_tool_call_for_mode(&tool, Some("yolo")));
@@ -10741,7 +10994,14 @@ mod tests {
     }
 
     #[test]
-    fn stale_resumed_claude_session_is_cleared_for_empty_cancelled_response() {
+    fn cancelled_empty_response_keeps_resumed_claude_session() {
+        assert!(!should_clear_stale_resumed_claude_session(
+            true, false, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn non_cancelled_empty_response_clears_stale_resumed_claude_session() {
         assert!(should_clear_stale_resumed_claude_session(
             true, false, false, false, false, false
         ));
@@ -10934,6 +11194,22 @@ mod tests {
     }
 
     #[test]
+    fn default_global_prompt_is_used_when_preference_is_missing_or_empty() {
+        let expected = crate::default_global_system_prompt();
+
+        assert_eq!(resolve_global_system_prompt(None), expected);
+        assert_eq!(resolve_global_system_prompt(Some("  ")), expected);
+    }
+
+    #[test]
+    fn configured_global_prompt_is_preserved() {
+        assert_eq!(
+            resolve_global_system_prompt(Some("  Custom global rule.  ")),
+            "Custom global rule."
+        );
+    }
+
+    #[test]
     fn test_codex_legacy_global_default_resolves_to_mode_specific_prompt() {
         let legacy_default = "### 1. Plan Mode Default
 - Every Codex plan-mode response that contains or revises a plan must use `update_plan`/`CodexPlan`; do not provide plain-text-only plans.
@@ -10941,12 +11217,12 @@ mod tests {
 ## Jean Worktree Policy";
 
         let yolo_prompt = resolve_codex_global_system_prompt(Some(legacy_default), Some("yolo"));
+        assert!(yolo_prompt.contains("### 4. Self-Improvement Loop"));
         assert!(!yolo_prompt.contains("Plan Mode Default"));
-        assert!(!yolo_prompt.contains("update_plan"));
-        assert!(!yolo_prompt.contains("CodexPlan"));
         assert!(yolo_prompt.contains("## Not Plan Mode"));
 
         let plan_prompt = resolve_codex_global_system_prompt(Some(legacy_default), Some("plan"));
+        assert!(plan_prompt.contains("### 4. Self-Improvement Loop"));
         assert!(plan_prompt.contains("## Plan Mode"));
         assert!(plan_prompt.contains("<proposed_plan>"));
     }
@@ -11031,7 +11307,7 @@ mod tests {
             true,
             false
         ));
-        assert!(!plan_mode_content_waits_for_approval(
+        assert!(plan_mode_content_waits_for_approval(
             &Backend::Claude,
             Some("plan"),
             true,
@@ -11187,7 +11463,7 @@ mod tests {
             serde_json::json!({
                 "threadId": "thread-123",
                 "objective": "Ship the goal UI",
-                "status": "active",
+                "status": "paused",
             })
         );
         assert!(params.get("goal").is_none());

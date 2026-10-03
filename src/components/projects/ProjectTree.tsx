@@ -17,7 +17,7 @@ import {
   extractInstruction,
   type Instruction,
 } from '@atlaskit/pragmatic-drag-and-drop-hitbox/list-item'
-import { ChevronsDownUp, ChevronsUpDown } from 'lucide-react'
+import { ChevronDown, ChevronUp } from '@/components/icons/reicon'
 import { isFolder, type Project } from '@/types/projects'
 import { ProjectTreeItem } from './ProjectTreeItem'
 import { FolderTreeItem } from './FolderTreeItem'
@@ -29,6 +29,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu'
 import { cn } from '@/lib/utils'
 import {
   isProjectTreeDragData,
@@ -38,6 +44,9 @@ import {
 import { reorderWithClosestEdge } from '@/lib/drag-and-drop/reorder'
 import { announceDrag } from '@/lib/drag-and-drop/live-region'
 import { DropIndicator } from '@/components/drag-and-drop/DropIndicator'
+import { groupProjectsByServer } from './project-server-sections'
+import { RemoteServerRefreshButton } from '@/components/remote/RemoteServerRefreshButton'
+import { haveSameProjectServer } from './project-tree-drag'
 
 const MAX_NESTING_DEPTH = 3
 
@@ -60,6 +69,8 @@ function getMaxSubtreeDepth(projects: Project[], itemId: string): number {
 
 interface ProjectTreeProps {
   projects: Project[]
+  groupByServer?: boolean
+  searchQuery?: string
 }
 
 function canMoveIntoFolder({
@@ -77,6 +88,7 @@ function canMoveIntoFolder({
   const activeItem = projectById.get(activeId)
   const folder = projectById.get(folderId)
   if (!activeItem || !folder || !isFolder(folder)) return false
+  if (!haveSameProjectServer(activeItem, folder)) return false
 
   const folderDepth = getDepth(projects, folderId)
   const subtreeDepth = isFolder(activeItem)
@@ -136,6 +148,7 @@ interface SortableItemProps {
   overFolderId: string | null
   insertBeforeId: string | null
   activeId: string | null
+  searchQuery: string
 }
 
 function SortableItem({
@@ -147,12 +160,13 @@ function SortableItem({
   overFolderId,
   insertBeforeId,
   activeId,
+  searchQuery,
 }: SortableItemProps) {
   const elementRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     const element = elementRef.current
-    if (!element) return
+    if (!element || item.offline || searchQuery) return
 
     return combine(
       draggable({
@@ -164,8 +178,16 @@ function SortableItem({
       }),
       dropTargetForElements({
         element,
-        canDrop: ({ source }) =>
-          isProjectTreeDragData(source.data) && source.data.itemId !== item.id,
+        canDrop: ({ source }) => {
+          if (!isProjectTreeDragData(source.data)) return false
+          const sourceItem = allProjects.find(
+            project => project.id === source.data.itemId
+          )
+          return (
+            source.data.itemId !== item.id &&
+            haveSameProjectServer(sourceItem, item)
+          )
+        },
         getData: ({ input, element, source }) => {
           const sourceId = isProjectTreeDragData(source.data)
             ? source.data.itemId
@@ -198,7 +220,7 @@ function SortableItem({
         },
       })
     )
-  }, [allProjects, item])
+  }, [allProjects, item, searchQuery])
 
   const style: React.CSSProperties = {
     opacity: activeId === item.id ? 0.35 : 1,
@@ -213,7 +235,7 @@ function SortableItem({
         : null
 
   if (isFolder(item)) {
-    const isExpanded = expandedFolderIds.has(item.id)
+    const isExpanded = Boolean(searchQuery) || expandedFolderIds.has(item.id)
 
     return (
       <div
@@ -222,11 +244,19 @@ function SortableItem({
         style={style}
         className={cn(
           'relative transition-opacity',
-          activeId === item.id ? 'cursor-grabbing' : 'cursor-grab'
+          !item.offline &&
+            (activeId === item.id ? 'cursor-grabbing' : 'cursor-grab')
         )}
       >
         <DropIndicator edge={closestEdge} insetClassName="left-2 right-2" />
-        <FolderTreeItem folder={item} depth={depth} isDropTarget={isOverFolder}>
+        <FolderTreeItem
+          folder={item}
+          depth={depth}
+          childCount={
+            allProjects.filter(project => project.parent_id === item.id).length
+          }
+          isDropTarget={isOverFolder}
+        >
           {isExpanded && (
             <NestedItems
               projects={allProjects}
@@ -236,6 +266,7 @@ function SortableItem({
               overFolderId={overFolderId}
               insertBeforeId={insertBeforeId}
               activeId={activeId}
+              searchQuery={searchQuery}
             />
           )}
         </FolderTreeItem>
@@ -250,11 +281,12 @@ function SortableItem({
       style={style}
       className={cn(
         'relative transition-opacity',
-        activeId === item.id ? 'cursor-grabbing' : 'cursor-grab'
+        !item.offline &&
+          (activeId === item.id ? 'cursor-grabbing' : 'cursor-grab')
       )}
     >
       <DropIndicator edge={closestEdge} insetClassName="left-2 right-2" />
-      <ProjectTreeItem project={item} />
+      <ProjectTreeItem project={item} searchQuery={searchQuery} />
     </div>
   )
 }
@@ -268,6 +300,7 @@ interface NestedItemsProps {
   overFolderId: string | null
   insertBeforeId: string | null
   activeId: string | null
+  searchQuery: string
 }
 
 function NestedItems({
@@ -278,6 +311,7 @@ function NestedItems({
   overFolderId,
   insertBeforeId,
   activeId,
+  searchQuery,
 }: NestedItemsProps) {
   const items = projects
     .filter(p => p.parent_id === parentId)
@@ -300,6 +334,7 @@ function NestedItems({
           overFolderId={overFolderId}
           insertBeforeId={insertBeforeId}
           activeId={activeId}
+          searchQuery={searchQuery}
         />
       ))}
     </>
@@ -340,21 +375,26 @@ function RootDropZone({ isOver }: { isOver: boolean }) {
   )
 }
 
-export function ProjectTree({ projects }: ProjectTreeProps) {
+export function ProjectTree({
+  projects,
+  groupByServer = false,
+  searchQuery = '',
+}: ProjectTreeProps) {
   const reorderItems = useReorderItems()
   const moveItem = useMoveItem()
   const {
     expandFolder,
     expandedFolderIds,
+    expandedProjectIds,
     expandAllFolders,
     collapseAllFolders,
-    expandAllProjects,
-    collapseAllProjects,
+    setProjectExpanded,
   } = useProjectsStore()
   const [activeId, setActiveId] = useState<string | null>(null)
   const [overFolderId, setOverFolderId] = useState<string | null>(null)
   const [isOverRoot, setIsOverRoot] = useState(false)
   const [insertBeforeId, setInsertBeforeId] = useState<string | null>(null)
+  const [foldersSectionCollapsed, setFoldersSectionCollapsed] = useState(false)
   const latestDropTargetRef = useRef<{
     targetId: string | null
     instruction: Instruction | null
@@ -373,6 +413,12 @@ export function ProjectTree({ projects }: ProjectTreeProps) {
   const rootProjects = rootItems
     .filter(p => !isFolder(p))
     .sort((a, b) => a.order - b.order)
+  const projectSections =
+    rootProjects.length === 0
+      ? []
+      : groupByServer
+        ? groupProjectsByServer(rootProjects)
+        : [{ id: 'all', title: 'Projects', projects: rootProjects }]
   const hasBothTypes = rootFolders.length > 0 && rootProjects.length > 0
 
   // IDs for bulk expand/collapse actions (across all nesting levels)
@@ -380,11 +426,7 @@ export function ProjectTree({ projects }: ProjectTreeProps) {
     () => projects.flatMap(p => (isFolder(p) ? [p.id] : [])),
     [projects]
   )
-  const allProjectIds = useMemo(
-    () => projects.flatMap(p => (!isFolder(p) ? [p.id] : [])),
-    [projects]
-  )
-
+  const showFolders = !foldersSectionCollapsed || Boolean(searchQuery)
   const clearDragState = useCallback(() => {
     setActiveId(null)
     setOverFolderId(null)
@@ -727,106 +769,129 @@ export function ProjectTree({ projects }: ProjectTreeProps) {
       onDragEnd={handleNativeTreeDragEnd}
     >
       {rootFolders.length > 0 && (
-        <div className="group/header flex items-center justify-between pl-3 pr-2 pb-1 pt-2">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-            Folders
-          </span>
-          <div className="flex items-center gap-1">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="flex size-4 shrink-0 items-center justify-center rounded opacity-50 hover:bg-accent-foreground/10 hover:opacity-100"
-                  onClick={() => expandAllFolders(allFolderIds)}
-                  aria-label="Expand all folders"
-                >
-                  <ChevronsUpDown className="size-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Expand all</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="flex size-4 shrink-0 items-center justify-center rounded opacity-50 hover:bg-accent-foreground/10 hover:opacity-100"
-                  onClick={collapseAllFolders}
-                  aria-label="Collapse all folders"
-                >
-                  <ChevronsDownUp className="size-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Collapse all</TooltipContent>
-            </Tooltip>
-          </div>
-        </div>
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <div className="group/header flex items-center justify-between pl-3 pr-2 pb-1 pt-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/50">
+                Folders
+              </span>
+              <button
+                type="button"
+                className="flex size-4 shrink-0 items-center justify-center rounded opacity-50 hover:bg-accent-foreground/10 hover:opacity-100"
+                onClick={() => setFoldersSectionCollapsed(value => !value)}
+                aria-label={showFolders ? 'Hide folders' : 'Show folders'}
+                aria-expanded={showFolders}
+                disabled={Boolean(searchQuery)}
+              >
+                {showFolders ? (
+                  <ChevronUp className="size-3.5" />
+                ) : (
+                  <ChevronDown className="size-3.5" />
+                )}
+              </button>
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem
+              onClick={() => {
+                setFoldersSectionCollapsed(false)
+                expandAllFolders(allFolderIds)
+              }}
+            >
+              Expand all folders
+            </ContextMenuItem>
+            <ContextMenuItem onClick={collapseAllFolders}>
+              Collapse all folders
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
       )}
-      {rootFolders.map(item => (
-        <SortableItem
-          key={item.id}
-          item={item}
-          allProjects={projects}
-          depth={0}
-          isOverFolder={overFolderId === item.id}
-          expandedFolderIds={expandedFolderIds}
-          overFolderId={overFolderId}
-          insertBeforeId={insertBeforeId}
-          activeId={activeId}
-        />
-      ))}
+      {showFolders &&
+        rootFolders.map(item => (
+          <SortableItem
+            key={item.id}
+            item={item}
+            allProjects={projects}
+            depth={0}
+            isOverFolder={overFolderId === item.id}
+            expandedFolderIds={expandedFolderIds}
+            overFolderId={overFolderId}
+            insertBeforeId={insertBeforeId}
+            activeId={activeId}
+            searchQuery={searchQuery}
+          />
+        ))}
       {hasBothTypes && (
         <div className="px-3 py-2">
           <Separator />
         </div>
       )}
-      {rootProjects.length > 0 && (
-        <div className="group/header flex items-center justify-between pl-3 pr-2 pb-1 pt-2">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-            Projects
-          </span>
-          <div className="flex items-center gap-1">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="flex size-4 shrink-0 items-center justify-center rounded opacity-50 hover:bg-accent-foreground/10 hover:opacity-100"
-                  onClick={() => expandAllProjects(allProjectIds)}
-                  aria-label="Expand all projects"
-                >
-                  <ChevronsUpDown className="size-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Expand all</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="flex size-4 shrink-0 items-center justify-center rounded opacity-50 hover:bg-accent-foreground/10 hover:opacity-100"
-                  onClick={collapseAllProjects}
-                  aria-label="Collapse all projects"
-                >
-                  <ChevronsDownUp className="size-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Collapse all</TooltipContent>
-            </Tooltip>
+      {projectSections.map(section => {
+        const areAllProjectsExpanded = section.projects.every(item =>
+          expandedProjectIds.has(item.id)
+        )
+        const actionLabel = areAllProjectsExpanded ? 'Collapse' : 'Expand'
+
+        return (
+          <div key={section.id}>
+            <div className="group/header flex items-center justify-between pl-3 pr-2 pb-1 pt-2">
+              <div
+                className="flex items-center gap-1"
+                data-testid="instance-title-actions"
+              >
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/50">
+                  {section.title}
+                </span>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex size-4 shrink-0 items-center justify-center rounded opacity-50 hover:bg-accent-foreground/10 hover:opacity-100"
+                      onClick={() =>
+                        section.projects.forEach(item =>
+                          setProjectExpanded(item.id, !areAllProjectsExpanded)
+                        )
+                      }
+                      aria-label={
+                        section.title === 'Projects'
+                          ? `${actionLabel} all projects`
+                          : `${actionLabel} all projects on ${section.title}`
+                      }
+                    >
+                      {areAllProjectsExpanded ? (
+                        <ChevronUp className="size-3.5" />
+                      ) : (
+                        <ChevronDown className="size-3.5" />
+                      )}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>{actionLabel} all</TooltipContent>
+                </Tooltip>
+              </div>
+              {groupByServer && section.id !== 'local' && (
+                <RemoteServerRefreshButton
+                  serverId={section.id}
+                  serverName={section.title}
+                />
+              )}
+            </div>
+            {section.projects.map(item => (
+              <SortableItem
+                key={item.id}
+                item={item}
+                allProjects={projects}
+                depth={0}
+                isOverFolder={false}
+                expandedFolderIds={expandedFolderIds}
+                overFolderId={overFolderId}
+                insertBeforeId={insertBeforeId}
+                activeId={activeId}
+                searchQuery={searchQuery}
+              />
+            ))}
           </div>
-        </div>
-      )}
-      {rootProjects.map(item => (
-        <SortableItem
-          key={item.id}
-          item={item}
-          allProjects={projects}
-          depth={0}
-          isOverFolder={false}
-          expandedFolderIds={expandedFolderIds}
-          overFolderId={overFolderId}
-          insertBeforeId={insertBeforeId}
-          activeId={activeId}
-        />
-      ))}
+        )
+      })}
 
       {/* Root drop zone - visible when dragging an item that's inside a folder */}
       {activeId &&

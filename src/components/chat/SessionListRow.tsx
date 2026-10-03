@@ -2,13 +2,12 @@ import { forwardRef, useCallback } from 'react'
 import {
   Archive,
   Copy,
-  FileText,
   Pencil,
   RefreshCw,
   Shield,
   Tag,
   Trash2,
-} from 'lucide-react'
+} from '@/components/icons/reicon'
 import { cn } from '@/lib/utils'
 import { getLabelTextColor } from '@/lib/label-colors'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -36,6 +35,7 @@ import {
 } from './session-card-utils'
 import { SessionStatusMenu } from './SessionStatusMenu'
 import { canReconnectSession } from '@/services/chat'
+import { useChatStore } from '@/store/chat-store'
 
 export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
   function SessionListRow(
@@ -45,7 +45,6 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
       onSelect,
       onArchive,
       onDelete,
-      onPlanView,
       onApprove,
       onYolo,
       onClearContextApprove,
@@ -65,6 +64,9 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
     ref
   ) {
     const config = statusConfig[card.status]
+    const isGeneratingName = useChatStore(
+      state => state.namingSessionIds[card.session.id] ?? false
+    )
     const handleSetStatusOverride =
       onSetStatusOverride ??
       (onToggleReview
@@ -77,7 +79,6 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
             }
           }
         : undefined)
-    const hasPlan = !!(card.planFilePath || card.planContent)
     const resumeCommand = getResumeCommand(card.session)
     const canReconnect = canReconnectSession(card.session)
     const renameInputRef = useCallback((node: HTMLInputElement | null) => {
@@ -121,7 +122,6 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
                 <span className="inline-flex shrink-0">
                   <StatusIndicator
                     status={config.indicatorStatus}
-                    variant={config.indicatorVariant}
                     shape={config.indicatorShape}
                     label={config.label}
                     className="h-2 w-2 shrink-0"
@@ -146,14 +146,16 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
                 className="flex-1 min-w-0 bg-transparent text-base outline-none ring-1 ring-ring rounded px-1 md:text-sm"
               />
             ) : (
-              <span className="flex-1 truncate text-sm">
-                {card.session.name}
+              <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm">
+                <span className="truncate">
+                  {isGeneratingName ? 'Generating…' : card.session.name}
+                </span>
               </span>
             )}
 
             {/* Blocked badge */}
             {card.hasPermissionDenials && (
-              <span className="flex items-center h-5 px-1.5 text-[10px] uppercase tracking-wide border border-yellow-500/50 text-yellow-600 dark:text-yellow-400 rounded shrink-0">
+              <span className="flex items-center h-5 px-1.5 text-[10px] uppercase tracking-wide border border-warning/50 text-warning rounded shrink-0">
                 <Shield className="mr-0.5 h-2.5 w-2.5" />
                 {card.permissionDenialCount}
               </span>
@@ -315,11 +317,6 @@ export const SessionListRow = forwardRef<HTMLDivElement, SessionCardProps>(
               Reconnect
             </ContextMenuItem>
           )}
-          <ContextMenuSeparator />
-          <ContextMenuItem disabled={!hasPlan} onSelect={onPlanView}>
-            <FileText className="mr-2 h-4 w-4" />
-            Plan
-          </ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem variant="destructive" onSelect={onDelete}>
             <Trash2 className="mr-2 h-4 w-4" />

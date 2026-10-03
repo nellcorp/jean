@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useChatStore } from '@/store/chat-store'
 import { useMessageSending } from './useMessageSending'
 import {
+  chatQueryKeys,
   persistEnqueue,
   steerCodexTurn,
   steerGrokTurn,
@@ -94,6 +95,7 @@ function renderUseMessageSending({
   selectedBackend = 'codex',
   selectedModel = 'gpt-5.5',
   selectedEffortLevel = 'high',
+  sessionsData = { sessions: [{ id: 'session-1' }] },
   createSession = {
     mutateAsync: vi.fn(async () => ({
       id: 'new-session',
@@ -124,6 +126,7 @@ function renderUseMessageSending({
     | 'antigravity'
   selectedModel?: string
   selectedEffortLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  sessionsData?: { sessions: { id: string }[] }
   createSession?: {
     mutateAsync: (args: {
       worktreeId: string
@@ -135,6 +138,7 @@ function renderUseMessageSending({
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
+  queryClient.setQueryData(chatQueryKeys.sessions('worktree-1'), sessionsData)
   const inputRef = {
     current: { value: inputValue } as HTMLTextAreaElement,
   }
@@ -167,7 +171,6 @@ function renderUseMessageSending({
       createSession,
       queryClient,
       markAtBottom: vi.fn(),
-      sessionsData: { sessions: [{ id: 'session-1' }] },
       clearInputDraft: vi.fn(),
       clearChatInputState: vi.fn(),
     })
@@ -263,6 +266,82 @@ describe('useMessageSending Codex /goal', () => {
     expect(sendMessage.mutate).not.toHaveBeenCalled()
   })
 
+  it('sends through the backend when the cached session list is stale', async () => {
+    const { result, sendMessage } = renderUseMessageSending({
+      inputValue: 'keep this message',
+      sessionsData: { sessions: [] },
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'session-1',
+        message: 'keep this message',
+      }),
+      expect.any(Object)
+    )
+  })
+
+  it('queues direct magic prompts without clearing an active turn', () => {
+    useChatStore.setState({
+      sendingSessionIds: { 'session-1': true },
+      streamingContents: { 'session-1': 'Active response' },
+      activeToolCalls: {
+        'session-1': [
+          {
+            id: 'tool-1',
+            name: 'Read',
+            input: {},
+            status: 'running',
+          },
+        ],
+      },
+    })
+    const { result, sendMessage } = renderUseMessageSending({
+      inputValue: 'unused',
+    })
+
+    act(() => {
+      result.current.sendMessageNow({
+        id: 'magic-prompt-1',
+        message: 'Check GitHub issues',
+        pendingImages: [],
+        pendingFiles: [],
+        pendingSkills: [],
+        pendingTextFiles: [],
+        model: 'gpt-5.5',
+        provider: null,
+        executionMode: 'plan',
+        thinkingLevel: 'off',
+        backend: 'codex',
+        queuedAt: Date.now(),
+      })
+    })
+
+    expect(useChatStore.getState().messageQueues['session-1']).toEqual([
+      expect.objectContaining({
+        id: 'magic-prompt-1',
+        message: 'Check GitHub issues',
+      }),
+    ])
+    expect(useChatStore.getState().streamingContents['session-1']).toBe(
+      'Active response'
+    )
+    expect(useChatStore.getState().activeToolCalls['session-1']).toHaveLength(1)
+    expect(persistEnqueue).toHaveBeenCalledWith(
+      'worktree-1',
+      '/tmp/worktree',
+      'session-1',
+      expect.objectContaining({ id: 'magic-prompt-1' })
+    )
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+  })
+
   it('blocks send when the selected backend is installed but not authenticated', async () => {
     mockInstalledBackends.installedBackends = ['claude', 'codex']
     mockBackendAuthStatuses.authByBackend = {
@@ -307,7 +386,7 @@ describe('useMessageSending Codex /goal', () => {
     expect(sendMessage.mutate).toHaveBeenCalledWith(
       expect.objectContaining({
         executionMode: 'build',
-        message: 'Work toward the active goal:\n\nShip the feature',
+        message: 'Complete this goal in the current turn:\n\nShip the feature',
         backend: 'codex',
       }),
       expect.any(Object)
@@ -330,7 +409,7 @@ describe('useMessageSending Codex /goal', () => {
     expect(sendMessage.mutate).toHaveBeenCalledWith(
       expect.objectContaining({
         executionMode: 'yolo',
-        message: 'Work toward the active goal:\n\nShip the feature',
+        message: 'Complete this goal in the current turn:\n\nShip the feature',
       }),
       expect.any(Object)
     )
@@ -394,6 +473,95 @@ describe('useMessageSending Grok /goal', () => {
   })
 })
 
+describe('useMessageSending Claude /goal', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockInvoke.mockResolvedValue(undefined)
+    resetInstalledBackendsMock()
+    useChatStore.setState({
+      inputDrafts: {},
+      pendingImages: {},
+      pendingFiles: {},
+      pendingTextFiles: {},
+      pendingSkills: {},
+      sendingSessionIds: {},
+      executionModes: {},
+      selectedModels: {},
+      executingModes: {},
+      errors: {},
+      lastSentMessages: {},
+      reviewingSessions: {},
+      waitingForInputSessionIds: {},
+      messageQueues: {},
+      approvedTools: {},
+      streamingContents: {},
+      activeToolCalls: {},
+      streamingContentBlocks: {},
+      streamingThinkingContent: {},
+    })
+  })
+
+  it('passes /goal through to Claude, mirrors the goal, and switches mode', async () => {
+    const { result, sendMessage, executionModeRef } = renderUseMessageSending({
+      selectedBackend: 'claude',
+      selectedModel: 'claude-sonnet-4-6',
+      inputValue: '/goal all tests pass',
+      goalMode: 'yolo',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith('codex_goal_set', {
+      worktreeId: 'worktree-1',
+      worktreePath: '/tmp/worktree',
+      sessionId: 'session-1',
+      objective: 'all tests pass',
+    })
+    expect(executionModeRef.current).toBe('yolo')
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        backend: 'claude',
+        executionMode: 'yolo',
+        message: '/goal all tests pass',
+      }),
+      expect.any(Object)
+    )
+  })
+
+  it('clears the mirrored goal for clear aliases and still sends to Claude', async () => {
+    const { result, sendMessage, executionModeRef } = renderUseMessageSending({
+      selectedBackend: 'claude',
+      selectedModel: 'claude-sonnet-4-6',
+      inputValue: '/goal stop',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit({
+        preventDefault: vi.fn(),
+      } as unknown as React.FormEvent)
+    })
+
+    expect(mockInvoke).toHaveBeenCalledWith('codex_goal_clear', {
+      worktreeId: 'worktree-1',
+      worktreePath: '/tmp/worktree',
+      sessionId: 'session-1',
+    })
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      'codex_goal_set',
+      expect.anything()
+    )
+    expect(executionModeRef.current).toBe('plan')
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({ message: '/goal stop' }),
+      expect.any(Object)
+    )
+  })
+})
+
 describe('useMessageSending PI effort', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -443,6 +611,73 @@ describe('useMessageSending PI effort', () => {
         thinkingLevel: 'off',
       }),
       expect.any(Object)
+    )
+  })
+})
+
+describe('useMessageSending beforeSend', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockInvoke.mockResolvedValue(undefined)
+    resetInstalledBackendsMock()
+    useChatStore.setState({
+      inputDrafts: {},
+      pendingImages: {},
+      pendingFiles: {},
+      pendingTextFiles: {},
+      pendingSkills: {},
+      sendingSessionIds: {},
+      messageQueues: {},
+    })
+  })
+
+  it('sends only after beforeSend resolves', async () => {
+    const { result, sendMessage } = renderUseMessageSending({
+      selectedBackend: 'claude',
+      selectedModel: 'claude-opus-5-5',
+      inputValue: 'Investigate issue #1',
+    })
+    let finishLoad: () => void = () => undefined
+    const beforeSend = vi.fn(
+      () => new Promise<void>(resolve => (finishLoad = resolve))
+    )
+
+    let submit: Promise<void> | undefined
+    act(() => {
+      submit = result.current.handleSubmit(undefined, { beforeSend })
+    })
+    expect(beforeSend).toHaveBeenCalledTimes(1)
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+
+    await act(async () => {
+      finishLoad()
+      await submit
+    })
+    expect(sendMessage.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'session-1',
+        message: 'Investigate issue #1',
+      }),
+      expect.any(Object)
+    )
+  })
+
+  it('restores the draft and skips send when beforeSend fails', async () => {
+    const { result, sendMessage } = renderUseMessageSending({
+      selectedBackend: 'claude',
+      selectedModel: 'claude-opus-5-5',
+      inputValue: 'Investigate issue #1',
+    })
+
+    await act(async () => {
+      await result.current.handleSubmit(undefined, {
+        beforeSend: () => Promise.reject(new Error('load failed')),
+      })
+    })
+
+    expect(sendMessage.mutate).not.toHaveBeenCalled()
+    expect(useChatStore.getState().inputDrafts['session-1']).toBe(
+      'Investigate issue #1'
     )
   })
 })
@@ -602,9 +837,10 @@ describe('useMessageSending Codex auto-steer', () => {
     })
   })
 
-  it('steers the running codex turn instead of queueing by default', async () => {
+  it('steers the running codex turn when auto-steer is enabled', async () => {
     vi.mocked(steerCodexTurn).mockResolvedValue(undefined)
     const { result, sendMessage } = renderUseMessageSending({
+      autoSteer: true,
       inputValue: 'also check the tests',
     })
 
@@ -631,6 +867,7 @@ describe('useMessageSending Codex auto-steer', () => {
     const { result, sendMessage } = renderUseMessageSending({
       selectedBackend: 'pi',
       selectedModel: 'pi/openai-codex/gpt-5.5',
+      piAutoSteer: true,
       inputValue: 'also inspect pi',
     })
 
@@ -657,6 +894,7 @@ describe('useMessageSending Codex auto-steer', () => {
     const { result, sendMessage } = renderUseMessageSending({
       selectedBackend: 'grok',
       selectedModel: 'grok/grok-4.5',
+      grokAutoSteer: true,
       inputValue: 'also inspect grok',
     })
 
@@ -678,11 +916,12 @@ describe('useMessageSending Codex auto-steer', () => {
     expect(sendMessage.mutate).not.toHaveBeenCalled()
   })
 
-  it('steers the running opencode turn instead of queueing by default', async () => {
+  it('steers the running opencode turn when auto-steer is enabled', async () => {
     vi.mocked(steerOpencodeTurn).mockResolvedValue(undefined)
     const { result, sendMessage } = renderUseMessageSending({
       selectedBackend: 'opencode',
       selectedModel: 'opencode/gpt-5.5',
+      opencodeAutoSteer: true,
       inputValue: 'also inspect opencode',
     })
 
@@ -708,6 +947,7 @@ describe('useMessageSending Codex auto-steer', () => {
   it('steers codex attachments instead of queueing when auto-steer is enabled', async () => {
     vi.mocked(steerCodexTurn).mockResolvedValue(undefined)
     const { result } = renderUseMessageSending({
+      autoSteer: true,
       inputValue: 'please inspect',
     })
     useChatStore.setState({
@@ -737,9 +977,8 @@ describe('useMessageSending Codex auto-steer', () => {
     expect(persistEnqueue).not.toHaveBeenCalled()
   })
 
-  it('queues instead of steering when auto-steer is disabled', async () => {
+  it('queues instead of steering by default', async () => {
     const { result } = renderUseMessageSending({
-      autoSteer: false,
       inputValue: 'also check the tests',
     })
 
@@ -819,6 +1058,7 @@ describe('useMessageSending Codex auto-steer', () => {
     const { result } = renderUseMessageSending({
       selectedBackend: 'grok',
       selectedModel: 'grok/grok-4.5',
+      grokAutoSteer: true,
       inputValue: 'also inspect grok',
     })
     useChatStore.setState({
@@ -850,6 +1090,7 @@ describe('useMessageSending Codex auto-steer', () => {
     const { result } = renderUseMessageSending({
       selectedBackend: 'grok',
       selectedModel: 'grok/grok-4.5',
+      grokAutoSteer: true,
       inputValue: 'check this paste',
     })
     useChatStore.setState({
@@ -887,6 +1128,7 @@ describe('useMessageSending Codex auto-steer', () => {
     const { result } = renderUseMessageSending({
       selectedBackend: 'grok',
       selectedModel: 'grok/grok-4.5',
+      grokAutoSteer: true,
       inputValue:
         'i dont think we need to change the @AppServiceProvider.php as it worked before without it',
     })
@@ -944,6 +1186,7 @@ describe('useMessageSending Codex auto-steer', () => {
   it('falls back to queueing when steering fails', async () => {
     vi.mocked(steerCodexTurn).mockRejectedValue(new Error('turn ended'))
     const { result } = renderUseMessageSending({
+      autoSteer: true,
       inputValue: 'also check the tests',
     })
 

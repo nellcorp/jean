@@ -6,7 +6,7 @@ import {
   Terminal,
   Trash2,
   X,
-} from 'lucide-react'
+} from '@/components/icons/reicon'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,7 +30,8 @@ import {
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import {
   canOpenInEditor,
-  canOpenNativeApps,
+  canOpenInFinder,
+  canOpenInTerminal,
   isNativeApp,
 } from '@/lib/environment'
 import { getFileManagerName } from '@/lib/platform'
@@ -41,11 +42,13 @@ interface WorktreeContextMenuProps {
   // Computed once by the parent (WorktreeItem) and passed in so the hook isn't
   // run twice per worktree row.
   actions: ReturnType<typeof useWorktreeMenuActions>
+  serverId?: string
   children: React.ReactNode
 }
 
 export function WorktreeContextMenu({
   actions,
+  serverId,
   children,
 }: WorktreeContextMenuProps) {
   const {
@@ -96,7 +99,9 @@ export function WorktreeContextMenu({
           </ContextMenuSub>
         )}
 
-        {(showEditorItem || canOpenNativeApps()) && <ContextMenuSeparator />}
+        {(showEditorItem ||
+          canOpenInTerminal() ||
+          canOpenInFinder(serverId)) && <ContextMenuSeparator />}
 
         {showEditorItem && (
           <ContextMenuItem onClick={handleOpenInEditor}>
@@ -107,14 +112,14 @@ export function WorktreeContextMenu({
           </ContextMenuItem>
         )}
 
-        {canOpenNativeApps() && (
+        {canOpenInFinder(serverId) && (
           <ContextMenuItem onClick={handleOpenInFinder}>
             <FolderOpen className="mr-2 h-4 w-4" />
             Open in {getFileManagerName()}
           </ContextMenuItem>
         )}
 
-        {canOpenNativeApps() && (
+        {canOpenInTerminal() && (
           <ContextMenuItem onClick={handleOpenInTerminal}>
             <Terminal className="mr-2 h-4 w-4" />
             Open in {getTerminalLabel(preferences?.terminal)}

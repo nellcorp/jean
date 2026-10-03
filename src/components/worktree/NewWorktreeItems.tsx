@@ -10,7 +10,8 @@ import {
   Wand2,
   Eye,
   MoreHorizontal,
-} from 'lucide-react'
+  MessageSquarePlus,
+} from '@/components/icons/reicon'
 import {
   Tooltip,
   TooltipTrigger,
@@ -85,6 +86,7 @@ export interface IssueItemProps {
   onMouseEnter: () => void
   onClick: (background: boolean) => void
   onInvestigate: (background: boolean) => void
+  onInvestigateInNewSession?: () => void
   onPreview: () => void
   onLabelClick?: (label: string) => void
 }
@@ -99,15 +101,15 @@ export function IssueItem({
   onMouseEnter,
   onClick,
   onInvestigate,
+  onInvestigateInNewSession,
   onPreview,
-  onLabelClick,
 }: IssueItemProps) {
   return (
     <div
       data-item-index={index}
       onMouseEnter={onMouseEnter}
       className={cn(
-        'group w-full flex items-start gap-3 px-3 py-2.5 sm:py-2 text-left transition-colors',
+        'group w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors',
         'hover:bg-accent',
         isSelected && 'bg-accent',
         isChecked && !isSelected && 'bg-accent/50',
@@ -128,70 +130,33 @@ export function IssueItem({
         <CircleDot
           className={cn(
             'h-4 w-4 mt-0.5 flex-shrink-0',
-            issue.state === 'OPEN' ? 'text-green-500' : 'text-purple-500'
+            issue.state === 'OPEN'
+              ? 'text-success'
+              : 'text-purple-600 dark:text-purple-400'
           )}
         />
       )}
       <div className="flex-1 min-w-0">
         <button
           type="button"
-          onClick={e => onClick(e.metaKey)}
+          onClick={e => onClick(e.metaKey || e.ctrlKey)}
           disabled={isCreating}
           className="w-full min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
         >
           <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">
+            <span className="text-[10px] text-muted-foreground">
               #{issue.number}
             </span>
-            <span className="text-sm font-medium truncate">{issue.title}</span>
+            <span className="text-[11px] font-medium truncate">
+              {issue.title}
+            </span>
             {isNewIssue(issue.created_at) && (
-              <span className="shrink-0 rounded-full bg-green-500/10 px-1.5 py-0.5 text-[10px] font-medium text-green-600 border border-green-500/20">
+              <span className="shrink-0 rounded-full bg-success/10 px-1.5 py-0.5 text-[10px] font-medium text-success border border-success/20">
                 New
               </span>
             )}
           </div>
         </button>
-        {issue.labels.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-1">
-            {issue.labels.slice(0, 3).map(label =>
-              onLabelClick ? (
-                <button
-                  key={label.name}
-                  type="button"
-                  className="px-1.5 py-0.5 text-xs rounded-full cursor-pointer hover:opacity-75 transition-opacity"
-                  style={{
-                    backgroundColor: `#${label.color}20`,
-                    color: `#${label.color}`,
-                    border: `1px solid #${label.color}40`,
-                  }}
-                  onClick={e => {
-                    e.stopPropagation()
-                    onLabelClick(label.name)
-                  }}
-                >
-                  {label.name}
-                </button>
-              ) : (
-                <span
-                  key={label.name}
-                  className="px-1.5 py-0.5 text-xs rounded-full"
-                  style={{
-                    backgroundColor: `#${label.color}20`,
-                    color: `#${label.color}`,
-                    border: `1px solid #${label.color}40`,
-                  }}
-                >
-                  {label.name}
-                </span>
-              )
-            )}
-            {issue.labels.length > 3 && (
-              <span className="text-xs text-muted-foreground">
-                +{issue.labels.length - 3}
-              </span>
-            )}
-          </div>
-        )}
       </div>
       <div className="shrink-0 flex items-center gap-1 self-center">
         <ItemActions
@@ -201,6 +166,7 @@ export function IssueItem({
           isCreating={isCreating}
           onPreview={onPreview}
           onInvestigate={onInvestigate}
+          onInvestigateInNewSession={onInvestigateInNewSession}
         />
       </div>
     </div>
@@ -236,7 +202,6 @@ export function PRItem({
   onInvestigate,
   onStack,
   onPreview,
-  onLabelClick,
 }: PRItemProps) {
   const busy = isCreating || isStacking
   return (
@@ -244,7 +209,7 @@ export function PRItem({
       data-item-index={index}
       onMouseEnter={onMouseEnter}
       className={cn(
-        'group w-full flex items-start gap-3 px-3 py-2.5 sm:py-2 text-left transition-colors',
+        'group w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors',
         'hover:bg-accent',
         isSelected && 'bg-accent',
         isChecked && !isSelected && 'bg-accent/50',
@@ -266,76 +231,32 @@ export function PRItem({
           className={cn(
             'h-4 w-4 mt-0.5 flex-shrink-0',
             pr.state === 'OPEN'
-              ? 'text-green-500'
+              ? 'text-success'
               : pr.state === 'MERGED'
-                ? 'text-purple-500'
-                : 'text-red-500'
+                ? 'text-purple-600 dark:text-purple-400'
+                : 'text-destructive'
           )}
         />
       )}
       <div className="flex-1 min-w-0">
         <button
           type="button"
-          onClick={e => onClick(e.metaKey)}
+          onClick={e => onClick(e.metaKey || e.ctrlKey)}
           disabled={busy}
           className="w-full min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
         >
           <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">#{pr.number}</span>
-            <span className="text-sm font-medium truncate">{pr.title}</span>
+            <span className="text-[10px] text-muted-foreground">
+              #{pr.number}
+            </span>
+            <span className="text-[11px] font-medium truncate">{pr.title}</span>
             {pr.isDraft && (
               <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
                 Draft
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-xs text-muted-foreground truncate">
-              {pr.headRefName} → {pr.baseRefName}
-            </span>
-          </div>
         </button>
-        {pr.labels.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-1">
-            {pr.labels.slice(0, 3).map(label =>
-              onLabelClick ? (
-                <button
-                  key={label.name}
-                  type="button"
-                  className="px-1.5 py-0.5 text-xs rounded-full cursor-pointer hover:opacity-75 transition-opacity"
-                  style={{
-                    backgroundColor: `#${label.color}20`,
-                    color: `#${label.color}`,
-                    border: `1px solid #${label.color}40`,
-                  }}
-                  onClick={e => {
-                    e.stopPropagation()
-                    onLabelClick(label.name)
-                  }}
-                >
-                  {label.name}
-                </button>
-              ) : (
-                <span
-                  key={label.name}
-                  className="px-1.5 py-0.5 text-xs rounded-full"
-                  style={{
-                    backgroundColor: `#${label.color}20`,
-                    color: `#${label.color}`,
-                    border: `1px solid #${label.color}40`,
-                  }}
-                >
-                  {label.name}
-                </span>
-              )
-            )}
-            {pr.labels.length > 3 && (
-              <span className="text-xs text-muted-foreground">
-                +{pr.labels.length - 3}
-              </span>
-            )}
-          </div>
-        )}
       </div>
       <div className="shrink-0 flex items-center gap-1 self-center">
         <ItemActions
@@ -410,7 +331,7 @@ export function BranchItem({
       )}
       <button
         type="button"
-        onClick={e => onClick(e.metaKey)}
+        onClick={e => onClick(e.metaKey || e.ctrlKey)}
         disabled={isCreating}
         className="flex-1 min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
       >
@@ -425,10 +346,10 @@ export function BranchItem({
 // =============================================================================
 
 const SEVERITY_COLORS: Record<string, string> = {
-  critical: 'bg-red-500/10 text-red-600 border-red-500/20',
-  high: 'bg-orange-500/10 text-orange-600 border-orange-500/20',
-  medium: 'bg-yellow-500/10 text-yellow-600 border-yellow-500/20',
-  low: 'bg-blue-500/10 text-blue-600 border-blue-500/20',
+  critical: 'bg-destructive/10 text-destructive border-destructive/20',
+  high: 'bg-warning/10 text-warning border-warning/20',
+  medium: 'bg-warning/10 text-warning border-warning/20',
+  low: 'bg-info/10 text-info border-info/20',
 }
 
 function ItemActions({
@@ -438,6 +359,7 @@ function ItemActions({
   isCreating,
   onPreview,
   onInvestigate,
+  onInvestigateInNewSession,
 }: {
   label: string
   previewLabel: string
@@ -445,6 +367,7 @@ function ItemActions({
   isCreating: boolean
   onPreview: () => void
   onInvestigate: (background: boolean) => void
+  onInvestigateInNewSession?: () => void
 }) {
   const isMobile = useIsMobile()
 
@@ -467,11 +390,17 @@ function ItemActions({
             Preview
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => onInvestigate(false)}>
-            <Wand2 className="h-4 w-4 text-current dark:text-yellow-400" />
+            <Wand2 className="h-4 w-4 text-current" />
             Investigate
           </DropdownMenuItem>
+          {onInvestigateInNewSession && (
+            <DropdownMenuItem onClick={onInvestigateInNewSession}>
+              <Wand2 className="h-4 w-4 text-current" />
+              Investigate in the Current Worktree
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem onClick={() => onInvestigate(true)}>
-            <Wand2 className="h-4 w-4 text-current dark:text-yellow-400" />
+            <Wand2 className="h-4 w-4 text-current" />
             Investigate in Background
           </DropdownMenuItem>
         </DropdownMenuContent>
@@ -499,6 +428,25 @@ function ItemActions({
           {previewLabel} ({getModifierSymbol()}O)
         </TooltipContent>
       </Tooltip>
+      {onInvestigateInNewSession && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label={`${investigateLabel} in the current worktree`}
+              onClick={e => {
+                e.stopPropagation()
+                onInvestigateInNewSession()
+              }}
+              disabled={isCreating}
+              className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <MessageSquarePlus className="h-3.5 w-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Investigate in the current worktree</TooltipContent>
+        </Tooltip>
+      )}
       <Tooltip>
         <TooltipTrigger asChild>
           <button
@@ -511,7 +459,7 @@ function ItemActions({
             disabled={isCreating}
             className="inline-flex h-6 w-6 items-center justify-center rounded px-1 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed"
           >
-            <Wand2 className="h-3 w-3 text-current dark:text-yellow-400" />
+            <Wand2 className="h-3 w-3 text-current" />
           </button>
         </TooltipTrigger>
         <TooltipContent>
@@ -578,13 +526,13 @@ export function SecurityAlertItem({
         <Shield
           className={cn(
             'h-4 w-4 mt-0.5 flex-shrink-0',
-            alert.state === 'open' ? 'text-orange-500' : 'text-muted-foreground'
+            alert.state === 'open' ? 'text-warning' : 'text-muted-foreground'
           )}
         />
       )}
       <button
         type="button"
-        onClick={e => onClick(e.metaKey)}
+        onClick={e => onClick(e.metaKey || e.ctrlKey)}
         disabled={isCreating}
         className="flex-1 min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
       >
@@ -685,14 +633,14 @@ export function AdvisoryItem({
           className={cn(
             'h-4 w-4 mt-0.5 flex-shrink-0',
             advisory.state === 'published'
-              ? 'text-orange-500'
+              ? 'text-warning'
               : 'text-muted-foreground'
           )}
         />
       )}
       <button
         type="button"
-        onClick={e => onClick(e.metaKey)}
+        onClick={e => onClick(e.metaKey || e.ctrlKey)}
         disabled={isCreating}
         className="flex-1 min-w-0 text-left focus:outline-none disabled:cursor-not-allowed"
       >

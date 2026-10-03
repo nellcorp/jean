@@ -1,4 +1,4 @@
-import { Loader2, Wand2 } from 'lucide-react'
+import { Loader2, Wand2 } from '@/components/icons/reicon'
 import { Button } from '@/components/ui/button'
 
 export interface BulkInvestigateBarProps {
@@ -41,11 +41,9 @@ export function BulkInvestigateBar({
         {isLoading ? (
           <Loader2 className="h-4 w-4 animate-spin" />
         ) : (
-          <Wand2 className="h-4 w-4 text-current dark:text-yellow-400" />
+          <Wand2 className="h-4 w-4 text-current" />
         )}
-        {isLoading
-          ? 'Starting…'
-          : `Investigate ${count} ${noun} in background`}
+        {isLoading ? 'Starting…' : `Investigate ${count} ${noun} in background`}
       </Button>
     </div>
   )

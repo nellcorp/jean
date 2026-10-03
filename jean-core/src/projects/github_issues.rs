@@ -79,6 +79,46 @@ pub struct GitHubIssueListResult {
     pub total_count: u32,
 }
 
+fn is_github_issue(value: &serde_json::Value) -> bool {
+    value
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|url| url.contains("/issues/"))
+}
+
+fn parse_github_issues_response(stdout: &str) -> Result<Vec<GitHubIssue>, String> {
+    let values: Vec<serde_json::Value> =
+        serde_json::from_str(stdout).map_err(|e| format!("Failed to parse gh response: {e}"))?;
+
+    values
+        .into_iter()
+        .filter(is_github_issue)
+        .map(|value| {
+            serde_json::from_value(value).map_err(|e| format!("Failed to parse gh response: {e}"))
+        })
+        .collect()
+}
+
+fn parse_github_issue_response(stdout: &str) -> Result<GitHubIssue, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("Failed to parse gh response: {e}"))?;
+    if !is_github_issue(&value) {
+        return Err("GitHub item is not an issue".to_string());
+    }
+
+    serde_json::from_value(value).map_err(|e| format!("Failed to parse gh response: {e}"))
+}
+
+fn parse_github_issue_detail_response(stdout: &str) -> Result<GitHubIssueDetail, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("Failed to parse gh response: {e}"))?;
+    if !is_github_issue(&value) {
+        return Err("GitHub item is not an issue".to_string());
+    }
+
+    serde_json::from_value(value).map_err(|e| format!("Failed to parse gh response: {e}"))
+}
+
 pub async fn list_github_labels(
     app: AppHandle,
     project_path: String,
@@ -169,7 +209,7 @@ pub async fn list_github_issues(
             "issue",
             "list",
             "--json",
-            "number,title,body,state,labels,createdAt,author",
+            "number,title,body,state,labels,createdAt,author,url",
             "-L",
             "1000",
             "--state",
@@ -194,8 +234,7 @@ pub async fn list_github_issues(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let issues: Vec<GitHubIssue> =
-        serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse gh response: {e}"))?;
+    let issues = parse_github_issues_response(&stdout)?;
 
     // Get accurate total count from GitHub search API
     let total_count =
@@ -206,6 +245,59 @@ pub async fn list_github_issues(
         issues,
         total_count,
     })
+}
+
+#[derive(Deserialize)]
+struct IssueLabelsEntry {
+    number: u32,
+    #[serde(default)]
+    labels: Vec<GitHubLabel>,
+}
+
+/// Lightweight open-issue listing for Mr. Robot scans: numbers and labels only.
+///
+/// Unlike `list_github_issues` this skips bodies and the search-API total count
+/// (search has a low rate limit), and runs `gh` off the async runtime.
+pub async fn list_open_issue_labels(
+    app: AppHandle,
+    project_path: String,
+) -> Result<Vec<crate::auto_fix::types::AutoFixIssueCandidate>, String> {
+    let gh = resolve_gh_binary(&app);
+    let output = tokio::task::spawn_blocking(move || {
+        gh_command(&gh, &project_path)
+            .args([
+                "issue",
+                "list",
+                "--json",
+                "number,labels",
+                "-L",
+                "1000",
+                "--state",
+                "open",
+            ])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("Failed to run gh issue list: {e}"))?
+    .map_err(|e| format!("Failed to run gh issue list: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_gh_cli_auth_error(&stderr) {
+            return Err("GitHub CLI not authenticated. Run 'gh auth login' first.".to_string());
+        }
+        return Err(format!("gh issue list failed: {}", stderr.trim()));
+    }
+
+    let entries: Vec<IssueLabelsEntry> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse gh issue list output: {e}"))?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| crate::auto_fix::types::AutoFixIssueCandidate {
+            number: entry.number,
+            labels: entry.labels.into_iter().map(|label| label.name).collect(),
+        })
+        .collect())
 }
 
 /// Get accurate total issue count from GitHub search API
@@ -257,7 +349,7 @@ pub async fn search_github_issues(
             "--search",
             &query,
             "--json",
-            "number,title,body,state,labels,createdAt,author",
+            "number,title,body,state,labels,createdAt,author,url",
             "-L",
             "100",
             "--state",
@@ -281,8 +373,7 @@ pub async fn search_github_issues(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let issues: Vec<GitHubIssue> =
-        serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse gh response: {e}"))?;
+    let issues = parse_github_issues_response(&stdout)?;
 
     log::trace!("Search found {} issues", issues.len());
     Ok(issues)
@@ -306,7 +397,7 @@ pub async fn get_github_issue_by_number(
             "view",
             &issue_number.to_string(),
             "--json",
-            "number,title,body,state,labels,createdAt,author",
+            "number,title,body,state,labels,createdAt,author,url",
         ])
         .output()
         .map_err(|e| format!("Failed to run gh issue view: {e}"))?;
@@ -323,8 +414,7 @@ pub async fn get_github_issue_by_number(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let issue: GitHubIssue =
-        serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse gh response: {e}"))?;
+    let issue = parse_github_issue_response(&stdout)?;
 
     log::trace!("Got issue #{}: {}", issue.number, issue.title);
     Ok(issue)
@@ -366,8 +456,7 @@ pub async fn get_github_issue(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let issue: GitHubIssueDetail =
-        serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse gh response: {e}"))?;
+    let issue = parse_github_issue_detail_response(&stdout)?;
 
     log::trace!("Got issue #{}: {}", issue.number, issue.title);
     Ok(issue)
@@ -664,6 +753,46 @@ pub fn get_session_pr_refs(
         .collect())
 }
 
+/// Session-only GitHub refs replace worktree refs of the same type. Older
+/// sessions can contain copies of worktree refs, so discard those copies when
+/// an independently attached session ref exists.
+fn preferred_context_refs(session_refs: Vec<String>, worktree_refs: Vec<String>) -> Vec<String> {
+    let session_only: Vec<String> = session_refs
+        .iter()
+        .filter(|key| !worktree_refs.contains(key))
+        .cloned()
+        .collect();
+    if !session_only.is_empty() {
+        session_only
+    } else if !session_refs.is_empty() {
+        session_refs
+    } else {
+        worktree_refs
+    }
+}
+
+pub fn get_preferred_issue_refs(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+) -> Vec<String> {
+    preferred_context_refs(
+        get_session_issue_refs(app, session_id).unwrap_or_default(),
+        get_session_issue_refs(app, worktree_id).unwrap_or_default(),
+    )
+}
+
+pub fn get_preferred_pr_refs(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+) -> Vec<String> {
+    preferred_context_refs(
+        get_session_pr_refs(app, session_id).unwrap_or_default(),
+        get_session_pr_refs(app, worktree_id).unwrap_or_default(),
+    )
+}
+
 /// Add a session reference to a security alert context
 /// Key format: "{owner}-{repo}-{number}"
 pub fn add_security_reference(
@@ -829,10 +958,18 @@ fn extract_number_from_ref_key(key: &str) -> Option<u32> {
 pub fn get_session_context_numbers(
     app: &AppHandle,
     session_id: &str,
+    worktree_id: &str,
 ) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>), String> {
-    let issue_keys = get_session_issue_refs(app, session_id)?;
-    let pr_keys = get_session_pr_refs(app, session_id)?;
-    let security_keys = get_session_security_refs(app, session_id)?;
+    let issue_keys = get_preferred_issue_refs(app, session_id, worktree_id);
+    let pr_keys = get_preferred_pr_refs(app, session_id, worktree_id);
+    let mut security_keys = get_session_security_refs(app, session_id)?;
+    if worktree_id != session_id {
+        for key in get_session_security_refs(app, worktree_id)? {
+            if !security_keys.contains(&key) {
+                security_keys.push(key);
+            }
+        }
+    }
 
     let issue_nums: Vec<u32> = issue_keys
         .iter()
@@ -855,16 +992,29 @@ pub fn get_session_context_numbers(
 pub fn get_session_context_content(
     app: &AppHandle,
     session_id: &str,
+    worktree_id: &str,
     project_path: &str,
 ) -> Result<String, String> {
     let repo_id = get_repo_identifier(project_path)?;
     let repo_key = repo_id.to_key();
     let contexts_dir = get_github_contexts_dir(app)?;
 
-    let issue_keys = get_session_issue_refs(app, session_id)?;
-    let pr_keys = get_session_pr_refs(app, session_id)?;
-    let security_keys = get_session_security_refs(app, session_id)?;
-    let advisory_keys = get_session_advisory_refs(app, session_id)?;
+    let issue_keys = get_preferred_issue_refs(app, session_id, worktree_id);
+    let pr_keys = get_preferred_pr_refs(app, session_id, worktree_id);
+    let mut security_keys = get_session_security_refs(app, session_id)?;
+    let mut advisory_keys = get_session_advisory_refs(app, session_id)?;
+    if worktree_id != session_id {
+        for key in get_session_security_refs(app, worktree_id)? {
+            if !security_keys.contains(&key) {
+                security_keys.push(key);
+            }
+        }
+        for key in get_session_advisory_refs(app, worktree_id)? {
+            if !advisory_keys.contains(&key) {
+                advisory_keys.push(key);
+            }
+        }
+    }
 
     if issue_keys.is_empty()
         && pr_keys.is_empty()
@@ -1157,45 +1307,54 @@ pub async fn load_issue_context(
 ) -> Result<LoadedIssueContext, String> {
     log::trace!("Loading issue #{issue_number} context for session {session_id}");
 
-    // Get repo identifier for shared storage
-    let repo_id = get_repo_identifier(&project_path)?;
-    let repo_key = repo_id.to_key();
-
     // Fetch issue data from GitHub
-    let issue = get_github_issue(app.clone(), project_path, issue_number).await?;
+    let issue = get_github_issue(app.clone(), project_path.clone(), issue_number).await?;
 
     // Create issue context
     let ctx = IssueContext {
         number: issue.number,
-        title: issue.title.clone(),
+        title: issue.title,
         body: issue.body,
         comments: issue.comments,
     };
 
+    attach_issue_context_for_session(&app, &session_id, &project_path, &ctx)
+}
+
+/// Save an already-fetched issue on a session before its investigation is queued.
+pub fn attach_issue_context_for_session(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    project_path: &str,
+    ctx: &IssueContext,
+) -> Result<LoadedIssueContext, String> {
+    let repo_id = get_repo_identifier(project_path)?;
+    let repo_key = repo_id.to_key();
+
     // Write to shared git-context directory
-    let contexts_dir = get_github_contexts_dir(&app)?;
+    let contexts_dir = get_github_contexts_dir(app)?;
     std::fs::create_dir_all(&contexts_dir)
         .map_err(|e| format!("Failed to create git-context directory: {e}"))?;
 
     // File format: {repo_key}-issue-{number}.md
-    let context_file = contexts_dir.join(format!("{repo_key}-issue-{issue_number}.md"));
-    let context_content = format_issue_context_markdown(&ctx);
+    let context_file = contexts_dir.join(format!("{repo_key}-issue-{}.md", ctx.number));
+    let context_content = format_issue_context_markdown(ctx);
 
     std::fs::write(&context_file, context_content)
         .map_err(|e| format!("Failed to write issue context file: {e}"))?;
 
     // Add reference tracking
-    add_issue_reference(&app, &repo_key, issue_number, &session_id)?;
+    add_issue_reference(app, &repo_key, ctx.number, session_id)?;
 
     log::trace!(
         "Issue context loaded successfully for issue #{} ({} comments)",
-        issue_number,
+        ctx.number,
         ctx.comments.len()
     );
 
     Ok(LoadedIssueContext {
-        number: issue.number,
-        title: issue.title,
+        number: ctx.number,
+        title: ctx.title.clone(),
         comment_count: ctx.comments.len(),
         repo_owner: repo_id.owner,
         repo_name: repo_id.repo,
@@ -1210,19 +1369,11 @@ pub async fn list_loaded_issue_contexts(
 ) -> Result<Vec<LoadedIssueContext>, String> {
     log::trace!("Listing loaded issue contexts for session {session_id}");
 
-    // Get issue refs for this session from reference tracking
-    let mut issue_keys = get_session_issue_refs(&app, &session_id)?;
-
-    // Also check worktree_id refs (create_worktree stores refs under worktree_id)
-    if let Some(ref wt_id) = worktree_id {
-        if let Ok(wt_keys) = get_session_issue_refs(&app, wt_id) {
-            for key in wt_keys {
-                if !issue_keys.contains(&key) {
-                    issue_keys.push(key);
-                }
-            }
-        }
-    }
+    let issue_keys = if let Some(ref wt_id) = worktree_id {
+        get_preferred_issue_refs(&app, &session_id, wt_id)
+    } else {
+        get_session_issue_refs(&app, &session_id)?
+    };
 
     if issue_keys.is_empty() {
         return Ok(vec![]);
@@ -1299,6 +1450,7 @@ pub fn cleanup_issue_contexts_for_session(
 pub async fn remove_issue_context(
     app: tauri::AppHandle,
     session_id: String,
+    worktree_id: Option<String>,
     issue_number: u32,
     project_path: String,
 ) -> Result<(), String> {
@@ -1308,8 +1460,15 @@ pub async fn remove_issue_context(
     let repo_id = get_repo_identifier(&project_path)?;
     let repo_key = repo_id.to_key();
 
-    // Remove reference
-    let is_orphaned = remove_issue_reference(&app, &repo_key, issue_number, &session_id)?;
+    // A session attachment must not remove the worktree's fallback reference.
+    let key = format!("{repo_key}-{issue_number}");
+    let session_has_ref = get_session_issue_refs(&app, &session_id)?.contains(&key);
+    let mut is_orphaned = remove_issue_reference(&app, &repo_key, issue_number, &session_id)?;
+    if !session_has_ref {
+        if let Some(worktree_id) = worktree_id.filter(|id| id != &session_id) {
+            is_orphaned = remove_issue_reference(&app, &repo_key, issue_number, &worktree_id)?;
+        }
+    }
 
     // If orphaned, delete the shared file immediately
     if is_orphaned {
@@ -2021,19 +2180,11 @@ pub async fn list_loaded_pr_contexts(
 ) -> Result<Vec<LoadedPullRequestContext>, String> {
     log::trace!("Listing loaded PR contexts for session {session_id}");
 
-    // Get PR refs for this session from reference tracking
-    let mut pr_keys = get_session_pr_refs(&app, &session_id)?;
-
-    // Also check worktree_id refs (create_worktree stores refs under worktree_id)
-    if let Some(ref wt_id) = worktree_id {
-        if let Ok(wt_keys) = get_session_pr_refs(&app, wt_id) {
-            for key in wt_keys {
-                if !pr_keys.contains(&key) {
-                    pr_keys.push(key);
-                }
-            }
-        }
-    }
+    let pr_keys = if let Some(ref wt_id) = worktree_id {
+        get_preferred_pr_refs(&app, &session_id, wt_id)
+    } else {
+        get_session_pr_refs(&app, &session_id)?
+    };
 
     if pr_keys.is_empty() {
         return Ok(vec![]);
@@ -2133,6 +2284,7 @@ pub async fn remove_pr_context(
 pub async fn get_issue_context_content(
     app: tauri::AppHandle,
     session_id: String,
+    worktree_id: Option<String>,
     issue_number: u32,
     project_path: String,
 ) -> Result<String, String> {
@@ -2140,8 +2292,12 @@ pub async fn get_issue_context_content(
     let repo_id = get_repo_identifier(&project_path)?;
     let repo_key = repo_id.to_key();
 
-    // Verify this session has a reference to this context
-    let refs = get_session_issue_refs(&app, &session_id)?;
+    // Verify the context is effective for this session, including fallback.
+    let refs = if let Some(ref wt_id) = worktree_id {
+        get_preferred_issue_refs(&app, &session_id, wt_id)
+    } else {
+        get_session_issue_refs(&app, &session_id)?
+    };
     let expected_key = format!("{repo_key}-{issue_number}");
     if !refs.contains(&expected_key) {
         return Err(format!(
@@ -2166,6 +2322,7 @@ pub async fn get_issue_context_content(
 pub async fn get_pr_context_content(
     app: tauri::AppHandle,
     session_id: String,
+    worktree_id: Option<String>,
     pr_number: u32,
     project_path: String,
 ) -> Result<String, String> {
@@ -2173,8 +2330,12 @@ pub async fn get_pr_context_content(
     let repo_id = get_repo_identifier(&project_path)?;
     let repo_key = repo_id.to_key();
 
-    // Verify this session has a reference to this context
-    let refs = get_session_pr_refs(&app, &session_id)?;
+    // Verify the context is effective for this session, including fallback.
+    let refs = if let Some(ref wt_id) = worktree_id {
+        get_preferred_pr_refs(&app, &session_id, wt_id)
+    } else {
+        get_session_pr_refs(&app, &session_id)?
+    };
     let expected_key = format!("{repo_key}-{pr_number}");
     if !refs.contains(&expected_key) {
         return Err(format!("Session does not have PR #{pr_number} loaded"));
@@ -3144,6 +3305,44 @@ pub async fn get_advisory_context_content(
 mod tests {
     use super::*;
 
+    #[test]
+    fn session_context_replaces_worktree_context_by_type() {
+        let worktree = vec!["repo-1".to_string(), "repo-2".to_string()];
+
+        assert_eq!(
+            preferred_context_refs(vec!["session-3".to_string()], worktree.clone()),
+            vec!["session-3"]
+        );
+        assert_eq!(
+            preferred_context_refs(vec!["repo-1".to_string()], worktree.clone()),
+            vec!["repo-1"]
+        );
+        assert_eq!(
+            preferred_context_refs(Vec::new(), worktree.clone()),
+            worktree
+        );
+    }
+
+    #[test]
+    fn old_copied_worktree_refs_do_not_hide_explicit_session_context() {
+        let worktree = vec!["repo-1".to_string(), "repo-2".to_string()];
+        assert_eq!(
+            preferred_context_refs(
+                vec![
+                    "repo-1".to_string(),
+                    "repo-2".to_string(),
+                    "session-3".to_string()
+                ],
+                worktree.clone(),
+            ),
+            vec!["session-3"]
+        );
+        assert_eq!(
+            preferred_context_refs(worktree.clone(), worktree.clone()),
+            worktree
+        );
+    }
+
     fn graphql_review_comment(body: &str) -> RawGraphqlReviewComment {
         RawGraphqlReviewComment {
             author: Some(RawGraphqlAuthor {
@@ -3168,6 +3367,28 @@ mod tests {
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[0].name, "bug");
         assert_eq!(labels[1].color, "008672");
+    }
+
+    #[test]
+    fn issue_list_response_excludes_pull_requests() {
+        let response = r#"[
+            {"number":1,"title":"Issue","body":null,"state":"OPEN","labels":[],"createdAt":"2026-01-01T00:00:00Z","author":{"login":"user"},"url":"https://github.com/acme/repo/issues/1"},
+            {"number":2,"title":"Pull request","body":null,"state":"OPEN","labels":[],"createdAt":"2026-01-01T00:00:00Z","author":{"login":"user"},"url":"https://github.com/acme/repo/pull/2"}
+        ]"#;
+
+        let issues = parse_github_issues_response(response).expect("issues");
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 1);
+    }
+
+    #[test]
+    fn exact_issue_response_rejects_pull_requests() {
+        let response = r#"{"number":2,"title":"Pull request","body":null,"state":"OPEN","labels":[],"createdAt":"2026-01-01T00:00:00Z","author":{"login":"user"},"url":"https://github.com/acme/repo/pull/2"}"#;
+
+        let error = parse_github_issue_response(response).expect_err("must reject pull request");
+
+        assert_eq!(error, "GitHub item is not an issue");
     }
 
     #[test]

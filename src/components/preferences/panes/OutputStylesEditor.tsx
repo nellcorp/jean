@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react'
-import { Download, Pencil, Plus, Trash2 } from 'lucide-react'
+import { Download, Pencil, Plus, Trash2 } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,7 +12,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { invoke } from '@/lib/transport'
+import { useSettingsTargetServerId } from '@/lib/settings-target'
+import { invokeForServer } from '@/lib/transport'
 import {
   useClaudeOutputStyles,
   useDeleteOutputStyle,
@@ -47,6 +48,7 @@ const EMPTY_EDITOR: EditorState = {
 }
 
 export const OutputStylesEditor: React.FC = () => {
+  const serverId = useSettingsTargetServerId()
   const { data: styles = [] } = useClaudeOutputStyles(null)
   const saveStyle = useSaveOutputStyle()
   const deleteStyle = useDeleteOutputStyle()
@@ -72,7 +74,8 @@ export const OutputStylesEditor: React.FC = () => {
   const startEdit = async (style: ClaudeOutputStyle) => {
     if (!style.path) return
     try {
-      const document = await invoke<OutputStyleDocument>(
+      const document = await invokeForServer<OutputStyleDocument>(
+        serverId,
         'read_claude_output_style',
         { path: style.path }
       )

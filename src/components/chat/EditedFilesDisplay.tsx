@@ -2,7 +2,14 @@ import { memo, useMemo, useState } from 'react'
 import { diffLines } from 'diff'
 import type { ToolCall, ChatMessage } from '@/types/chat'
 import { Badge } from '@/components/ui/badge'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import { ChevronRight } from '@/components/icons/reicon'
 import { getFilename } from '@/lib/path-utils'
+import { cn } from '@/lib/utils'
 import {
   Tooltip,
   TooltipTrigger,
@@ -11,16 +18,95 @@ import {
 import { MessageDiffModal } from './MessageDiffModal'
 import type { EditTool } from './MessageDiffModal'
 
-function isEditTool(
-  toolCall: ToolCall
-): toolCall is ToolCall & { input: EditTool['input'] } {
-  return (
-    toolCall.name === 'Edit' &&
-    typeof toolCall.input === 'object' &&
-    toolCall.input !== null &&
-    'file_path' in toolCall.input &&
-    typeof (toolCall.input as Record<string, unknown>).file_path === 'string'
-  )
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * Normalize Claude file-changing tool calls into old/new string edits.
+ * - Edit: one replacement
+ * - MultiEdit: one entry per inner edit
+ * - Write: whole file content (kept as name 'Write'; prior content unknown)
+ * - NotebookEdit: new cell source
+ * Failed/denied tool calls (`is_error`) changed nothing and are skipped.
+ */
+export function getClaudeFileEdits(toolCall: ToolCall): EditTool[] {
+  if (toolCall.is_error === true) return []
+  const input = asRecord(toolCall.input)
+  if (!input) return []
+
+  switch (toolCall.name) {
+    case 'Edit': {
+      const filePath = asString(input.file_path)
+      if (!filePath) return []
+      return [
+        {
+          name: 'Edit',
+          input: {
+            file_path: filePath,
+            old_string: asString(input.old_string),
+            new_string: asString(input.new_string),
+            ...(input.replace_all === true && { replace_all: true }),
+          },
+        },
+      ]
+    }
+    case 'MultiEdit': {
+      const filePath = asString(input.file_path)
+      if (!filePath || !Array.isArray(input.edits)) return []
+      return input.edits.flatMap(edit => {
+        const e = asRecord(edit)
+        if (!e) return []
+        return [
+          {
+            name: 'Edit',
+            input: {
+              file_path: filePath,
+              old_string: asString(e.old_string),
+              new_string: asString(e.new_string),
+              ...(e.replace_all === true && { replace_all: true }),
+            },
+          },
+        ]
+      })
+    }
+    case 'Write': {
+      const filePath = asString(input.file_path)
+      if (!filePath) return []
+      return [
+        {
+          name: 'Write',
+          input: {
+            file_path: filePath,
+            old_string: '',
+            new_string: asString(input.content) ?? '',
+          },
+        },
+      ]
+    }
+    case 'NotebookEdit': {
+      const filePath = asString(input.notebook_path)
+      if (!filePath) return []
+      return [
+        {
+          name: 'NotebookEdit',
+          input: {
+            file_path: filePath,
+            old_string: '',
+            new_string: asString(input.new_source) ?? '',
+          },
+        },
+      ]
+    }
+    default:
+      return []
+  }
 }
 
 interface CodexFileChange {
@@ -98,10 +184,11 @@ export const EditedFilesDisplay = memo(function EditedFilesDisplay({
   getMessages,
   messageIndex,
 }: EditedFilesDisplayProps) {
+  const [isExpanded, setIsExpanded] = useState(false)
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
 
   const editTools = useMemo(
-    () => (toolCalls ?? []).filter(isEditTool),
+    () => (toolCalls ?? []).flatMap(getClaudeFileEdits),
     [toolCalls]
   )
 
@@ -172,57 +259,89 @@ export const EditedFilesDisplay = memo(function EditedFilesDisplay({
     return getMessages()
       .slice(messageIndex + 1)
       .flatMap(msg =>
-        (msg.tool_calls ?? []).flatMap(tc =>
-          isEditTool(tc) && tc.input.file_path === selectedFilePath ? [tc] : []
-        )
+        (msg.tool_calls ?? [])
+          .flatMap(getClaudeFileEdits)
+          .filter(edit => edit.input.file_path === selectedFilePath)
+      )
+  }, [selectedFilePath, getMessages, messageIndex])
+
+  // Edits on selectedFilePath from messages BEFORE this one — lets the diff
+  // recover the prior content when this message overwrote the file (Write).
+  const previousEdits = useMemo(() => {
+    if (!selectedFilePath || !getMessages || messageIndex == null) return []
+    return getMessages()
+      .slice(0, messageIndex)
+      .flatMap(msg =>
+        (msg.tool_calls ?? [])
+          .flatMap(getClaudeFileEdits)
+          .filter(edit => edit.input.file_path === selectedFilePath)
       )
   }, [selectedFilePath, getMessages, messageIndex])
 
   if (uniqueFilePaths.length === 0) return null
 
   return (
-    <div className="mt-2 space-y-1.5">
-      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground/70">
+    <Collapsible
+      className="mt-2 space-y-1.5"
+      open={isExpanded}
+      onOpenChange={setIsExpanded}
+    >
+      <CollapsibleTrigger className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground/70 hover:bg-muted/50 hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <ChevronRight
+          className={cn(
+            'h-3.5 w-3.5 transition-transform duration-200',
+            isExpanded && 'rotate-90'
+          )}
+        />
         <span>
           Edited {uniqueFilePaths.length} file
-          {uniqueFilePaths.length === 1 ? '' : 's'}:
+          {uniqueFilePaths.length === 1 ? '' : 's'}
         </span>
+      </CollapsibleTrigger>
 
-        {uniqueFilePaths.map(filePath => {
-          const stats = fileStats.get(filePath)
-          return (
-            <Tooltip key={filePath}>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => setSelectedFilePath(filePath)}
-                  aria-label={`View changes to ${getFilename(filePath)}`}
-                  className="inline-flex min-w-0 max-w-full rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <Badge
-                    variant="outline"
-                    className="max-w-[calc(100vw-4rem)] cursor-pointer gap-1.5 sm:max-w-none"
+      <CollapsibleContent>
+        <div className="flex flex-wrap items-center gap-1.5 pl-1.5 text-xs text-muted-foreground/70">
+          {uniqueFilePaths.map(filePath => {
+            const stats = fileStats.get(filePath)
+            return (
+              <Tooltip key={filePath}>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedFilePath(filePath)}
+                    aria-label={`View changes to ${getFilename(filePath)}`}
+                    className="inline-flex min-w-0 max-w-full rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
-                    <span className="min-w-0 truncate">
-                      {getFilename(filePath)}
-                    </span>
-                    {stats && (stats.additions > 0 || stats.deletions > 0) && (
-                      <span className="flex shrink-0 items-center font-mono text-xs opacity-80">
-                        <span className="text-green-500">
-                          +{stats.additions}
-                        </span>
-                        <span className="text-muted-foreground mx-0.5">/</span>
-                        <span className="text-red-500">-{stats.deletions}</span>
+                    <Badge
+                      variant="outline"
+                      className="max-w-[calc(100vw-4rem)] cursor-pointer gap-1.5 sm:max-w-none"
+                    >
+                      <span className="min-w-0 truncate">
+                        {getFilename(filePath)}
                       </span>
-                    )}
-                  </Badge>
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>{filePath}</TooltipContent>
-            </Tooltip>
-          )
-        })}
-      </div>
+                      {stats &&
+                        (stats.additions > 0 || stats.deletions > 0) && (
+                          <span className="flex shrink-0 items-center font-mono text-xs opacity-80">
+                            <span className="text-success">
+                              +{stats.additions}
+                            </span>
+                            <span className="text-muted-foreground mx-0.5">
+                              /
+                            </span>
+                            <span className="text-destructive">
+                              -{stats.deletions}
+                            </span>
+                          </span>
+                        )}
+                    </Badge>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>{filePath}</TooltipContent>
+              </Tooltip>
+            )
+          })}
+        </div>
+      </CollapsibleContent>
 
       {selectedFilePath && (
         <MessageDiffModal
@@ -231,10 +350,11 @@ export const EditedFilesDisplay = memo(function EditedFilesDisplay({
           filePath={selectedFilePath}
           edits={selectedEdits}
           subsequentEdits={subsequentEdits}
+          previousEdits={previousEdits}
           worktreePath={worktreePath}
           patch={selectedCodexPatch}
         />
       )}
-    </div>
+    </Collapsible>
   )
 })

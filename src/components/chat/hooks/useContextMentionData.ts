@@ -1,6 +1,11 @@
 import { useMemo } from 'react'
-import { Bug, GitPullRequest, ShieldAlert, Siren } from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
+import {
+  Bug,
+  GitPullRequest,
+  ShieldAlert,
+  Siren,
+} from '@/components/icons/reicon'
+import type { LucideIcon } from '@/components/icons/reicon'
 import {
   filterAdvisories,
   filterIssues,
@@ -62,6 +67,7 @@ export interface ContextMentionGroup {
   id: ContextMentionType
   heading: string
   items: ContextMentionItem[]
+  hasMore?: boolean
 }
 
 function lowerTrim(query: string) {
@@ -168,12 +174,16 @@ export function useContextMentionData({
   projectId,
   query,
   includeClosed,
+  issueLimit = 8,
+  prLimit = 8,
 }: {
   open: boolean
   projectPath: string | null
   projectId: string | null
   query: string
   includeClosed: boolean
+  issueLimit?: number
+  prLimit?: number
 }): { groups: ContextMentionGroup[]; isFetching: boolean } {
   const enabledProjectPath = open ? projectPath : null
   const enabledProjectId = open ? projectId : null
@@ -190,12 +200,12 @@ export function useContextMentionData({
   const { data: issueResult, isFetching: isFetchingIssues } = useGitHubIssues(
     enabledProjectPath,
     issueState,
-    { enabled: open }
+    { enabled: open, ownerId: enabledProjectId ?? undefined }
   )
   const { data: prs = [], isFetching: isFetchingPRs } = useGitHubPRs(
     enabledProjectPath,
     prState,
-    { enabled: open }
+    { enabled: open, ownerId: enabledProjectId ?? undefined }
   )
   const { data: alerts = [], isFetching: isFetchingAlerts } =
     useDependabotAlerts(enabledProjectPath, securityState, { enabled: open })
@@ -304,12 +314,14 @@ export function useContextMentionData({
       {
         id: 'issue',
         heading: 'GitHub Issues',
-        items: filteredIssues.slice(0, 8).map(issueToItem),
+        items: filteredIssues.slice(0, issueLimit).map(issueToItem),
+        hasMore: filteredIssues.length > issueLimit,
       },
       {
         id: 'pr',
         heading: 'GitHub Pull Requests',
-        items: filteredPRs.slice(0, 8).map(prToItem),
+        items: filteredPRs.slice(0, prLimit).map(prToItem),
+        hasMore: filteredPRs.length > prLimit,
       },
       {
         id: 'security',
@@ -344,12 +356,14 @@ export function useContextMentionData({
     exactSecurity,
     ghsaId,
     includeClosed,
+    issueLimit,
     issueResult,
     itemNumber,
     linearNumber,
     linearResult,
     open,
     prs,
+    prLimit,
     searchedIssues,
     searchedLinear,
     searchedPRs,

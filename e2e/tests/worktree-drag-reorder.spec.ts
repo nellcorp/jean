@@ -36,7 +36,9 @@ test.describe('Worktree drag reorder', () => {
     test('aligns the base session with reorderable worktrees without showing a handle', async ({
       mockPage,
     }) => {
-      await expect(mockPage.getByText('Test Project')).toBeVisible({
+      await expect(
+        mockPage.getByRole('heading', { name: 'Test Project', exact: true })
+      ).toBeVisible({
         timeout: 5000,
       })
 
@@ -60,16 +62,18 @@ test.describe('Worktree drag reorder', () => {
       ).toHaveCount(0)
     })
 
-    test('moves the selected canvas worktree with Meta+ArrowUp and Meta+ArrowDown', async ({
+    test('moves the selected canvas worktree with Control+ArrowUp and Control+ArrowDown', async ({
       mockPage,
     }) => {
-      await expect(mockPage.getByText('Test Project')).toBeVisible({
+      await expect(
+        mockPage.getByRole('heading', { name: 'Test Project', exact: true })
+      ).toBeVisible({
         timeout: 5000,
       })
 
       await mockPage.keyboard.press('ArrowDown')
       await mockPage.waitForTimeout(100)
-      await mockPage.keyboard.press('Meta+ArrowDown')
+      await mockPage.keyboard.press('Control+ArrowDown')
 
       await expect
         .poll(async () =>
@@ -82,7 +86,7 @@ test.describe('Worktree drag reorder', () => {
         .toEqual([baseWorktree.id, worktree2.id, worktree1.id])
 
       await mockPage.waitForTimeout(100)
-      await mockPage.keyboard.press('Meta+ArrowUp')
+      await mockPage.keyboard.press('Control+ArrowUp')
 
       await expect
         .poll(async () =>
@@ -99,13 +103,18 @@ test.describe('Worktree drag reorder', () => {
   test('reorders sidebar worktrees with the Pragmatic DnD drop indicator', async ({
     mockPage,
   }) => {
-    await expect(mockPage.getByText('Test Project')).toBeVisible({
+    await expect(
+      mockPage.getByRole('heading', { name: 'Test Project', exact: true })
+    ).toBeVisible({
       timeout: 5000,
     })
 
-    const projectsHeader = mockPage.getByText('PROJECTS')
+    const projectsHeader = mockPage.getByRole('tab', {
+      name: 'projects',
+      exact: true,
+    })
     if (!(await projectsHeader.isVisible().catch(() => false))) {
-      await mockPage.keyboard.press('Meta+b')
+      await mockPage.keyboard.press('Control+b')
       await mockPage.waitForTimeout(500)
     }
     await expect(projectsHeader).toBeVisible({ timeout: 3000 })

@@ -19,6 +19,21 @@ fn spawn(command: &str, args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("Failed to launch {command}: {error}"))
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_terminal_ssh_args(application: &str, ssh_args: Vec<String>) -> Vec<String> {
+    let mut args = vec![
+        "-na".to_string(),
+        application.to_string(),
+        "--args".to_string(),
+    ];
+    if application == "Ghostty" {
+        args.push("-e".to_string());
+    }
+    args.push("ssh".to_string());
+    args.extend(ssh_args);
+    args
+}
+
 fn open_url(url: String) -> Result<(), String> {
     // Shared helper applies CREATE_NO_WINDOW on Windows so the cmd.exe
     // intermediary for `start` never flashes a console (issue #588).
@@ -102,9 +117,7 @@ pub async fn send_native_notification(
 }
 
 #[tauri::command]
-pub async fn read_clipboard_image(
-    runtime: State<'_, CoreRuntime>,
-) -> Result<Option<Value>, String> {
+pub async fn read_clipboard_image() -> Result<Option<Value>, String> {
     let encoded = tokio::task::spawn_blocking(|| -> Result<Option<String>, String> {
         let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
         let image = match clipboard.get_image() {
@@ -135,16 +148,7 @@ pub async fn read_clipboard_image(
     .await
     .map_err(|error| error.to_string())??;
 
-    match encoded {
-        Some(data) => core_command(
-            &runtime,
-            "save_pasted_image",
-            json!({ "data": data, "mimeType": "image/png" }),
-        )
-        .await
-        .map(Some),
-        None => Ok(None),
-    }
+    Ok(encoded.map(|data| json!({ "data": data, "mimeType": "image/png" })))
 }
 
 #[tauri::command]
@@ -231,7 +235,27 @@ pub async fn open_project_worktrees_folder(
 pub async fn open_worktree_in_terminal(
     worktree_path: String,
     terminal: Option<String>,
+    ssh_user: Option<String>,
+    ssh_host: Option<String>,
+    ssh_port: Option<u16>,
 ) -> Result<(), String> {
+    let ssh_args = ssh_host.map(|host| {
+        let destination = ssh_user
+            .filter(|user| !user.trim().is_empty())
+            .map(|user| format!("{user}@{host}"))
+            .unwrap_or(host);
+        let mut args = vec!["-t".to_string()];
+        if let Some(port) = ssh_port.filter(|port| *port != 22) {
+            args.extend(["-p".to_string(), port.to_string()]);
+        }
+        args.push(destination);
+        args.push(format!(
+            "cd -- {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+            shell_quote(&worktree_path)
+        ));
+        args
+    });
+
     #[cfg(target_os = "windows")]
     let _ = terminal;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -244,14 +268,40 @@ pub async fn open_worktree_in_terminal(
             "iterm2" => "iTerm",
             _ => "Terminal",
         };
-        spawn(
-            "open",
-            &["-a".to_string(), application.to_string(), worktree_path],
-        )
+        if let Some(ssh_args) = ssh_args {
+            if application == "Terminal" {
+                let command = format!(
+                    "ssh {}",
+                    ssh_args
+                        .iter()
+                        .map(|arg| shell_quote(arg))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                let script = format!(
+                    "tell application \"Terminal\" to do script \"{}\"",
+                    command.replace('\\', "\\\\").replace('"', "\\\"")
+                );
+                return spawn("osascript", &["-e".to_string(), script]);
+            }
+            let args = macos_terminal_ssh_args(application, ssh_args);
+            spawn("open", &args)
+        } else {
+            spawn(
+                "open",
+                &["-a".to_string(), application.to_string(), worktree_path],
+            )
+        }
     }
     #[cfg(target_os = "windows")]
     {
-        spawn("wt", &["-d".to_string(), worktree_path])
+        if let Some(ssh_args) = ssh_args {
+            let mut args = vec!["ssh".to_string()];
+            args.extend(ssh_args);
+            spawn("wt", &args)
+        } else {
+            spawn("wt", &["-d".to_string(), worktree_path])
+        }
     }
     #[cfg(target_os = "linux")]
     {
@@ -260,12 +310,21 @@ pub async fn open_worktree_in_terminal(
         } else {
             "x-terminal-emulator"
         };
-        Command::new(binary)
-            .current_dir(worktree_path)
+        let mut command = Command::new(binary);
+        if let Some(ssh_args) = ssh_args {
+            command.arg("-e").arg("ssh").args(ssh_args);
+        } else {
+            command.current_dir(worktree_path);
+        }
+        command
             .spawn()
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[tauri::command]
@@ -322,6 +381,35 @@ pub async fn set_project_avatar(
     jean_core::set_project_avatar_from_path(runtime.0.clone(), project_id, source_path).await
 }
 
+/// Ask for a destination with the native save dialog and copy a local file there.
+/// Returns `false` when the user cancels the dialog.
+#[tauri::command]
+pub async fn save_file_as(app: AppHandle, source_path: String) -> Result<bool, String> {
+    let source = std::path::PathBuf::from(&source_path);
+    if !source.is_file() {
+        return Err(format!("File not found: {source_path}"));
+    }
+    let file_name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Some(destination) = app
+        .dialog()
+        .file()
+        .set_title("Save File")
+        .set_file_name(file_name)
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let destination = destination.into_path().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || std::fs::copy(&source, &destination))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("Failed to save file: {error}"))?;
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn start_http_server(
     runtime: State<'_, CoreRuntime>,
@@ -360,4 +448,30 @@ pub async fn install_remote_jean_server(
     })
     .await
     .map_err(|error| format!("Remote install task failed: {error}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::macos_terminal_ssh_args;
+
+    #[test]
+    fn ghostty_uses_execute_flag_for_remote_ssh() {
+        let args = macos_terminal_ssh_args(
+            "Ghostty",
+            vec!["-t".to_string(), "root@devserver".to_string()],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-na",
+                "Ghostty",
+                "--args",
+                "-e",
+                "ssh",
+                "-t",
+                "root@devserver"
+            ]
+        );
+    }
 }

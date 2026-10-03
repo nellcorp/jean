@@ -22,8 +22,8 @@ preferences pane.
 | `open_in_modal`             | `Cmd+O`           | Open worktree in editor/terminal/finder |
 | `open_magic_modal`          | `Cmd+M`           | Open magic git commands menu            |
 | `new_session`               | `Cmd+T`           | Create new chat session                 |
-| `next_session`              | `Cmd+Alt+Right`   | Switch to next session tab              |
-| `previous_session`          | `Cmd+Alt+Left`    | Switch to previous session tab          |
+| `next_session`              | `Cmd+Right`       | Switch to next session tab              |
+| `previous_session`          | `Cmd+Left`        | Switch to previous session tab          |
 | `close_session_or_worktree` | `Cmd+W`           | Close session or remove worktree        |
 | `new_worktree`              | `Cmd+N`           | Create new worktree                     |
 | `next_worktree`             | `Cmd+Alt+Down`    | Switch to next worktree                 |
@@ -33,6 +33,14 @@ preferences pane.
 | `restore_last_archived`     | `Cmd+Shift+Alt+T` | Restore most recently archived item     |
 
 **Note:** `Cmd` on Mac, `Ctrl` on Windows/Linux.
+
+`Cmd+Left`/`Cmd+Right` switch session tabs only when the focused text field is
+empty; otherwise they move the caret as usual.
+
+`Cmd+1`–`Cmd+9` (fixed, not configurable) opens the first nine rows of the
+Recent sidebar list while it is visible. Otherwise it switches session tabs in
+the session modal or opens a worktree by index. Hold `Cmd` for 200 ms to show
+the number hints on the rows or tabs (native desktop only).
 
 ## Architecture
 
@@ -85,8 +93,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   open_magic_modal: 'mod+m',
   new_session: 'mod+t', // Open configured default new session
   open_new_session_modal: 'mod+shift+t',
-  next_session: 'mod+alt+arrowright',
-  previous_session: 'mod+alt+arrowleft',
+  next_session: 'mod+arrowright',
+  previous_session: 'mod+arrowleft',
   close_session_or_worktree: 'mod+w',
   new_worktree: 'mod+n',
   next_worktree: 'mod+alt+arrowdown',
@@ -378,3 +386,28 @@ fn default_keybindings() -> std::collections::HashMap<String, String> {
 5. **Support migration**: Add to `MIGRATED_KEYBINDINGS` when changing defaults
 6. **Use `mod` prefix**: Allows cross-platform compatibility
 7. **Provide feedback**: Use notifications or UI changes to confirm execution
+
+## Shift+Enter in the embedded terminal
+
+Terminals send a bare carriage return for both Enter and Shift+Enter, so a CLI
+that submits on Enter (Claude Code, Codex, …) cannot tell them apart and sends
+the message instead of inserting a newline. Terminals that can distinguish them
+encode the modifier with CSI u; xterm.js does not implement that protocol, so
+`src/lib/terminal-instances.ts` injects `\x1b[13;2u` itself.
+
+Two details make it work:
+
+- **Every event of the press is claimed, not just `keydown`.** The renderer
+  calls its key handler for `keydown`, `keypress` and `keyup`; letting
+  `keypress` through makes it emit its own carriage return in addition to the
+  sequence, which the CLI still reads as submit.
+- **The sequence is only sent when the foreground program can read it**
+  (`acceptsModifierEncodedKeys`), tracked from the program's own output: a
+  kitty keyboard protocol push, or focus reporting (`CSI ? 1004 h`). Claude Code
+  negotiates no keyboard protocol yet parses CSI u anyway, so focus reporting is
+  the signal it is recognised by. The alternate screen buffer is deliberately
+  **not** trusted — `vim`, `less`, `htop` and `fzf` use it without reading CSI u,
+  and in vim's insert mode the sequence would leave insert and undo changes.
+
+A plain shell prompt enables neither, so Shift+Enter there behaves like Enter
+instead of echoing a raw `;2u`.

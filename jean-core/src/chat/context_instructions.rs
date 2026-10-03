@@ -1,8 +1,8 @@
 use serde::Serialize;
 
 use crate::projects::github_issues::{
-    get_github_contexts_dir, get_session_advisory_refs, get_session_issue_refs,
-    get_session_pr_refs, get_session_security_refs,
+    get_github_contexts_dir, get_preferred_issue_refs, get_preferred_pr_refs,
+    get_session_advisory_refs, get_session_security_refs,
 };
 use crate::projects::linear_issues::get_session_linear_refs;
 use crate::projects::sentry_issues::get_session_sentry_refs;
@@ -159,14 +159,7 @@ fn collect_context_paths(
 ) -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
 
-    let mut issue_keys = get_session_issue_refs(app, session_id).unwrap_or_default();
-    if let Ok(wt_keys) = get_session_issue_refs(app, worktree_id) {
-        for key in wt_keys {
-            if !issue_keys.contains(&key) {
-                issue_keys.push(key);
-            }
-        }
-    }
+    let issue_keys = get_preferred_issue_refs(app, session_id, worktree_id);
     if !issue_keys.is_empty() {
         if let Ok(contexts_dir) = get_github_contexts_dir(app) {
             for key in issue_keys {
@@ -182,14 +175,7 @@ fn collect_context_paths(
         }
     }
 
-    let mut pr_keys = get_session_pr_refs(app, session_id).unwrap_or_default();
-    if let Ok(wt_keys) = get_session_pr_refs(app, worktree_id) {
-        for key in wt_keys {
-            if !pr_keys.contains(&key) {
-                pr_keys.push(key);
-            }
-        }
-    }
+    let pr_keys = get_preferred_pr_refs(app, session_id, worktree_id);
     if !pr_keys.is_empty() {
         if let Ok(contexts_dir) = get_github_contexts_dir(app) {
             for key in pr_keys {
@@ -312,6 +298,31 @@ fn collect_context_paths(
     paths
 }
 
+fn format_loaded_context(context_paths: &[std::path::PathBuf]) -> String {
+    let mut content = String::new();
+    for path in context_paths {
+        if let Ok(file_content) = std::fs::read_to_string(path) {
+            if content.is_empty() {
+                content.push_str("# Loaded Context\n\n");
+                content.push_str(
+                    "The following context has been loaded. You should be aware of this when working on this task.\n\n---\n\n",
+                );
+            }
+            content.push_str(&file_content);
+            content.push_str("\n\n---\n\n");
+        }
+    }
+    content
+}
+
+pub fn build_loaded_context_content(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    worktree_id: &str,
+) -> String {
+    format_loaded_context(&collect_context_paths(app, session_id, worktree_id))
+}
+
 pub fn build_combined_terminal_context_content(
     app: &tauri::AppHandle,
     session_id: &str,
@@ -320,7 +331,7 @@ pub fn build_combined_terminal_context_content(
 ) -> String {
     let system_prompt_parts =
         build_system_prompt_parts(app, session_id, worktree_id, include_recap);
-    let context_paths = collect_context_paths(app, session_id, worktree_id);
+    let loaded_context = build_loaded_context_content(app, session_id, worktree_id);
 
     let mut content = String::new();
     if !system_prompt_parts.is_empty() {
@@ -332,17 +343,8 @@ pub fn build_combined_terminal_context_content(
         content.push_str("\n---\n\n");
     }
 
-    if !context_paths.is_empty() {
-        content.push_str("# Loaded Context\n\n");
-        content.push_str(
-            "The following context has been loaded. You should be aware of this when working on this task.\n\n---\n\n",
-        );
-        for path in context_paths {
-            if let Ok(file_content) = std::fs::read_to_string(path) {
-                content.push_str(&file_content);
-                content.push_str("\n\n---\n\n");
-            }
-        }
+    if !loaded_context.is_empty() {
+        content.push_str(&loaded_context);
     }
 
     content
@@ -404,6 +406,21 @@ pub fn prepare_backend_terminal_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_loaded_context_inlines_each_context_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let advisory = dir.path().join("advisory.md");
+        let saved = dir.path().join("saved.md");
+        std::fs::write(&advisory, "# Advisory\n\nPrivate vulnerability details").unwrap();
+        std::fs::write(&saved, "# Saved context\n\nPrior investigation").unwrap();
+
+        let content = format_loaded_context(&[advisory, saved]);
+
+        assert!(content.starts_with("# Loaded Context\n\n"));
+        assert!(content.contains("Private vulnerability details"));
+        assert!(content.contains("Prior investigation"));
+    }
 
     #[test]
     fn toml_basic_string_escapes_multiline_context() {

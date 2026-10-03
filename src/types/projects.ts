@@ -1,4 +1,4 @@
-import type { LabelData } from '@/types/chat'
+import type { LabelData, Session } from '@/types/chat'
 import type { AdvisoryContext, SecurityAlertContext } from '@/types/github'
 
 /**
@@ -31,6 +31,31 @@ export interface ProjectAutoFixSettings {
   active_hours_end?: number
 }
 
+/** A GitHub issue Mr. Robot failed to start (in-memory backend state). */
+export interface AutoFixFailedIssue {
+  issueNumber: number
+  attempts: number
+  error: string
+  /** Unix seconds */
+  failedAt: number
+  gaveUp: boolean
+}
+
+/**
+ * Runtime Mr. Robot status for a project (`get_auto_fix_status`).
+ * All timestamps are unix seconds. Resets when the app restarts.
+ */
+export interface AutoFixStatus {
+  lastScanAt: number | null
+  nextScanAt: number | null
+  /** GitHub rate limit backoff */
+  rateLimitedUntil: number | null
+  lastError: { message: string; at: number } | null
+  failedIssues: AutoFixFailedIssue[]
+  startingIssues: number[]
+  pendingYoloSessions: number
+}
+
 /**
  * Status of a worktree (for tracking background operations)
  */
@@ -47,6 +72,14 @@ export function isBaseSession(worktree: Worktree): boolean {
  * A git project that has been added to Jean, or a folder for organizing projects
  */
 export interface Project {
+  /** Client-only owning server for native multi-server views. */
+  serverId?: string
+  /** Original server-side ID when `id` is a composite client identity. */
+  resourceId?: string
+  /** Client-only display name for the owning server. */
+  serverName?: string
+  /** Client-only marker for a read-only cached server snapshot. */
+  offline?: boolean
   /** Unique identifier (UUID v4) */
   id: string
   /** Display name (derived from repo directory name, or folder name) */
@@ -95,10 +128,16 @@ export interface Project {
   sentry_organization_slug?: string | null
   /** Sentry project slug */
   sentry_project_slug?: string | null
+  /** Sentry region API base URL (auto-resolved from the org) */
+  sentry_base_url?: string | null
   /** IDs of linked projects for cross-project context sharing */
   linked_project_ids?: string[]
   /** Per-project automated issue fixing settings */
   auto_fix_settings?: ProjectAutoFixSettings | null
+  /** Number of active worktrees, included in the lightweight project list response */
+  worktree_count?: number
+  /** Whether an active base-branch session exists */
+  has_base_session?: boolean
 }
 
 export interface DirEntry {
@@ -126,6 +165,10 @@ export function isFolder(project: Project): boolean {
  * A git worktree created for a project
  */
 export interface Worktree {
+  /** Client-only owning server for native multi-server views. */
+  serverId?: string
+  /** Original server-side ID when `id` is a composite client identity. */
+  resourceId?: string
   /** Unique identifier (UUID v4) */
   id: string
   /** Foreign key to Project */
@@ -210,6 +253,22 @@ export interface Worktree {
   archived_at?: number
   /** Unix timestamp when worktree was last opened/viewed by the user */
   last_opened_at?: number
+}
+
+export interface RecentWorktreeItem {
+  projectId: string
+  projectName: string
+  worktree: Worktree
+  session: Session
+  lastActivityAt: number
+  added: number
+  removed: number
+}
+
+export interface RecentWorktreesResponse {
+  items: RecentWorktreeItem[]
+  total: number
+  failedWorktreeIds: string[]
 }
 
 // =============================================================================

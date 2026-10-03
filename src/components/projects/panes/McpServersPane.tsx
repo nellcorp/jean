@@ -1,5 +1,10 @@
 import React, { useEffect, useMemo } from 'react'
-import { CheckCircle, Loader2, ShieldAlert, XCircle } from 'lucide-react'
+import {
+  CheckCircle,
+  Loader2,
+  ShieldAlert,
+  XCircle,
+} from '@/components/icons/reicon'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
@@ -18,6 +23,7 @@ import {
   useAllBackendsMcpHealth,
   groupServersByBackend,
   mcpKey,
+  isRequiredMcpServer,
   migrateLegacyMcpKeys,
 } from '@/services/mcp'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
@@ -72,7 +78,7 @@ function HealthIndicator({
         <Tooltip>
           <TooltipTrigger asChild>
             <span>
-              <CheckCircle className="size-3.5 text-green-600 dark:text-green-400" />
+              <CheckCircle className="size-3.5 text-success" />
             </span>
           </TooltipTrigger>
           <TooltipContent>Server is connected and ready</TooltipContent>
@@ -83,7 +89,7 @@ function HealthIndicator({
         <Tooltip>
           <TooltipTrigger asChild>
             <span>
-              <ShieldAlert className="size-3.5 text-amber-600 dark:text-amber-400" />
+              <ShieldAlert className="size-3.5 text-warning" />
             </span>
           </TooltipTrigger>
           <TooltipContent>{mcpAuthHint(backend)}</TooltipContent>
@@ -94,7 +100,7 @@ function HealthIndicator({
         <Tooltip>
           <TooltipTrigger asChild>
             <span>
-              <XCircle className="size-3.5 text-red-600 dark:text-red-400" />
+              <XCircle className="size-3.5 text-destructive" />
             </span>
           </TooltipTrigger>
           <TooltipContent>
@@ -257,7 +263,11 @@ export function McpServersPane({
                           selectedServersSet.has(mcpKey(backend, server.name)))
                       }
                       onCheckedChange={() => handleToggle(backend, server.name)}
-                      disabled={server.disabled || backend === 'antigravity'}
+                      disabled={
+                        server.disabled ||
+                        backend === 'antigravity' ||
+                        isRequiredMcpServer(server.name)
+                      }
                     />
                     <Label
                       htmlFor={`proj-mcp-${backend}-${server.name}`}
@@ -276,7 +286,8 @@ export function McpServersPane({
                     <span className="text-xs text-muted-foreground">
                       {server.disabled
                         ? 'disabled'
-                        : backend === 'antigravity'
+                        : backend === 'antigravity' ||
+                            isRequiredMcpServer(server.name)
                           ? 'automatic'
                           : server.scope}
                     </span>

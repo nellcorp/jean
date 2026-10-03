@@ -22,8 +22,10 @@ interface MagicCommandHandlers {
   handleLoadContext: () => void
   handleLinkedProjects: () => void
   handleForkSession: () => void
+  handleCheckGitHubIssues: () => void
   handleCommit: () => void
   handleCommitAndPush: () => void
+  handleCommentAndCloseIssue: () => void
   handlePull: () => void
   handlePush: () => void
   handleRevertLastCommit: () => void
@@ -41,7 +43,6 @@ interface MagicCommandHandlers {
     prompt: string | string[],
     options?: { executionMode?: ExecutionMode }
   ) => void
-  handleSmokeTest: () => void
 }
 
 interface UseMagicCommandsOptions extends MagicCommandHandlers {
@@ -65,8 +66,10 @@ export function useMagicCommands({
   handleLoadContext,
   handleLinkedProjects,
   handleForkSession,
+  handleCheckGitHubIssues,
   handleCommit,
   handleCommitAndPush,
+  handleCommentAndCloseIssue,
   handlePull,
   handlePush,
   handleRevertLastCommit,
@@ -78,7 +81,6 @@ export function useMagicCommands({
   handleInvestigateWorkflowRun,
   handleInvestigate,
   handleReviewComments,
-  handleSmokeTest,
   isModal = false,
   sessionModalOpen = false,
 }: UseMagicCommandsOptions): void {
@@ -88,8 +90,10 @@ export function useMagicCommands({
     handleLoadContext,
     handleLinkedProjects,
     handleForkSession,
+    handleCheckGitHubIssues,
     handleCommit,
     handleCommitAndPush,
+    handleCommentAndCloseIssue,
     handlePull,
     handlePush,
     handleRevertLastCommit,
@@ -101,7 +105,6 @@ export function useMagicCommands({
     handleInvestigateWorkflowRun,
     handleInvestigate,
     handleReviewComments,
-    handleSmokeTest,
   })
 
   // Update refs in useLayoutEffect to avoid linter warning about ref updates during render
@@ -112,8 +115,10 @@ export function useMagicCommands({
       handleLoadContext,
       handleLinkedProjects,
       handleForkSession,
+      handleCheckGitHubIssues,
       handleCommit,
       handleCommitAndPush,
+      handleCommentAndCloseIssue,
       handlePull,
       handlePush,
       handleRevertLastCommit,
@@ -125,7 +130,6 @@ export function useMagicCommands({
       handleInvestigateWorkflowRun,
       handleInvestigate,
       handleReviewComments,
-      handleSmokeTest,
     }
   })
 
@@ -155,7 +159,7 @@ export function useMagicCommands({
           break
         case 'load-context':
         case 'inject-session':
-          // Inject Session opens Load Context on the Contexts tab (Sessions list)
+          // Inject Context opens the context picker on the Sessions list.
           handlers.handleLoadContext()
           break
         case 'linked-projects':
@@ -164,11 +168,17 @@ export function useMagicCommands({
         case 'fork-session':
           handlers.handleForkSession()
           break
+        case 'check-github-issues':
+          handlers.handleCheckGitHubIssues()
+          break
         case 'commit':
           handlers.handleCommit()
           break
         case 'commit-and-push':
           handlers.handleCommitAndPush()
+          break
+        case 'comment-and-close-issue':
+          handlers.handleCommentAndCloseIssue()
           break
         case 'pull':
           handlers.handlePull()
@@ -221,9 +231,6 @@ export function useMagicCommands({
           })
           break
         }
-        case 'smoke-test':
-          handlers.handleSmokeTest()
-          break
       }
     }
 

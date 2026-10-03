@@ -1,4 +1,9 @@
-import { test, expect, activateWorktree } from '../fixtures/tauri-mock'
+import {
+  test,
+  expect,
+  activateWorktree,
+  createJeanSession,
+} from '../fixtures/tauri-mock'
 
 test.describe('Model Selection', () => {
   test('model selector shows current model in chat toolbar', async ({
@@ -11,11 +16,14 @@ test.describe('Model Selection', () => {
     // Navigate to a worktree chat view
     await activateWorktree(mockPage, 'fuzzy-tiger')
 
-    // The default model is "sonnet" — toolbar should show "Sonnet" in a combobox
-    const modelCombobox = mockPage.locator('button[role="combobox"]', {
-      hasText: 'Sonnet',
+    await createJeanSession(mockPage)
+
+    // The default model is "sonnet" — the picker should show "Sonnet".
+    const modelCombobox = mockPage.getByRole('button', {
+      name: 'Choose backend and model',
     })
     await expect(modelCombobox).toBeVisible({ timeout: 3000 })
+    await expect(modelCombobox).toContainText('Sonnet')
   })
 
   test('changing model updates the selector value', async ({ mockPage }) => {
@@ -26,25 +34,29 @@ test.describe('Model Selection', () => {
     await activateWorktree(mockPage, 'fuzzy-tiger')
 
     // Create a session first (model change requires an active session)
-    await mockPage.locator('button[aria-label="New session"]').click()
+    await createJeanSession(mockPage)
     await mockPage.waitForTimeout(500)
 
-    // Click the model selector combobox
-    const modelCombobox = mockPage.locator('button[role="combobox"]', {
-      hasText: 'Sonnet',
+    // Open the backend and model picker.
+    const modelCombobox = mockPage.getByRole('button', {
+      name: 'Choose backend and model',
     })
     await expect(modelCombobox).toBeVisible({ timeout: 3000 })
+    await expect(modelCombobox).toContainText('Sonnet')
     await modelCombobox.click()
     await mockPage.waitForTimeout(200)
 
     // Select "Opus 4.6"
-    await mockPage.getByRole('option', { name: 'Opus 4.6' }).click()
+    await mockPage
+      .getByRole('option', { name: /^Opus 4\.6 claude-opus-4-6 Favorite/ })
+      .click()
     await mockPage.waitForTimeout(500)
 
     // Verify the selector now shows Opus 4.6
-    const updatedCombobox = mockPage.locator('button[role="combobox"]', {
-      hasText: 'Opus 4.6',
+    const updatedCombobox = mockPage.getByRole('button', {
+      name: 'Choose backend and model',
     })
     await expect(updatedCombobox).toBeVisible({ timeout: 3000 })
+    await expect(updatedCombobox).toContainText('Opus 4.6')
   })
 })

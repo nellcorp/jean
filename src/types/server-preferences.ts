@@ -4,6 +4,7 @@ export interface ServerPreferencesEnvelope {
   schemaVersion: number
   revision: string
   preferences: Partial<AppPreferences> & {
+    outline_api_key_configured?: boolean
     linear_api_key_configured?: boolean
     sentry_auth_token_configured?: boolean
     http_server_token_configured?: boolean

@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useChatStore } from '@/store/chat-store'
 import { usePreferences } from '@/services/preferences'
+import { parseServerResourceKey } from '@/lib/server-resource'
 import {
   useSendMessage,
   markPlanApproved,
@@ -84,7 +85,8 @@ export function usePlanApproval({
   worktreePath,
 }: UsePlanApprovalParams) {
   const queryClient = useQueryClient()
-  const { data: preferences } = usePreferences()
+  const serverId = parseServerResourceKey(worktreeId)?.serverId
+  const { data: preferences } = usePreferences(serverId)
   const sendMessage = useSendMessage()
   const { data: cliStatus } = useClaudeCliStatus()
 
@@ -170,8 +172,8 @@ export function usePlanApproval({
       const model = overridesApply
         ? (preferences?.build_model ??
           preferences?.selected_model ??
-          'claude-opus-4-8[1m]')
-        : (preferences?.selected_model ?? 'claude-opus-4-8[1m]')
+          'claude-opus-5-5')
+        : (preferences?.selected_model ?? 'claude-opus-5-5')
       const buildThinkingOverride = overridesApply
         ? preferences?.build_thinking_level
         : null
@@ -389,8 +391,8 @@ export function usePlanApproval({
       const model = overridesApplyYolo
         ? (preferences?.yolo_model ??
           preferences?.selected_model ??
-          'claude-opus-4-8[1m]')
-        : (preferences?.selected_model ?? 'claude-opus-4-8[1m]')
+          'claude-opus-5-5')
+        : (preferences?.selected_model ?? 'claude-opus-5-5')
       const yoloThinkingOverride = overridesApplyYolo
         ? preferences?.yolo_thinking_level
         : null

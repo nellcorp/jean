@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Loader2 } from 'lucide-react'
+import { Loader2 } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import { usePreferences, usePatchPreferences } from '@/services/preferences'
 import { testSentryAuthToken } from '@/services/sentry'
@@ -39,6 +39,9 @@ export const IntegrationsPane: React.FC = () => {
   const [isTestingSentry, setIsTestingSentry] = useState(false)
 
   const currentGlobalKey = preferences?.linear_api_key ?? ''
+  const linearKeyConfigured = Boolean(
+    currentGlobalKey || preferences?.linear_api_key_configured
+  )
   const displayedLinearApiKey = localLinearApiKey ?? currentGlobalKey
   const linearApiKeyChanged =
     localLinearApiKey !== null && localLinearApiKey !== currentGlobalKey
@@ -71,6 +74,9 @@ export const IntegrationsPane: React.FC = () => {
   const [localOutlineUrl, setLocalOutlineUrl] = useState<string | null>(null)
 
   const currentOutlineKey = preferences?.outline_api_key ?? ''
+  const outlineKeyConfigured = Boolean(
+    currentOutlineKey || preferences?.outline_api_key_configured
+  )
   const displayedOutlineApiKey = localOutlineApiKey ?? currentOutlineKey
   const outlineApiKeyChanged =
     localOutlineApiKey !== null && localOutlineApiKey !== currentOutlineKey
@@ -89,7 +95,8 @@ export const IntegrationsPane: React.FC = () => {
       patch.outline_api_key = (localOutlineApiKey ?? '').trim() || null
     }
     if (outlineUrlChanged) {
-      patch.outline_url = (localOutlineUrl ?? '').trim().replace(/\/+$/, '') || null
+      patch.outline_url =
+        (localOutlineUrl ?? '').trim().replace(/\/+$/, '') || null
     }
     if (Object.keys(patch).length === 0) return
     patchPreferences.mutate(patch, {
@@ -179,7 +186,11 @@ export const IntegrationsPane: React.FC = () => {
           <div className="flex items-center gap-2">
             <Input
               type={showLinearApiKey ? 'text' : 'password'}
-              placeholder="lin_api_..."
+              placeholder={
+                preferences?.linear_api_key_configured
+                  ? 'Key configured; enter to replace'
+                  : 'lin_api_...'
+              }
               value={displayedLinearApiKey}
               onChange={e => setLocalLinearApiKey(e.target.value)}
               className="flex-1 text-base md:text-sm font-mono"
@@ -203,7 +214,7 @@ export const IntegrationsPane: React.FC = () => {
               )}
               Save
             </Button>
-            {currentGlobalKey && (
+            {linearKeyConfigured && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -246,7 +257,11 @@ export const IntegrationsPane: React.FC = () => {
           <div className="flex items-center gap-2">
             <Input
               type={showOutlineApiKey ? 'text' : 'password'}
-              placeholder="ol_api_..."
+              placeholder={
+                preferences?.outline_api_key_configured
+                  ? 'Token configured; enter to replace'
+                  : 'ol_api_...'
+              }
               value={displayedOutlineApiKey}
               onChange={e => setLocalOutlineApiKey(e.target.value)}
               className="flex-1 text-base md:text-sm font-mono"
@@ -270,7 +285,7 @@ export const IntegrationsPane: React.FC = () => {
               )}
               Save
             </Button>
-            {currentOutlineKey && (
+            {outlineKeyConfigured && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -295,8 +310,8 @@ export const IntegrationsPane: React.FC = () => {
               Used by all projects unless overridden in project settings. The
               token needs <code>org:read</code> to discover projects and{' '}
               <code>event:read</code> to load issues. Personal tokens follow
-              your Sentry account memberships; they are not tied to one
-              project. Create one in{' '}
+              your Sentry account memberships; they are not tied to one project.
+              Create one in{' '}
               <a
                 href="https://sentry.io/settings/account/api/auth-tokens/"
                 target="_blank"

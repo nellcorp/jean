@@ -25,6 +25,50 @@ beforeEach(() => {
 })
 
 describe('MobileToolbarMenu', () => {
+  it('uses a full-width two-column layout on mobile', async () => {
+    const user = userEvent.setup()
+    const originalInnerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    })
+
+    render(
+      <MobileToolbarMenu
+        isDisabled={false}
+        hasOpenPr={false}
+        hasIssueContexts={false}
+        hasPrContexts={false}
+        onSaveContext={vi.fn()}
+        onLoadContext={vi.fn()}
+        onCommit={vi.fn()}
+        onCommitAndPush={vi.fn()}
+        onRevertLastCommit={vi.fn()}
+        onOpenPr={vi.fn()}
+        onReview={vi.fn()}
+        onMerge={vi.fn()}
+        onMergePr={vi.fn()}
+        handleSyncClick={vi.fn()}
+        handlePullClick={vi.fn()}
+        handlePushClick={vi.fn()}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: /more actions/i }))
+
+    expect(screen.getByRole('menu')).toHaveClass(
+      'w-[calc(100vw-1rem)]',
+      'grid',
+      'grid-cols-2'
+    )
+    expect(screen.getByText('Context')).toHaveClass('col-span-2')
+
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: originalInnerWidth,
+    })
+  })
+
   it('renders verb sections only and excludes settings/contexts', async () => {
     const user = userEvent.setup()
 
@@ -52,7 +96,17 @@ describe('MobileToolbarMenu', () => {
     await user.click(screen.getByRole('button', { name: /more actions/i }))
 
     expect(screen.getByText('Save Context')).toBeInTheDocument()
+    expect(screen.getByText('Inject Context')).toBeInTheDocument()
+    expect(screen.queryByText('Load Context')).not.toBeInTheDocument()
+    expect(screen.getByText('Link PR')).toBeInTheDocument()
+    expect(screen.getByText('Advisory')).toBeInTheDocument()
+    expect(screen.getByText('Generate Release Notes')).toBeInTheDocument()
+    expect(screen.getByText('Generate PR Description')).toBeInTheDocument()
     expect(screen.getByText('Commit & Push')).toBeInTheDocument()
+    expect(screen.getByText('Comment & Close Issue')).toBeInTheDocument()
+    expect(
+      screen.getByText('Comment & Close Issue').closest('[role="menuitem"]')
+    ).toHaveAttribute('data-disabled')
     expect(screen.getByRole('menuitem', { name: /sync/i })).toBeInTheDocument()
     expect(screen.getByText('Pull')).toBeInTheDocument()
     expect(screen.getByText('Push')).toBeInTheDocument()
@@ -64,6 +118,42 @@ describe('MobileToolbarMenu', () => {
     expect(screen.queryByText('Provider')).not.toBeInTheDocument()
     expect(screen.queryByText('Uncommitted')).not.toBeInTheDocument()
     expect(screen.queryByText('Branch diff')).not.toBeInTheDocument()
+  })
+
+  it('dispatches the comment and close issue action with issue context', async () => {
+    const user = userEvent.setup()
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
+    render(
+      <MobileToolbarMenu
+        isDisabled={false}
+        hasOpenPr={false}
+        hasIssueContexts={true}
+        hasPrContexts={false}
+        onSaveContext={vi.fn()}
+        onLoadContext={vi.fn()}
+        onCommit={vi.fn()}
+        onCommitAndPush={vi.fn()}
+        onRevertLastCommit={vi.fn()}
+        onOpenPr={vi.fn()}
+        onReview={vi.fn()}
+        onMerge={vi.fn()}
+        onMergePr={vi.fn()}
+        handleSyncClick={vi.fn()}
+        handlePullClick={vi.fn()}
+        handlePushClick={vi.fn()}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: /more actions/i }))
+    await user.click(screen.getByText('Comment & Close Issue'))
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'magic-command',
+        detail: { command: 'comment-and-close-issue' },
+      })
+    )
+    dispatchSpy.mockRestore()
   })
 
   it('disables investigate issue and PR when no contexts are loaded', async () => {
@@ -151,6 +241,50 @@ describe('MobileToolbarMenu', () => {
     dispatchSpy.mockRestore()
   })
 
+  it('dispatches Link PR and advisory actions', async () => {
+    const user = userEvent.setup()
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
+
+    render(
+      <MobileToolbarMenu
+        isDisabled={false}
+        hasOpenPr={false}
+        hasIssueContexts={false}
+        hasPrContexts={false}
+        hasAdvisoryContexts={true}
+        onSaveContext={vi.fn()}
+        onLoadContext={vi.fn()}
+        onCommit={vi.fn()}
+        onCommitAndPush={vi.fn()}
+        onRevertLastCommit={vi.fn()}
+        onOpenPr={vi.fn()}
+        onReview={vi.fn()}
+        onMerge={vi.fn()}
+        onMergePr={vi.fn()}
+        handleSyncClick={vi.fn()}
+        handlePullClick={vi.fn()}
+        handlePushClick={vi.fn()}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: /more actions/i }))
+    await user.click(screen.getByText('Link PR'))
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'magic-option', detail: 'link-pr' })
+    )
+
+    await user.click(screen.getByRole('button', { name: /more actions/i }))
+    await user.click(screen.getByText('Advisory'))
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'magic-command',
+        detail: { command: 'investigate', type: 'advisory' },
+      })
+    )
+
+    dispatchSpy.mockRestore()
+  })
+
   it('enables Issue for a loaded Sentry context and dispatches the Sentry investigation type', async () => {
     const user = userEvent.setup()
     const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
@@ -226,7 +360,7 @@ describe('MobileToolbarMenu', () => {
     dispatchSpy.mockRestore()
   })
 
-  it('shows smoke test and dispatches the magic command', async () => {
+  it('shows check GitHub issues and dispatches the magic command', async () => {
     const user = userEvent.setup()
     const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
 
@@ -252,12 +386,12 @@ describe('MobileToolbarMenu', () => {
     )
 
     await user.click(screen.getByRole('button', { name: /more actions/i }))
-    await user.click(screen.getByText('Smoke Test'))
+    await user.click(screen.getByText('Check GitHub Issues'))
 
     expect(dispatchSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'magic-command',
-        detail: { command: 'smoke-test' },
+        detail: { command: 'check-github-issues' },
       })
     )
 

@@ -120,6 +120,8 @@ export interface ToolCall {
   input: unknown
   /** Output/result from tool execution (from tool_result messages) */
   output?: string
+  /** True when the tool result was an error (failed/denied). Only set on error. */
+  is_error?: boolean
   /** Parent tool use ID for sub-agent tool calls (for parallel task attribution) */
   parent_tool_use_id?: string
   /** Live events streamed during long-running tools (e.g. Monitor). */
@@ -180,6 +182,8 @@ export interface ChatMessage {
   thinking_level?: ThinkingLevel
   /** Effort level when this message was sent (user messages only, Opus 4.6) */
   effort_level?: EffortLevel
+  /** Provider/custom profile used when this message was sent (user messages only) */
+  custom_profile_name?: string
   /** True if this message was recovered from a crash */
   recovered?: boolean
   /** Token usage for this message (assistant messages only) */
@@ -208,6 +212,10 @@ export interface DeniedMessageContext {
 export interface Session {
   /** Unique session identifier (UUID v4) */
   id: string
+  /** Client-only owner for a resource loaded from a remote Jean server. */
+  serverId?: string
+  /** Original server-local id when `id` is a composite client key. */
+  resourceId?: string
   /** Display name ("Session 1", or user-customized name) */
   name: string
   /** Order index for tab ordering (0-indexed) */
@@ -541,12 +549,14 @@ export interface ErrorEvent {
 }
 
 /**
- * Event payload for cancellation from Rust (user pressed Escape)
+ * Event payload for cancellation from Rust (user pressed Escape).
+ * undo_send only indicates whether the user turn should be removed from
+ * history; a prompt with no streamed output may still be restored when false.
  */
 export interface CancelledEvent {
   session_id: string
   worktree_id: string // Kept for backward compatibility
-  undo_send: boolean // True only when the prompt never started (restore to input)
+  undo_send: boolean
   emitted_at_ms: number
   run_id?: string
 }
@@ -579,6 +589,8 @@ export interface ToolResultEvent {
   worktree_id: string // Kept for backward compatibility
   tool_use_id: string
   output: string
+  /** True when the tool result was an error (omitted otherwise) */
+  is_error?: boolean
 }
 
 /**
@@ -990,7 +1002,13 @@ export function hasQuestionAnswerOutput(
   const trimmed = output.trim()
   if (!trimmed) return false
 
-  if (trimmed === 'Answer questions?' || trimmed.startsWith('Error:')) {
+  if (
+    trimmed === 'Answer questions?' ||
+    trimmed.startsWith('Error:') ||
+    trimmed.startsWith('<tool_use_error>') ||
+    // Newer Claude CLI denies the blocking tool in headless runs
+    /^Permission to use \S+ was not granted\.?$/.test(trimmed)
+  ) {
     return false
   }
 
@@ -1318,6 +1336,14 @@ export interface SaveImageResponse {
   path: string
 }
 
+/** Raw image data read from the local native clipboard. */
+export interface ClipboardImageData {
+  /** Base64-encoded image bytes without a data URL prefix. */
+  data: string
+  /** MIME type for the encoded image. */
+  mimeType: string
+}
+
 // ============================================================================
 // Text Paste Types (for large text pastes in chat)
 // ============================================================================
@@ -1350,6 +1376,14 @@ export interface SaveTextResponse {
   /** Full path to the saved text file */
   path: string
   /** Size in bytes */
+  size: number
+}
+
+/** Response from saving an arbitrary uploaded file. */
+export interface SaveFileResponse {
+  id: string
+  filename: string
+  path: string
   size: number
 }
 
@@ -1663,6 +1697,10 @@ export interface AllSessionsEntry {
   worktree_name: string
   worktree_path: string
   sessions: Session[]
+  /** Owning Jean instance. Present on native multi-server results. */
+  serverId?: string
+  /** Display name of the owning Jean instance. */
+  serverName?: string
 }
 
 /**
@@ -1670,6 +1708,25 @@ export interface AllSessionsEntry {
  */
 export interface AllSessionsResponse {
   entries: AllSessionsEntry[]
+}
+
+export interface SessionSearchHit {
+  session_id: string
+  session_name: string
+  project_id: string
+  project_name: string
+  worktree_id: string
+  worktree_name: string
+  worktree_path: string
+  snippet: string
+  message_id?: string
+  match_count: number
+  updated_at: number
+}
+
+export interface SessionSearchResponse {
+  hits: SessionSearchHit[]
+  truncated: boolean
 }
 
 // ============================================================================

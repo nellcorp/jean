@@ -11,6 +11,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createElement } from 'react'
 import {
   usePreferences,
+  usePatchPreferences,
   useSavePreferences,
   preferencesQueryKeys,
 } from './preferences'
@@ -42,9 +43,11 @@ import {
 } from '@/types/preferences'
 import { DEFAULT_KEYBINDINGS } from '@/types/keybindings'
 import { clearClientPreferencesForTests } from '@/lib/client-preferences'
+import { SettingsTargetProvider } from '@/lib/settings-target'
 
 vi.mock('@/lib/transport', () => ({
   invoke: vi.fn(),
+  invokeForServer: vi.fn(),
 }))
 
 vi.mock('@/lib/platform', () => ({
@@ -99,7 +102,22 @@ const createWrapper = (queryClient: QueryClient) => {
   return Wrapper
 }
 
+const createServerWrapper = (queryClient: QueryClient, serverId: string) => {
+  const Wrapper = ({ children }: { children: React.ReactNode }) =>
+    createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      createElement(SettingsTargetProvider, { serverId }, children)
+    )
+  Wrapper.displayName = 'TestServerQueryClientWrapper'
+  return Wrapper
+}
+
 describe('model option helpers', () => {
+  it('enables the combined git sync button by default', () => {
+    expect(defaultPreferences.git_sync_button).toBe(true)
+  })
+
   it('enables compact chat view by default', () => {
     expect(defaultPreferences.compact_chat_view_enabled).toBe(true)
   })
@@ -112,6 +130,9 @@ describe('model option helpers', () => {
 
   it('offers Claude 1M variants alongside standard context models', () => {
     expect(modelOptions.map(option => option.value)).toEqual([
+      'claude-opus-5-5',
+      'claude-sonnet-5-5',
+      'claude-fable-5-1',
       'claude-fable-5',
       'claude-opus-5',
       'claude-sonnet-5',
@@ -120,20 +141,33 @@ describe('model option helpers', () => {
       'claude-opus-4-7[1m]',
       'claude-opus-4-7',
       'claude-opus-4-6[1m]',
-      'claude-opus-4-6',
-      'claude-opus-4-5-20251101',
       'claude-sonnet-4-6[1m]',
+      'claude-opus-4-6',
       'claude-sonnet-4-6',
+      'claude-opus-4-5-20251101',
+      'claude-haiku-4-5',
       'haiku',
     ])
+    expect(normalizeClaudeModel('claude-fable-5-1')).toBe('claude-fable-5-1')
     expect(normalizeClaudeModel('sonnet')).toBe('claude-sonnet-5')
     expect(normalizeClaudeModel('claude-fable-5')).toBe('claude-fable-5')
+    expect(normalizeClaudeModel('claude-opus-5-5')).toBe('claude-opus-5-5')
     expect(normalizeClaudeModel('claude-opus-5')).toBe('claude-opus-5')
+    expect(normalizeClaudeModel('claude-sonnet-5-5')).toBe('claude-sonnet-5-5')
     expect(normalizeClaudeModel('claude-sonnet-5')).toBe('claude-sonnet-5')
     expect(normalizeClaudeModel('claude-opus-4-8')).toBe('claude-opus-4-8')
     expect(normalizeClaudeModel('claude-opus-4-7')).toBe('claude-opus-4-7')
     expect(normalizeClaudeModel('claude-opus-4-6')).toBe('claude-opus-4-6')
     expect(normalizeClaudeModel('claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
+    expect(normalizeClaudeModel('claude-haiku-4-5')).toBe('claude-haiku-4-5')
+    // Unknown-but-plausible Claude ids pass through (no silent upgrade)
+    expect(normalizeClaudeModel('claude-haiku-9-9')).toBe('claude-haiku-9-9')
+    expect(normalizeClaudeModel('claude-opus-6[1m]')).toBe('claude-opus-6[1m]')
+    // Only empty/invalid values fall back to the default
+    expect(normalizeClaudeModel('')).toBe('claude-opus-5-5')
+    expect(normalizeClaudeModel('gpt-5.5')).toBe('claude-opus-5-5')
+    expect(normalizeClaudeModel('claude-')).toBe('claude-opus-5-5')
+    expect(normalizeClaudeModel('toString')).toBe('claude-opus-5-5')
     // Custom CLI providers keep Claude Code aliases for ANTHROPIC_DEFAULT_* routing
     expect(
       normalizeClaudeModel('sonnet', { preserveProviderAliases: true })
@@ -146,14 +180,23 @@ describe('model option helpers', () => {
     ).toBe('haiku')
   })
 
-  it('offers GPT 5.6 preview variants in Codex selectors', () => {
+  it('offers GPT 6 and GPT 5.6 variants in Codex selectors', () => {
     const values = codexDefaultModelOptions.map(option => option.value)
-    expect(values.slice(0, 3)).toEqual([
+    expect(values.slice(0, 9)).toEqual([
+      'gpt-6-astra',
+      'gpt-6-sol',
+      'gpt-6-luna',
+      'gpt-6-astra-fast',
+      'gpt-6-sol-fast',
+      'gpt-6-luna-fast',
       'gpt-5.6-sol',
       'gpt-5.6-terra',
       'gpt-5.6-luna',
     ])
     expect(values).not.toContain('gpt-5.6')
+    expect(normalizeCodexModel('gpt-6-astra')).toBe('gpt-6-astra')
+    expect(normalizeCodexModel('gpt-6-sol')).toBe('gpt-6-sol')
+    expect(normalizeCodexModel('gpt-6-luna')).toBe('gpt-6-luna')
     expect(normalizeCodexModel('gpt-5.6-sol')).toBe('gpt-5.6-sol')
     expect(normalizeCodexModel('gpt-5.6-terra')).toBe('gpt-5.6-terra')
     expect(normalizeCodexModel('gpt-5.6-luna')).toBe('gpt-5.6-luna')
@@ -163,6 +206,9 @@ describe('model option helpers', () => {
 
   it('offers Codex fast modes for default selectors', () => {
     const values = codexDefaultModelOptions.map(option => option.value)
+    expect(values).toContain('gpt-6-astra-fast')
+    expect(values).toContain('gpt-6-sol-fast')
+    expect(values).toContain('gpt-6-luna-fast')
     expect(values).toContain('gpt-5.6-sol-fast')
     expect(values).toContain('gpt-5.6-terra-fast')
     expect(values).toContain('gpt-5.6-luna-fast')
@@ -170,6 +216,7 @@ describe('model option helpers', () => {
     expect(values).toContain('gpt-5.4-fast')
     expect(values).toContain('gpt-5.4-mini-fast')
     expect(normalizeCodexModel('gpt-5.6-sol-fast')).toBe('gpt-5.6-sol-fast')
+    expect(normalizeCodexModel('gpt-6-sol-fast')).toBe('gpt-6-sol-fast')
     expect(normalizeCodexModel('gpt-5.6-fast')).toBe('gpt-5.6-sol-fast')
     expect(normalizeCodexModel('gpt-5-6-sol-fast')).toBe('gpt-5.6-sol-fast')
     expect(normalizeCodexModel('gpt-5.5-fast')).toBe('gpt-5.5-fast')
@@ -228,6 +275,12 @@ describe('model option helpers', () => {
       'test against its `url`, port, and startup command'
     )
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'use the Agent Browser when it is available'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'no other browser testing method'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       'VERY IMPORTANT: Keep Code Simple'
     )
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
@@ -237,17 +290,26 @@ describe('model option helpers', () => {
     expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
       'include clickable links when available'
     )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      "At the start of a new task, replace '.ai/todo.md' instead of appending to it"
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      "Only update '.ai/lessons.md' for general, project-wide learning"
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'Do not add feature-specific, bug-fix-specific, or small/local lessons'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+      'Remove narrow or specific entries when you detect them'
+    )
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).not.toContain(
+      'After ANY correction from the user'
+    )
   })
 
-  it('requires GitHub issue and discussion discovery after changes', () => {
-    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
+  it('does not require GitHub discovery in every chat', () => {
+    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).not.toContain(
       'GitHub Issue and Discussion Discovery'
-    )
-    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
-      "search the current repository's existing GitHub issues and discussions"
-    )
-    expect(DEFAULT_GLOBAL_SYSTEM_PROMPT).toContain(
-      'Include the results in both the main response and the `## Recap`'
     )
   })
 })
@@ -274,6 +336,94 @@ describe('preferences service', () => {
     })
   })
 
+  describe('usePatchPreferences', () => {
+    it('updates cached client preferences before startup effects can reopen UI', () => {
+      queryClient.setQueryData(preferencesQueryKeys.preferences(), {
+        ...defaultPreferences,
+        has_seen_feature_tour: false,
+      })
+      const { result } = renderHook(() => usePatchPreferences(), {
+        wrapper: createWrapper(queryClient),
+      })
+
+      act(() => {
+        result.current.mutate({ has_seen_feature_tour: true })
+      })
+
+      expect(
+        queryClient.getQueryData<AppPreferences>(
+          preferencesQueryKeys.preferences()
+        )?.has_seen_feature_tour
+      ).toBe(true)
+    })
+
+    it('patches server-owned settings on the selected remote server', async () => {
+      const { invokeForServer } = await import('@/lib/transport')
+      vi.mocked(invokeForServer)
+        .mockResolvedValueOnce({
+          schemaVersion: 1,
+          revision: 'revision-1',
+          preferences: {},
+        })
+        .mockResolvedValueOnce({
+          schemaVersion: 1,
+          revision: 'revision-2',
+          preferences: { default_backend: 'codex' },
+        })
+      const { result } = renderHook(() => usePatchPreferences(), {
+        wrapper: createServerWrapper(queryClient, 'dev-server'),
+      })
+
+      act(() => result.current.mutate({ default_backend: 'codex' }))
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(invokeForServer).toHaveBeenNthCalledWith(
+        1,
+        'dev-server',
+        'get_server_preferences'
+      )
+      expect(invokeForServer).toHaveBeenNthCalledWith(
+        2,
+        'dev-server',
+        'update_server_preferences',
+        {
+          patch: { default_backend: 'codex' },
+          expectedRevision: 'revision-1',
+        }
+      )
+    })
+
+    it('updates cached server defaults before the remote save completes', () => {
+      const remoteKey = preferencesQueryKeys.preferences('dev-server')
+      queryClient.setQueryData(remoteKey, {
+        ...defaultPreferences,
+        default_backend: 'claude',
+        default_execution_mode: 'plan',
+      })
+      const { result } = renderHook(() => usePatchPreferences(), {
+        wrapper: createServerWrapper(queryClient, 'dev-server'),
+      })
+
+      act(() => {
+        result.current.mutate({
+          default_backend: 'codex',
+          default_execution_mode: 'yolo',
+          build_backend: 'opencode',
+          yolo_backend: 'cursor',
+        })
+      })
+
+      expect(queryClient.getQueryData<AppPreferences>(remoteKey)).toMatchObject(
+        {
+          default_backend: 'codex',
+          default_execution_mode: 'yolo',
+          build_backend: 'opencode',
+          yolo_backend: 'cursor',
+        }
+      )
+    })
+  })
+
   describe('preferencesQueryKeys', () => {
     it('returns correct all key', () => {
       expect(preferencesQueryKeys.all).toEqual(['preferences'])
@@ -285,6 +435,26 @@ describe('preferences service', () => {
   })
 
   describe('usePreferences', () => {
+    it('loads settings from the selected remote server', async () => {
+      const { invokeForServer } = await import('@/lib/transport')
+      vi.mocked(invokeForServer).mockResolvedValueOnce({
+        schemaVersion: 1,
+        revision: 'revision-1',
+        preferences: { selected_model: 'haiku' },
+      })
+
+      const { result } = renderHook(() => usePreferences(), {
+        wrapper: createServerWrapper(queryClient, 'dev-server'),
+      })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(result.current.data?.selected_model).toBe('haiku')
+      expect(invokeForServer).toHaveBeenCalledWith(
+        'dev-server',
+        'get_server_preferences'
+      )
+    })
+
     it('loads preferences from backend', async () => {
       const { invoke } = await import('@/lib/transport')
       const mockPreferences: AppPreferences = {
@@ -430,7 +600,7 @@ describe('preferences service', () => {
       await waitFor(() => expect(result.current.isSuccess).toBe(true))
 
       expect(result.current.data?.theme).toBe('system')
-      expect(result.current.data?.selected_model).toBe('claude-opus-4-8[1m]')
+      expect(result.current.data?.selected_model).toBe('claude-opus-5-5')
       expect(result.current.data?.jean_mcp_enabled).toBe(true)
     })
 
@@ -1322,15 +1492,10 @@ describe('preferences service', () => {
   })
 
   describe('AppearancePane scaling', () => {
-    it(
-      'stores desktop/mobile zoom on this client only (not shared prefs)',
-      async () => {
+    it('stores desktop/mobile zoom on this client only (not shared prefs)', async () => {
       const { invoke } = await import('@/lib/transport')
-      const {
-        clearClientZoomForTests,
-        readClientZoom,
-        writeClientZoom,
-      } = await import('@/lib/client-zoom')
+      const { clearClientZoomForTests, readClientZoom, writeClientZoom } =
+        await import('@/lib/client-zoom')
       clearClientZoomForTests()
       // Seed client zoom so the pane does not depend on async prefs hydrate.
       writeClientZoom({
@@ -1371,8 +1536,9 @@ describe('preferences service', () => {
 
       const patchCallsBefore = vi
         .mocked(invoke)
-        .mock.calls.filter(([command]) => command === 'patch_preferences')
-        .length
+        .mock.calls.filter(
+          ([command]) => command === 'patch_preferences'
+        ).length
 
       await user.click(syncCheckbox)
 
@@ -1406,9 +1572,7 @@ describe('preferences service', () => {
       ).toHaveLength(patchCallsBefore)
 
       clearClientZoomForTests()
-    },
-      15_000
-    )
+    }, 15_000)
   })
 
   describe('AppearancePane finished session animation', () => {
@@ -1446,8 +1610,13 @@ describe('preferences service', () => {
 
       await user.click(switchEl)
 
-      await waitFor(() => expect(switchEl).toHaveAttribute('aria-checked', 'false'))
-      expect(invoke).not.toHaveBeenCalledWith('patch_preferences', expect.anything())
+      await waitFor(() =>
+        expect(switchEl).toHaveAttribute('aria-checked', 'false')
+      )
+      expect(invoke).not.toHaveBeenCalledWith(
+        'patch_preferences',
+        expect.anything()
+      )
       expect(switchEl).toHaveAttribute('aria-checked', 'false')
     })
   })
@@ -1480,10 +1649,15 @@ describe('preferences service', () => {
 
       await user.click(switchEl)
 
-      await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_window_vibrancy', {
-        enabled: true,
-      }))
-      expect(invoke).not.toHaveBeenCalledWith('patch_preferences', expect.anything())
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith('set_window_vibrancy', {
+          enabled: true,
+        })
+      )
+      expect(invoke).not.toHaveBeenCalledWith(
+        'patch_preferences',
+        expect.anything()
+      )
       expect(
         queryClient.getQueryData<AppPreferences>(
           preferencesQueryKeys.preferences()
