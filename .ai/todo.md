@@ -4,4 +4,4 @@
 - [x] Resolve icon migration and removed smoke-test import.
 - [x] Full check:all: 2,876 frontend tests, 1,339 Rust tests passed (one ignored); jean:dev rebuilt.
 - [x] Agent-browser smoke check: Settings → Claude shows Install latest with PATH selected.
-- [ ] Push merge to open PR #16 and confirm no conflicts.
+- [x] Pushed merge 342c6083 to open PR #16; GitHub reports MERGEABLE.
