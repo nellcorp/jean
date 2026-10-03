@@ -1,0 +1,8 @@
+[Unit]
+Description=Jean host scheduled maintenance
+After=network-online.target docker.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/jean-host-maintenance
+TimeoutStartSec=2h
