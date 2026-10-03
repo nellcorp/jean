@@ -9,7 +9,8 @@ import {
   Settings,
   Terminal,
   Trash2,
-} from 'lucide-react'
+} from '@/components/icons/reicon'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -17,7 +18,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
-import { isBaseSession, type Project } from '@/types/projects'
+import type { Project, Worktree } from '@/types/projects'
 import {
   useCreateBaseSession,
   useMoveItem,
@@ -27,15 +28,20 @@ import {
   useOpenWorktreeInFinder,
   useOpenWorktreeInTerminal,
   useRemoveProject,
-  useWorktrees,
+  projectsQueryKeys,
   useWebEditorUrl,
 } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { useProjectsStore } from '@/store/projects-store'
 import { useUIStore } from '@/store/ui-store'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
-import { getFileManagerName } from '@/lib/platform'
-import { canOpenInEditor, isNativeApp } from '@/lib/environment'
+import { getFileManagerName, preOpenWindow } from '@/lib/platform'
+import {
+  canOpenInEditor,
+  canOpenInFinder,
+  canOpenInTerminal,
+  isNativeApp,
+} from '@/lib/environment'
 
 interface ProjectContextMenuProps {
   project: Project
@@ -54,7 +60,18 @@ export function ProjectContextMenu({
   const openWorktreesFolder = useOpenProjectWorktreesFolder()
   const openInTerminal = useOpenWorktreeInTerminal()
   const openInEditor = useOpenWorktreeInEditor()
-  const { data: worktrees = [] } = useWorktrees(project.id)
+  const queryClient = useQueryClient()
+  const cachedWorktrees = queryClient.getQueryData<Worktree[]>(
+    projectsQueryKeys.worktrees(project.id)
+  )
+  const worktreeCount = Math.max(
+    project.worktree_count ?? 0,
+    cachedWorktrees?.length ?? 0
+  )
+  const hasBaseSession =
+    project.has_base_session === true ||
+    (cachedWorktrees?.some(worktree => worktree.session_type === 'base') ??
+      false)
   const { data: preferences } = usePreferences()
   const hasWebEditor = useWebEditorUrl() !== null
   const showEditorItem = canOpenInEditor() || hasWebEditor
@@ -62,9 +79,9 @@ export function ProjectContextMenu({
   const setNewWorktreeModalOpen = useUIStore(
     state => state.setNewWorktreeModalOpen
   )
-  // Check if base session already exists
-  const existingBaseSession = worktrees.find(isBaseSession)
   const isNested = project.parent_id !== undefined
+
+  if (project.offline) return <>{children}</>
 
   const handleOpenInFinder = () => {
     openInFinder.mutate(project.path)
@@ -85,6 +102,7 @@ export function ProjectContextMenu({
     openInEditor.mutate({
       worktreePath: project.path,
       editor: preferences?.editor,
+      preOpenedWindow: hasWebEditor ? preOpenWindow() : null,
     })
   }
 
@@ -124,7 +142,7 @@ export function ProjectContextMenu({
 
         <ContextMenuItem onClick={handleNewBaseSession}>
           <Home className="mr-2 h-4 w-4" />
-          {existingBaseSession ? 'Open Base Session' : 'New Base Session'}
+          {hasBaseSession ? 'Open Base Session' : 'New Base Session'}
         </ContextMenuItem>
 
         <ContextMenuItem onClick={handleOpenSettings}>
@@ -143,14 +161,14 @@ export function ProjectContextMenu({
           </ContextMenuItem>
         )}
 
-        {isNativeApp() && (
+        {canOpenInFinder(project.serverId) && (
           <ContextMenuItem onClick={handleOpenInFinder}>
             <FolderOpen className="mr-2 h-4 w-4" />
             Open in {getFileManagerName()}
           </ContextMenuItem>
         )}
 
-        {isNativeApp() && (
+        {canOpenInTerminal() && (
           <ContextMenuItem onClick={handleOpenInTerminal}>
             <Terminal className="mr-2 h-4 w-4" />
             Open in {getTerminalLabel(preferences?.terminal)}
@@ -181,14 +199,14 @@ export function ProjectContextMenu({
         <ContextMenuItem
           variant="destructive"
           onClick={handleRemoveProject}
-          disabled={worktrees.length > 0}
+          disabled={worktreeCount > 0}
           className="whitespace-nowrap"
         >
           <Trash2 className="mr-2 h-4 w-4 shrink-0" />
           Remove Project
-          {worktrees.length > 0 && (
+          {worktreeCount > 0 && (
             <span className="ml-auto text-xs opacity-60 shrink-0">
-              ({worktrees.length} worktrees)
+              ({worktreeCount} worktrees)
             </span>
           )}
         </ContextMenuItem>

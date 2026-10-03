@@ -5,10 +5,18 @@ import type { ClaudeOutputStyle } from '@/types/output-styles'
 import { OutputStyleDropdown } from './OutputStyleDropdown'
 
 const installMutate = vi.fn()
+const listStyles = vi.fn()
+const installStyleHook = vi.fn()
 
 vi.mock('@/services/output-styles', () => ({
-  useClaudeOutputStyles: () => ({ data: mockStyles }),
-  useInstallOutputStyle: () => ({ mutate: installMutate }),
+  useClaudeOutputStyles: (...args: unknown[]) => {
+    listStyles(...args)
+    return { data: mockStyles }
+  },
+  useInstallOutputStyle: (...args: unknown[]) => {
+    installStyleHook(...args)
+    return { mutate: installMutate }
+  },
 }))
 
 let mockStyles: ClaudeOutputStyle[] = []
@@ -31,6 +39,8 @@ const style = (
 describe('OutputStyleDropdown', () => {
   beforeEach(() => {
     installMutate.mockReset()
+    listStyles.mockClear()
+    installStyleHook.mockClear()
     mockStyles = [
       style({ name: 'Explanatory' }),
       style({ name: 'Concise', minCliVersion: '2.1.237' }),
@@ -56,11 +66,15 @@ describe('OutputStyleDropdown', () => {
     )
 
     await user.click(screen.getByRole('button'))
-    await user.click(await screen.findByRole('menuitemradio', { name: /My Style/ }))
+    await user.click(
+      await screen.findByRole('menuitemradio', { name: /My Style/ })
+    )
     expect(onOutputStyleChange).toHaveBeenCalledWith('My Style')
 
     await user.click(screen.getByRole('button'))
-    await user.click(await screen.findByRole('menuitemradio', { name: /Default/ }))
+    await user.click(
+      await screen.findByRole('menuitemradio', { name: /Default/ })
+    )
     expect(onOutputStyleChange).toHaveBeenLastCalledWith(null)
   })
 
@@ -76,7 +90,9 @@ describe('OutputStyleDropdown', () => {
     )
 
     await user.click(screen.getByRole('button'))
-    await user.click(await screen.findByRole('menuitemradio', { name: /ELI15/ }))
+    await user.click(
+      await screen.findByRole('menuitemradio', { name: /ELI15/ })
+    )
 
     expect(installMutate).toHaveBeenCalledWith(
       { slug: 'eli15' },
@@ -98,7 +114,22 @@ describe('OutputStyleDropdown', () => {
     )
 
     await user.click(screen.getByRole('button'))
-    const concise = await screen.findByRole('menuitemradio', { name: /Concise/ })
+    const concise = await screen.findByRole('menuitemradio', {
+      name: /Concise/,
+    })
     expect(concise).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('routes list and installation to the worktree owning server', () => {
+    render(
+      <OutputStyleDropdown
+        selectedOutputStyle={null}
+        worktreeId="remote-one:wt"
+        worktreePath="/repo"
+        onOutputStyleChange={vi.fn()}
+      />
+    )
+    expect(listStyles).toHaveBeenCalledWith('/repo', 'remote-one')
+    expect(installStyleHook).toHaveBeenCalledWith('remote-one')
   })
 })

@@ -258,16 +258,10 @@ re-parse the whole accumulated buffer (avoids O(n²) on long sessions).
 }
 ```
 
-**Extraction pattern** (see `src-tauri/src/chat/commands.rs:extract_text_from_stream_json`):
+**Extraction pattern** (shared helper `extract_claude_structured_output` in `jean-core/src/chat/claude.rs`):
 
-```rust
-for block in content {
-    if block.get("type") == Some("tool_use")
-       && block.get("name") == Some("StructuredOutput") {
-        return block.get("input").clone(); // This is your JSON schema data
-    }
-}
-```
+- Prefer the final `result` event's `structured_output` field (the CLI validates it against the schema)
+- Fall back to the LAST `StructuredOutput` tool_use input (the model may retry after a validation failure, so the first call can be invalid)
 
 **Usage in this codebase:**
 
@@ -408,7 +402,7 @@ Images pasted or dropped into chat are processed before saving (`process_image()
 
 Three files need updating when adding a new model option:
 
-1. **`src/types/preferences.ts`** — Add to `ClaudeModel` type union and `modelOptions` array (full labels like "Claude Fable 5" or "Claude Sonnet 4.6"). Current first-party Claude Code model IDs use API-style names such as `claude-fable-5`, `claude-opus-4-8[1m]`, and `claude-sonnet-4-6[1m]`; legacy/provider aliases may still use `opus`, `sonnet`, or `haiku`.
+1. **`src/types/preferences.ts`** — Add to `ClaudeModel` type union and `modelOptions` array (full labels like "Claude Fable 5.1" or "Claude Sonnet 4.6"). Current first-party Claude Code model IDs use API-style names such as `claude-fable-5-1`, `claude-opus-4-8[1m]`, and `claude-sonnet-4-6[1m]`; legacy/provider aliases may still use `opus`, `sonnet`, or `haiku`.
 2. **`src/store/chat-store.ts`** — Add to duplicated `ClaudeModel` type union (line ~27)
 3. **`src/components/chat/ChatToolbar.tsx`** — Add to `MODEL_OPTIONS` array (short labels like "Sonnet 4.6")
 

@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { JeanSkill, SkillBackendTarget } from '@/types/jean-skills'
+import { SettingsTargetProvider } from '@/lib/settings-target'
 import { SkillsPane } from './SkillsPane'
 
 const saveMutate = vi.fn()
@@ -11,12 +12,17 @@ const invokeMock = vi.fn()
 let mockSkills: JeanSkill[] = []
 
 const backends: SkillBackendTarget[] = [
-  { id: 'claude', label: 'Claude', dir: '/home/u/.claude/skills', exists: true },
+  {
+    id: 'claude',
+    label: 'Claude',
+    dir: '/home/u/.claude/skills',
+    exists: true,
+  },
   { id: 'codex', label: 'Codex', dir: '/home/u/.agents/skills', exists: true },
 ]
 
 vi.mock('@/lib/transport', () => ({
-  invoke: (...args: unknown[]) => invokeMock(...args),
+  invokeForServer: (...args: unknown[]) => invokeMock(...args),
 }))
 
 vi.mock('@/services/jean-skills', () => ({
@@ -95,7 +101,7 @@ describe('SkillsPane', () => {
     await user.click(screen.getByRole('button', { name: /edit architect/i }))
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('read_jean_skill', {
+      expect(invokeMock).toHaveBeenCalledWith('local', 'read_jean_skill', {
         slug: 'architect',
       })
     )
@@ -104,6 +110,29 @@ describe('SkillsPane', () => {
         '---\nname: Architect\n---\n\nBody\n'
       )
     )
+  })
+
+  it('reads a skill from the selected remote settings server', async () => {
+    invokeMock.mockResolvedValue({
+      slug: 'architect',
+      name: 'Architect',
+      description: null,
+      content: 'remote body',
+      backends: ['claude'],
+    })
+    const user = userEvent.setup()
+    render(
+      <SettingsTargetProvider serverId="remote-one">
+        <SkillsPane />
+      </SettingsTargetProvider>
+    )
+    await user.click(screen.getByRole('button', { name: /edit architect/i }))
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('remote-one', 'read_jean_skill', {
+        slug: 'architect',
+      })
+    )
+    expect(await screen.findByLabelText('SKILL.md')).toHaveValue('remote body')
   })
 
   it('removes a skill from every agent', async () => {

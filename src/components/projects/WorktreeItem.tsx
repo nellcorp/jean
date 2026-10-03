@@ -1,16 +1,12 @@
 import { useCallback, useState, useRef, useEffect, useMemo } from 'react'
 import { StatusIndicator } from '@/components/ui/status-indicator'
-import type {
-  IndicatorStatus,
-  IndicatorVariant,
-} from '@/components/ui/status-indicator'
+import type { IndicatorStatus } from '@/components/ui/status-indicator'
 import {
   ArrowDown,
   ArrowDownUp,
   ArrowUp,
   ChevronDown,
-  GitBranch,
-} from 'lucide-react'
+} from '@/components/icons/reicon'
 import { cn } from '@/lib/utils'
 import { dismissibleToast } from '@/lib/dismissible-toast'
 import { isBaseSession, type Worktree } from '@/types/projects'
@@ -52,6 +48,7 @@ import {
   TooltipContent,
 } from '@/components/ui/tooltip'
 import { useSidebarWidth } from '@/components/layout/SidebarWidthContext'
+import { CollapsedCountBadge } from './CollapsedCountBadge'
 
 interface WorktreeItemProps {
   worktree: Worktree
@@ -95,6 +92,7 @@ export function WorktreeItem({
   const loadingOperation = useChatStore(
     state => state.worktreeLoadingOperations[worktree.id] ?? null
   )
+  const namingSessionIds = useChatStore(state => state.namingSessionIds)
   const isSelected = selectedWorktreeId === worktree.id
   const isBase = isBaseSession(worktree)
 
@@ -186,10 +184,13 @@ export function WorktreeItem({
       // Skip sessions that are currently streaming (handled by isStreamingWaitingQuestion)
       if (useChatStore.getState().sendingSessionIds[session.id]) continue
 
-      // Find last assistant message by iterating from end (avoids array copy from .reverse())
+      // Find last assistant message by iterating from end (avoids array copy from .reverse()).
+      // A later user message means its questions were answered (matches MessageItem).
       let lastAssistantMsg = null
       for (let i = session.messages.length - 1; i >= 0; i--) {
-        if (session.messages[i]?.role === 'assistant') {
+        const role = session.messages[i]?.role
+        if (role === 'user') break
+        if (role === 'assistant') {
           lastAssistantMsg = session.messages[i]
           break
         }
@@ -283,49 +284,16 @@ export function WorktreeItem({
     return false
   })
 
-  // Get execution mode for running session (yolo vs vibing/plan)
-  const runningSessionExecutionMode = useChatStore(state => {
-    for (const [sessionId, isSending] of Object.entries(
-      state.sendingSessionIds
-    )) {
-      if (isSending && state.sessionWorktreeMap[sessionId] === worktree.id) {
-        return (
-          state.executingModes[sessionId] ??
-          state.executionModes[sessionId] ??
-          'plan'
-        )
-      }
-    }
-    return 'plan'
-  })
-
-  // Determine indicator status and variant for StatusIndicator component
-  const { indicatorStatus, indicatorVariant } = useMemo((): {
-    indicatorStatus: IndicatorStatus
-    indicatorVariant?: IndicatorVariant
-  } => {
-    if (isWaitingQuestion || isWaitingPlan) {
-      return { indicatorStatus: 'waiting' }
-    }
-    if (isChatRunning) {
-      return {
-        indicatorStatus: 'running',
-        indicatorVariant:
-          runningSessionExecutionMode === 'yolo' ? 'destructive' : 'default',
-      }
-    }
-    if (loadingOperation) {
-      return { indicatorStatus: 'running', indicatorVariant: 'loading' }
-    }
-    if (isReviewing) {
-      return { indicatorStatus: 'review' }
-    }
-    return { indicatorStatus: 'idle' }
+  // Determine indicator status for StatusIndicator component
+  const indicatorStatus = useMemo((): IndicatorStatus => {
+    if (isWaitingQuestion || isWaitingPlan) return 'waiting'
+    if (isChatRunning || loadingOperation) return 'running'
+    if (isReviewing) return 'review'
+    return 'idle'
   }, [
     isWaitingQuestion,
     isWaitingPlan,
     isChatRunning,
-    runningSessionExecutionMode,
     loadingOperation,
     isReviewing,
   ])
@@ -595,7 +563,8 @@ export function WorktreeItem({
           const result = await gitPush(
             worktree.path,
             worktree.pr_number,
-            remote
+            remote,
+            worktree.id
           )
           triggerImmediateGitPoll()
           fetchWorktreesStatus(projectId)
@@ -626,7 +595,7 @@ export function WorktreeItem({
     [pickRemoteOrRun, worktree.path, worktree.pr_number, projectId]
   )
 
-  const gitSyncButton = preferences?.git_sync_button ?? false
+  const gitSyncButton = preferences?.git_sync_button ?? true
 
   const handleSync = useCallback(
     (e: React.MouseEvent) => {
@@ -681,7 +650,7 @@ export function WorktreeItem({
 
   return (
     <div>
-      <WorktreeContextMenu actions={menuActions}>
+      <WorktreeContextMenu actions={menuActions} serverId={worktree.serverId}>
         <div
           role="button"
           tabIndex={0}
@@ -703,11 +672,7 @@ export function WorktreeItem({
           onDoubleClick={handleDoubleClick}
         >
           {/* Chat status indicator (spinner/dot) */}
-          <StatusIndicator
-            status={indicatorStatus}
-            variant={indicatorVariant}
-            className="h-2 w-2"
-          />
+          <StatusIndicator status={indicatorStatus} className="h-2 w-2" />
 
           {/* Terminal running/failed indicator */}
           <TerminalStatusIndicator worktreeId={worktree.id} />
@@ -749,17 +714,6 @@ export function WorktreeItem({
                   )}
                 />
               </button>
-              {/* Show branch name only when different from displayed name */}
-              {(() => {
-                const displayBranch =
-                  gitStatus?.current_branch ?? worktree.branch
-                return displayBranch !== worktree.name ? (
-                  <span className="ml-0.5 inline-flex max-w-[80px] items-center gap-0.5 truncate text-xs text-muted-foreground">
-                    <GitBranch className="h-2.5 w-2.5" />
-                    {displayBranch}
-                  </span>
-                ) : null
-              })()}
             </span>
           )}
 
@@ -770,7 +724,7 @@ export function WorktreeItem({
                 <button
                   type="button"
                   onClick={handleSync}
-                  className="shrink-0 rounded bg-violet-500/10 px-1.5 py-0.5 text-[11px] font-medium text-violet-500 transition-colors hover:bg-violet-500/20"
+                  className="shrink-0 rounded bg-violet-500/10 px-1.5 py-0.5 text-[11px] font-medium text-violet-600 dark:text-violet-400 transition-colors hover:bg-violet-500/20"
                 >
                   <span className="flex items-center gap-0.5">
                     <ArrowDownUp className="h-3 w-3" />
@@ -825,7 +779,7 @@ export function WorktreeItem({
                     <button
                       type="button"
                       onClick={handlePush}
-                      className="shrink-0 rounded bg-orange-500/10 px-1.5 py-0.5 text-[11px] font-medium text-orange-500 transition-colors hover:bg-orange-500/20"
+                      className="shrink-0 rounded bg-warning/10 px-1.5 py-0.5 text-[11px] font-medium text-warning transition-colors hover:bg-warning/20"
                     >
                       <span className="flex items-center gap-0.5">
                         <ArrowUp className="h-3 w-3" />
@@ -844,14 +798,21 @@ export function WorktreeItem({
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium">
-                  <span className="text-green-500">+{uncommittedAdded}</span>
+                  <span className="text-success">+{uncommittedAdded}</span>
                   <span className="text-muted-foreground">/</span>
-                  <span className="text-red-500">-{uncommittedRemoved}</span>
+                  <span className="text-destructive">
+                    -{uncommittedRemoved}
+                  </span>
                 </span>
               </TooltipTrigger>
               <TooltipContent>{`Uncommitted: +${uncommittedAdded}/-${uncommittedRemoved} lines`}</TooltipContent>
             </Tooltip>
           )}
+          <CollapsedCountBadge
+            count={sessionsData?.sessions.length ?? 0}
+            label="sessions"
+            isExpanded={isExpanded}
+          />
         </div>
       </WorktreeContextMenu>
 
@@ -870,7 +831,6 @@ export function WorktreeItem({
                 <div className="flex items-center gap-1.5 pl-3 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
                   <StatusIndicator
                     status={groupConfig.indicatorStatus}
-                    variant={groupConfig.indicatorVariant}
                     shape={groupConfig.indicatorShape}
                     label={group.title}
                     className="h-1.5 w-1.5 shrink-0"
@@ -882,6 +842,8 @@ export function WorktreeItem({
                 </div>
                 {group.cards.map(card => {
                   const config = statusConfig[card.status]
+                  const isGeneratingName =
+                    namingSessionIds[card.session.id] ?? false
                   return (
                     <button
                       type="button"
@@ -904,16 +866,19 @@ export function WorktreeItem({
                     >
                       <StatusIndicator
                         status={config.indicatorStatus}
-                        variant={config.indicatorVariant}
                         shape={config.indicatorShape}
                         label={config.label}
                         className="h-1.5 w-1.5 shrink-0"
                       />
                       <span
-                        className="truncate text-xs"
+                        className="flex min-w-0 items-center gap-1.5 truncate text-xs"
                         title={`${config.label}: ${card.session.name || 'Untitled'}`}
                       >
-                        {card.session.name || 'Untitled'}
+                        <span className="truncate">
+                          {isGeneratingName
+                            ? 'Generating…'
+                            : card.session.name || 'Untitled'}
+                        </span>
                       </span>
                     </button>
                   )

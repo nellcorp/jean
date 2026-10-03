@@ -45,6 +45,7 @@ const uiState = {
  */
 export const defaultResponses: Record<string, unknown> = {
   // Projects
+  get_server_platform: 'mac',
   list_projects: [project],
   list_worktrees: [worktree1, worktree2],
   add_project: project,
@@ -74,6 +75,8 @@ export const defaultResponses: Record<string, unknown> = {
   // UI State
   load_ui_state: uiState,
   save_ui_state: null,
+  get_pinned_recent_session_ids: [],
+  set_recent_session_pinned: [],
 
   // CLI checks
   check_claude_cli_installed: { installed: true, version: '1.0.0' },
@@ -83,12 +86,37 @@ export const defaultResponses: Record<string, unknown> = {
   get_available_cli_versions: [],
   get_available_gh_versions: [],
 
+  // Worktree configuration
+  get_package_scripts: [],
+  get_ports: [],
+  get_run_scripts: [],
+
+  get_unread_session_count: 0,
+  patch_preferences: null,
+
+  check_codex_cli_installed: { installed: false },
+  check_opencode_cli_installed: { installed: false },
+  check_cursor_cli_installed: { installed: false },
+  check_pi_cli_installed: { installed: false },
+  check_commandcode_cli_installed: { installed: false },
+  check_grok_cli_installed: { installed: false },
+  check_kimi_cli_installed: { installed: false },
+  check_antigravity_cli_installed: { installed: false },
+  get_available_codex_versions: [],
+  get_available_opencode_versions: [],
+  get_available_pi_versions: [],
+  get_available_coderabbit_versions: [],
+  get_available_commandcode_versions: [],
+  get_available_grok_versions: [],
+  get_available_kimi_versions: [],
+  get_available_antigravity_versions: [],
   // Terminal
   kill_all_terminals: 0,
   has_active_terminal: false,
 
   // Sessions lifecycle
   check_resumable_sessions: [],
+  list_pending_wakeups: [],
   list_archived_sessions: [],
   close_session: null,
   archive_session: null,
@@ -113,12 +141,31 @@ export const defaultResponses: Record<string, unknown> = {
   list_claude_skills: [],
   list_claude_commands: [],
   list_codex_skills: [],
+  list_opencode_skills: [],
+  list_cursor_skills: [],
+  list_pi_skills: [],
+  list_commandcode_skills: [],
+  list_grok_skills: [],
+  list_plugin_skills: [],
+  list_claude_output_styles: [],
   resolve_claude_command: { content: '', allowed_tools: [] },
+
+  list_attached_saved_contexts: [],
+  list_saved_contexts: { contexts: [] },
+  get_sentry_issue_context_contents: [],
+  list_loaded_linear_issue_contexts: [],
+  set_worktree_last_opened: null,
+  set_session_last_opened: null,
+  update_session_state: null,
 
   // Files
   list_worktree_files: [],
 
   // GitHub
+  list_loaded_issue_contexts: [],
+  list_loaded_pr_contexts: [],
+  list_loaded_security_contexts: [],
+  list_loaded_advisory_contexts: [],
   list_github_issues: { issues: [], has_next_page: false },
   list_github_prs: [],
 

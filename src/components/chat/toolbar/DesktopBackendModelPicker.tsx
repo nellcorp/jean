@@ -1,4 +1,4 @@
-import { ChevronsUpDown, Zap } from 'lucide-react'
+import { ChevronsUpDown, Zap } from '@/components/icons/reicon'
 import { useCallback, useMemo, useState } from 'react'
 import {
   Popover,
@@ -229,7 +229,7 @@ export function DesktopBackendModelPicker({
                 <span className="truncate">· {selectedModelLabel}</span>
                 {getModelFastInfo(selectedBackend, selectedModel).isFast && (
                   <Zap
-                    className="h-3 w-3 shrink-0 fill-current text-yellow-500"
+                    className="h-3 w-3 shrink-0 fill-current text-warning"
                     aria-label="Fast mode"
                   />
                 )}

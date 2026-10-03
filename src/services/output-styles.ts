@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { invoke } from '@/lib/transport'
+import { invokeForServer } from '@/lib/transport'
+import { useSettingsTargetServerId } from '@/lib/settings-target'
 import { logger } from '@/lib/logger'
 import { isTauri } from '@/services/projects'
 import type {
@@ -10,22 +11,39 @@ import type {
 
 export const outputStyleQueryKeys = {
   all: ['claude-output-styles'] as const,
-  list: (worktreePath?: string | null) =>
-    [...outputStyleQueryKeys.all, 'list', worktreePath ?? 'global'] as const,
-  document: (path: string) =>
-    [...outputStyleQueryKeys.all, 'document', path] as const,
+  scope: (serverId = 'local') =>
+    serverId === 'local'
+      ? outputStyleQueryKeys.all
+      : (['claude-output-styles-server', serverId] as const),
+  list: (worktreePath?: string | null, serverId = 'local') =>
+    [
+      ...outputStyleQueryKeys.scope(serverId),
+      'list',
+      worktreePath ?? 'global',
+    ] as const,
+  document: (path: string, serverId = 'local') =>
+    [...outputStyleQueryKeys.scope(serverId), 'document', path] as const,
 }
 
-export function useClaudeOutputStyles(worktreePath?: string | null) {
+export function useClaudeOutputStyles(
+  worktreePath?: string | null,
+  targetServerId?: string
+) {
+  const settingsServerId = useSettingsTargetServerId()
+  const serverId = targetServerId ?? settingsServerId
   return useQuery({
-    queryKey: outputStyleQueryKeys.list(worktreePath),
+    queryKey: outputStyleQueryKeys.list(worktreePath, serverId),
     queryFn: async (): Promise<ClaudeOutputStyle[]> => {
       if (!isTauri()) return []
 
       try {
-        return await invoke<ClaudeOutputStyle[]>('list_claude_output_styles', {
-          worktreePath: worktreePath ?? undefined,
-        })
+        return await invokeForServer<ClaudeOutputStyle[]>(
+          serverId,
+          'list_claude_output_styles',
+          {
+            worktreePath: worktreePath ?? undefined,
+          }
+        )
       } catch (error) {
         logger.error('Failed to load Claude output styles', { error })
         return []
@@ -37,19 +55,25 @@ export function useClaudeOutputStyles(worktreePath?: string | null) {
 }
 
 export function useReadOutputStyle(path: string | null) {
+  const serverId = useSettingsTargetServerId()
   return useQuery({
-    queryKey: outputStyleQueryKeys.document(path ?? ''),
+    queryKey: outputStyleQueryKeys.document(path ?? '', serverId),
     enabled: Boolean(path) && isTauri(),
     queryFn: async (): Promise<OutputStyleDocument | null> => {
       if (!path) return null
-      return await invoke<OutputStyleDocument>('read_claude_output_style', {
-        path,
-      })
+      return await invokeForServer<OutputStyleDocument>(
+        serverId,
+        'read_claude_output_style',
+        {
+          path,
+        }
+      )
     },
   })
 }
 
 export function useSaveOutputStyle() {
+  const serverId = useSettingsTargetServerId()
   const queryClient = useQueryClient()
 
   return useMutation({
@@ -61,7 +85,7 @@ export function useSaveOutputStyle() {
       scope: OutputStyleScope
       worktreePath?: string | null
     }): Promise<string> =>
-      await invoke<string>('save_claude_output_style', {
+      await invokeForServer<string>(serverId, 'save_claude_output_style', {
         name: input.name,
         body: input.body,
         description: input.description ?? undefined,
@@ -70,12 +94,16 @@ export function useSaveOutputStyle() {
         worktreePath: input.worktreePath ?? undefined,
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: outputStyleQueryKeys.all })
+      queryClient.invalidateQueries({
+        queryKey: outputStyleQueryKeys.scope(serverId),
+      })
     },
   })
 }
 
-export function useInstallOutputStyle() {
+export function useInstallOutputStyle(targetServerId?: string) {
+  const settingsServerId = useSettingsTargetServerId()
+  const serverId = targetServerId ?? settingsServerId
   const queryClient = useQueryClient()
 
   return useMutation({
@@ -85,19 +113,22 @@ export function useInstallOutputStyle() {
       worktreePath?: string | null
       overwrite?: boolean
     }): Promise<string> =>
-      await invoke<string>('install_claude_output_style', {
+      await invokeForServer<string>(serverId, 'install_claude_output_style', {
         slug: input.slug,
         scope: input.scope ?? 'user',
         worktreePath: input.worktreePath ?? undefined,
         overwrite: input.overwrite,
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: outputStyleQueryKeys.all })
+      queryClient.invalidateQueries({
+        queryKey: outputStyleQueryKeys.scope(serverId),
+      })
     },
   })
 }
 
 export function useDeleteOutputStyle() {
+  const serverId = useSettingsTargetServerId()
   const queryClient = useQueryClient()
 
   return useMutation({
@@ -105,13 +136,15 @@ export function useDeleteOutputStyle() {
       path: string
       worktreePath?: string | null
     }): Promise<void> => {
-      await invoke('delete_claude_output_style', {
+      await invokeForServer(serverId, 'delete_claude_output_style', {
         path: input.path,
         worktreePath: input.worktreePath ?? undefined,
       })
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: outputStyleQueryKeys.all })
+      queryClient.invalidateQueries({
+        queryKey: outputStyleQueryKeys.scope(serverId),
+      })
     },
   })
 }

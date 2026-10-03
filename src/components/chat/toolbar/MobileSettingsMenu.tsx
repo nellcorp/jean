@@ -29,10 +29,11 @@ import {
   Sparkles,
   Star,
   Terminal,
-  Bug,
-} from 'lucide-react'
+  Sentry,
+} from '@/components/icons/reicon'
 import { useQueryClient } from '@tanstack/react-query'
 import { compareVersions } from '@/lib/version-utils'
+import { parseServerResourceKey } from '@/lib/server-resource'
 import { useClaudeOutputStyles } from '@/services/output-styles'
 import { DEFAULT_OUTPUT_STYLE } from '@/types/output-styles'
 import { toast } from 'sonner'
@@ -181,6 +182,7 @@ interface MobileSettingsMenuProps {
   prNumber?: number | null
   prDisplayStatus?: PrDisplayStatus | null
 
+  worktreePath?: string | null
   worktreeId?: string | null
   onAttach?: () => void
   runScripts?: string[]
@@ -237,6 +239,7 @@ export function MobileSettingsMenu({
   prNumber,
   prDisplayStatus,
   worktreeId,
+  worktreePath,
   onAttach,
   runScripts = EMPTY_RUN_SCRIPTS,
   onRunCommand,
@@ -339,6 +342,7 @@ export function MobileSettingsMenu({
   const isMobile = useIsMobile()
   const queryClient = useQueryClient()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [outputStyleSheetOpen, setOutputStyleSheetOpen] = useState(false)
   const [effortSheetOpen, setEffortSheetOpen] = useState(false)
   const [thinkingSheetOpen, setThinkingSheetOpen] = useState(false)
   const [mcpSheetOpen, setMcpSheetOpen] = useState(false)
@@ -353,7 +357,12 @@ export function MobileSettingsMenu({
     selectedProvider,
     selectedBackend
   )
-  const { data: allOutputStyles = [] } = useClaudeOutputStyles(null)
+  const { data: allOutputStyles = [] } = useClaudeOutputStyles(
+    worktreePath,
+    worktreeId
+      ? (parseServerResourceKey(worktreeId)?.serverId ?? 'local')
+      : undefined
+  )
   // Bundled presets need an install step, which the mobile menu does not offer.
   const outputStyles = useMemo(
     () => allOutputStyles.filter(style => style.installed),
@@ -372,6 +381,7 @@ export function MobileSettingsMenu({
   const { data: ports = [] } = usePorts(worktree?.path ?? null)
   const { data: openPRs } = useGitHubPRs(project?.path ?? null, 'open', {
     enabled: menuOpen && !!project?.path,
+    ownerId: project?.id,
   })
   const stackedOnPR = resolveStackedOnPr(
     worktree?.base_branch && worktree.base_branch !== project?.default_branch
@@ -633,50 +643,19 @@ export function MobileSettingsMenu({
           )}
 
           {selectedBackend === 'claude' && onOutputStyleChange && (
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                <Palette className="mr-2 h-4 w-4 text-muted-foreground" />
-                <span>Output style</span>
-                <span className="ml-auto truncate text-xs text-muted-foreground">
-                  {selectedOutputStyle ?? DEFAULT_OUTPUT_STYLE}
-                </span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
-                <DropdownMenuRadioGroup
-                  value={selectedOutputStyle ?? DEFAULT_OUTPUT_STYLE}
-                  onValueChange={value =>
-                    onOutputStyleChange(
-                      value === DEFAULT_OUTPUT_STYLE ? null : value
-                    )
-                  }
-                >
-                  <DropdownMenuRadioItem
-                    value={DEFAULT_OUTPUT_STYLE}
-                    onSelect={keepMenuOpenOnSelect}
-                  >
-                    {DEFAULT_OUTPUT_STYLE}
-                  </DropdownMenuRadioItem>
-                  {outputStyles.length > 0 && <DropdownMenuSeparator />}
-                  {outputStyles.map(style => (
-                    <DropdownMenuRadioItem
-                      key={`${style.source}:${style.name}`}
-                      value={style.name}
-                      disabled={Boolean(
-                        style.minCliVersion &&
-                          claudeCliVersion &&
-                          compareVersions(
-                            claudeCliVersion,
-                            style.minCliVersion
-                          ) < 0
-                      )}
-                      onSelect={keepMenuOpenOnSelect}
-                    >
-                      {style.name}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
+            <DropdownMenuItem
+              onSelect={() => {
+                setMenuOpen(false)
+                requestAnimationFrame(() => setOutputStyleSheetOpen(true))
+              }}
+            >
+              <Palette className="h-4 w-4 text-muted-foreground" />
+              <span>Output style</span>
+              <span className="ml-auto truncate text-xs text-muted-foreground">
+                {selectedOutputStyle ?? DEFAULT_OUTPUT_STYLE}
+              </span>
+              <ChevronRight className="ml-2 h-4 w-4 shrink-0" />
+            </DropdownMenuItem>
           )}
 
           <DropdownMenuItem onSelect={openBackendModelPicker}>
@@ -778,9 +757,7 @@ export function MobileSettingsMenu({
               <Plug
                 className={cn(
                   'h-4 w-4',
-                  activeMcpCount > 0
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : 'text-muted-foreground'
+                  activeMcpCount > 0 ? 'text-success' : 'text-muted-foreground'
                 )}
               />
               <span>MCP</span>
@@ -796,7 +773,7 @@ export function MobileSettingsMenu({
                   className={cn(
                     'mr-2 h-4 w-4',
                     activeMcpCount > 0
-                      ? 'text-emerald-600 dark:text-emerald-400'
+                      ? 'text-success'
                       : 'text-muted-foreground'
                   )}
                 />
@@ -1038,7 +1015,7 @@ export function MobileSettingsMenu({
                         handleViewIssue(ctx)
                       }}
                     >
-                      <CircleDot className="h-4 w-4 text-green-500" />
+                      <CircleDot className="h-4 w-4 text-success" />
                       <span className="truncate">
                         #{ctx.number} {ctx.title}
                       </span>
@@ -1073,7 +1050,7 @@ export function MobileSettingsMenu({
                         handleViewPR(ctx)
                       }}
                     >
-                      <GitPullRequest className="h-4 w-4 text-green-500" />
+                      <GitPullRequest className="h-4 w-4 text-success" />
                       <span className="truncate">
                         #{ctx.number} {ctx.title}
                       </span>
@@ -1109,7 +1086,7 @@ export function MobileSettingsMenu({
                         handleViewSecurityAlert(ctx)
                       }}
                     >
-                      <Shield className="h-4 w-4 text-orange-500" />
+                      <Shield className="h-4 w-4 text-warning" />
                       <span className="truncate">
                         #{ctx.number} {ctx.packageName} ({ctx.severity})
                       </span>
@@ -1148,7 +1125,7 @@ export function MobileSettingsMenu({
                         handleViewAdvisory(ctx)
                       }}
                     >
-                      <ShieldAlert className="h-4 w-4 text-orange-500" />
+                      <ShieldAlert className="h-4 w-4 text-warning" />
                       <span className="truncate">
                         {ctx.ghsaId} — {ctx.summary}
                       </span>
@@ -1188,7 +1165,7 @@ export function MobileSettingsMenu({
                         handleViewLinear(ctx)
                       }}
                     >
-                      <LinearIcon className="h-4 w-4 text-violet-500" />
+                      <LinearIcon className="h-4 w-4 text-violet-600 dark:text-violet-400" />
                       <span className="truncate">
                         {ctx.identifier} {ctx.title}
                       </span>
@@ -1229,7 +1206,7 @@ export function MobileSettingsMenu({
                         handleViewSentry(ctx)
                       }}
                     >
-                      <Bug className="h-4 w-4 text-orange-500" />
+                      <Sentry className="h-4 w-4 text-warning" />
                       <span className="truncate">
                         {ctx.shortId} {ctx.title}
                       </span>
@@ -1271,7 +1248,7 @@ export function MobileSettingsMenu({
                         handleViewSavedContext(ctx)
                       }}
                     >
-                      <FolderOpen className="h-4 w-4 text-blue-500" />
+                      <FolderOpen className="h-4 w-4 text-info" />
                       <span className="truncate">{ctx.name || ctx.slug}</span>
                     </DropdownMenuItem>
                   ))}
@@ -1281,6 +1258,61 @@ export function MobileSettingsMenu({
           )}
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <Sheet open={outputStyleSheetOpen} onOpenChange={setOutputStyleSheetOpen}>
+        <SheetContent
+          side="bottom"
+          className="max-h-[75svh] overflow-hidden rounded-t-xl p-0"
+          showCloseButton={false}
+        >
+          <SheetHeader className="shrink-0 border-b px-4 py-3 text-left">
+            <SheetTitle>Select output style</SheetTitle>
+            <SheetDescription>
+              Choose how Claude formats its responses.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="max-h-[60svh] overflow-y-auto px-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
+            {[
+              {
+                name: DEFAULT_OUTPUT_STYLE,
+                source: 'default',
+                minCliVersion: null,
+              },
+              ...outputStyles,
+            ].map(style => {
+              const selected =
+                style.name === (selectedOutputStyle ?? DEFAULT_OUTPUT_STYLE)
+              return (
+                <button
+                  key={`${style.source}:${style.name}`}
+                  type="button"
+                  className={cn(
+                    'flex min-h-12 w-full items-center gap-3 rounded-lg px-3 text-left active:bg-accent disabled:opacity-50',
+                    selected && 'bg-accent'
+                  )}
+                  aria-pressed={selected}
+                  disabled={Boolean(
+                    style.minCliVersion &&
+                    claudeCliVersion &&
+                    compareVersions(claudeCliVersion, style.minCliVersion) < 0
+                  )}
+                  onClick={() => {
+                    onOutputStyleChange?.(
+                      style.name === DEFAULT_OUTPUT_STYLE ? null : style.name
+                    )
+                    setOutputStyleSheetOpen(false)
+                  }}
+                >
+                  <span className="min-w-0 flex-1 break-words">
+                    {style.name}
+                  </span>
+                  {selected && <Check className="h-4 w-4 shrink-0" />}
+                </button>
+              )
+            })}
+          </div>
+        </SheetContent>
+      </Sheet>
 
       <Sheet open={effortSheetOpen} onOpenChange={setEffortSheetOpen}>
         <SheetContent
@@ -1414,7 +1446,7 @@ export function MobileSettingsMenu({
                     className={cn(
                       'h-3.5 w-3.5',
                       favoritePackageScriptSet.has(script.name) &&
-                        'fill-yellow-500 text-yellow-500'
+                        'fill-warning text-warning'
                     )}
                   />
                 </button>

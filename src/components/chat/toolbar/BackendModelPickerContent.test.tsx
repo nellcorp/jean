@@ -4,6 +4,7 @@ import type * as ModelCatalogModule from '@/services/model-catalog'
 import { within } from '@testing-library/react'
 import { render, screen } from '@/test/test-utils'
 import { BackendModelPickerContent } from './BackendModelPickerContent'
+import type * as ModelCatalogService from '@/services/model-catalog'
 
 class ResizeObserverMock {
   observe() {
@@ -77,6 +78,12 @@ vi.mock('@/services/preferences', () => ({
     },
   }),
   usePatchPreferences: () => ({ mutate: patchPreferencesMutate }),
+}))
+
+vi.mock('@/services/model-catalog', async importOriginal => ({
+  ...(await importOriginal<typeof ModelCatalogService>()),
+  useModelCatalog: () => ({ data: undefined }),
+  useRefreshModelCatalog: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }))
 
 beforeEach(() => {
@@ -254,10 +261,10 @@ describe('BackendModelPickerContent', () => {
       name: 'Antigravity CLI (Beta)',
     })
 
-    expect(cursorTab.querySelector('.bg-yellow-500')).toBeNull()
-    expect(commandCodeTab.querySelector('.bg-yellow-500')).toBeNull()
-    expect(grokTab.querySelector('.bg-yellow-500')).toBeNull()
-    expect(antigravityTab.querySelector('.bg-yellow-500')).not.toBeNull()
+    expect(cursorTab.querySelector('.bg-warning')).toBeNull()
+    expect(commandCodeTab.querySelector('.bg-warning')).toBeNull()
+    expect(grokTab.querySelector('.bg-warning')).toBeNull()
+    expect(antigravityTab.querySelector('.bg-warning')).not.toBeNull()
   })
 
   it('lists CLI-reported Antigravity models ahead of static fallbacks', () => {
@@ -743,6 +750,10 @@ describe('BackendModelPickerContent', () => {
       />
     )
 
+    await user.type(
+      screen.getByPlaceholderText(/search codex models/i),
+      'GPT 5.6 Sol'
+    )
     await user.keyboard('{ArrowDown}')
     await user.keyboard('{Meta>}f{/Meta}')
 

@@ -1,15 +1,17 @@
 import { useCallback, useState, useRef, useEffect } from 'react'
-import { Folder, FolderOpen } from 'lucide-react'
+import { Folder, FolderOpen } from '@/components/icons/reicon'
 import { cn } from '@/lib/utils'
 import type { Project } from '@/types/projects'
 import { useProjectsStore } from '@/store/projects-store'
 import { useRenameFolder } from '@/services/projects'
 import { FolderContextMenu } from './FolderContextMenu'
+import { CollapsedCountBadge } from './CollapsedCountBadge'
 
 interface FolderTreeItemProps {
   folder: Project
   children: React.ReactNode
   depth: number
+  childCount: number
   isDropTarget?: boolean
 }
 
@@ -17,6 +19,7 @@ export function FolderTreeItem({
   folder,
   children,
   depth,
+  childCount,
   isDropTarget,
 }: FolderTreeItemProps) {
   const {
@@ -147,13 +150,18 @@ export function FolderTreeItem({
               onBlur={() => handleSubmitRename(true)}
               onKeyDown={handleKeyDown}
               aria-label="Rename folder"
-              className="flex-1 bg-transparent text-base outline-none ring-1 ring-primary/50 rounded px-1 md:text-sm"
+              className="min-w-0 flex-1 bg-transparent text-base outline-none ring-1 ring-primary/50 rounded px-1 md:text-sm"
               onClick={e => e.stopPropagation()}
               autoFocus
             />
           ) : (
             <span className="flex-1 truncate text-sm">{folder.name}</span>
           )}
+          <CollapsedCountBadge
+            count={childCount}
+            label="items"
+            isExpanded={isExpanded}
+          />
         </div>
 
         {/* Children (nested projects/folders) */}

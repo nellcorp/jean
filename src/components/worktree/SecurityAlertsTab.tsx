@@ -1,5 +1,10 @@
 import { useCallback, useMemo } from 'react'
-import { Loader2, Search, RefreshCw, AlertCircle } from 'lucide-react'
+import {
+  Loader2,
+  Search,
+  RefreshCw,
+  AlertCircle,
+} from '@/components/icons/reicon'
 import { isGhAuthError } from '@/services/github'
 import { GhAuthError } from '@/components/shared/GhAuthError'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -32,14 +37,14 @@ const ADVISORY_STATE_LABELS: Record<string, string> = {
 }
 
 const STATE_DOT_COLORS: Record<string, string> = {
-  open: 'bg-orange-500',
-  published: 'bg-orange-500',
-  fixed: 'bg-green-500',
+  open: 'bg-warning',
+  published: 'bg-warning',
+  fixed: 'bg-success',
   closed: 'bg-muted-foreground',
   dismissed: 'bg-muted-foreground',
   auto_dismissed: 'bg-muted-foreground',
-  triage: 'bg-yellow-500',
-  draft: 'bg-blue-500',
+  triage: 'bg-warning',
+  draft: 'bg-info',
 }
 
 export type SecuritySelection =
@@ -199,18 +204,15 @@ export function SecurityAlertsTab({
           >
             Include resolved alerts
           </label>
-          {!isLoading &&
-            !isLoadingAdvisories &&
-            !error &&
-            hasItems && (
-              <SelectAllControl
-                id="select-all-security"
-                allChecked={multi.allVisibleChecked}
-                someChecked={multi.someVisibleChecked}
-                onToggleAll={multi.toggleAllVisible}
-                ariaLabel="Select all visible security items"
-              />
-            )}
+          {!isLoading && !isLoadingAdvisories && !error && hasItems && (
+            <SelectAllControl
+              id="select-all-security"
+              allChecked={multi.allVisibleChecked}
+              someChecked={multi.someVisibleChecked}
+              onToggleAll={multi.toggleAllVisible}
+              ariaLabel="Select all visible security items"
+            />
+          )}
         </div>
       </div>
 

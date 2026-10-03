@@ -1,4 +1,4 @@
-import { CheckCircle, ShieldAlert, XCircle } from 'lucide-react'
+import { CheckCircle, ShieldAlert, XCircle } from '@/components/icons/reicon'
 import {
   Tooltip,
   TooltipContent,
@@ -50,7 +50,7 @@ export function McpStatusDot({
         <Tooltip>
           <TooltipTrigger asChild>
             <span>
-              <CheckCircle className="size-3 text-green-600 dark:text-green-400" />
+              <CheckCircle className="size-3 text-success" />
             </span>
           </TooltipTrigger>
           <TooltipContent>Connected</TooltipContent>
@@ -61,7 +61,7 @@ export function McpStatusDot({
         <Tooltip>
           <TooltipTrigger asChild>
             <span>
-              <ShieldAlert className="size-3 text-amber-600 dark:text-amber-400" />
+              <ShieldAlert className="size-3 text-warning" />
             </span>
           </TooltipTrigger>
           <TooltipContent>{authHint(backend)}</TooltipContent>
@@ -72,7 +72,7 @@ export function McpStatusDot({
         <Tooltip>
           <TooltipTrigger asChild>
             <span>
-              <XCircle className="size-3 text-red-600 dark:text-red-400" />
+              <XCircle className="size-3 text-destructive" />
             </span>
           </TooltipTrigger>
           <TooltipContent>Could not connect to server</TooltipContent>

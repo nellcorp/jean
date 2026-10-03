@@ -10,7 +10,7 @@ const dbg = (...args: unknown[]) => console.debug('[ONBOARDING:CLI]', ...args)
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@/lib/transport'
-import { Download, Loader2, RefreshCw } from 'lucide-react'
+import { Download, Loader2, RefreshCw } from '@/components/icons/reicon'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -522,6 +522,7 @@ export function AuthLoginState({
         terminalId={terminalId}
         command={command}
         commandArgs={commandArgs}
+        allowPasteInput={action === 'login'}
         className="h-[min(50dvh,380px)] min-h-[200px] sm:h-[360px]"
       />
 

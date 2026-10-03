@@ -10,7 +10,7 @@ import {
   Globe,
   ShieldAlert,
   Siren,
-} from 'lucide-react'
+} from '@/components/icons/reicon'
 import {
   Dialog,
   DialogContent,
@@ -40,11 +40,12 @@ import {
 import { usePreferences } from '@/services/preferences'
 import { getEditorLabel, getTerminalLabel } from '@/types/preferences'
 import { notify } from '@/lib/notifications'
-import { openExternal } from '@/lib/platform'
+import { openExternal, preOpenWindow } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import {
   canOpenInEditor,
-  canOpenNativeApps,
+  canOpenInFinder,
+  canOpenInTerminal,
 } from '@/lib/environment'
 import { resolvePortUrl } from '@/components/browser/default-tab-url'
 
@@ -109,12 +110,18 @@ export function OpenInModal() {
   // Finder/terminal: backend host can launch apps (local desktop, WSL headless,
   // or --allow-native-open). Editor also works from the native shell against a
   // remote Jean via local Zed + ssh://.
-  const canOpenLocally = canOpenNativeApps()
   const canOpenEditor = canOpenInEditor()
-  // Browser (web access): the browser-based editor is always reachable via a
-  // `/code` URL, independent of native-open capability.
+  const canOpenTerminal = canOpenInTerminal()
   const hasWebEditor = useWebEditorUrl() !== null
   const editorAvailable = canOpenEditor || hasWebEditor
+
+  const selectedProject = useMemo(
+    () => projects?.find(project => project.id === selectedProjectId),
+    [projects, selectedProjectId]
+  )
+  const canOpenFinder = canOpenInFinder(
+    worktree?.serverId ?? selectedProject?.serverId
+  )
 
   const targetPath = useMemo(() => {
     if (worktree?.path) return worktree.path
@@ -122,12 +129,9 @@ export function OpenInModal() {
       const path = useChatStore.getState().getWorktreePath(selectedWorktreeId)
       if (path) return path
     }
-    if (selectedProjectId && projects) {
-      const project = projects.find(p => p.id === selectedProjectId)
-      if (project) return project.path
-    }
+    if (selectedProject) return selectedProject.path
     return null
-  }, [worktree?.path, selectedWorktreeId, selectedProjectId, projects])
+  }, [worktree?.path, selectedWorktreeId, selectedProject])
 
   const { data: ports } = usePorts(targetPath)
 
@@ -174,15 +178,17 @@ export function OpenInModal() {
 
     return allOptions.filter(opt => {
       if (opt.id === 'editor') return editorAvailable
-      if (opt.id === 'terminal' || opt.id === 'finder') return canOpenLocally
+      if (opt.id === 'terminal') return canOpenTerminal
+      if (opt.id === 'finder') return canOpenFinder
       return true
     })
   }, [
     editorAvailable,
     preferences?.editor,
     preferences?.terminal,
-    canOpenLocally,
+    canOpenFinder,
     canOpenEditor,
+    canOpenTerminal,
     worktree?.pr_url,
     worktree?.pr_number,
   ])
@@ -316,6 +322,12 @@ export function OpenInModal() {
     [baseOptions, portOptions, contextOptions]
   )
 
+  useEffect(() => {
+    if (!allOptions.some(option => option.id === selectedOption)) {
+      setSelectedOption(allOptions[0]?.id ?? 'github')
+    }
+  }, [allOptions, selectedOption])
+
   const useWideLayout = portOptions.length + contextOptions.length > 4
 
   const executeAction = useCallback(
@@ -347,6 +359,7 @@ export function OpenInModal() {
           openInEditor.mutate({
             worktreePath: targetPath,
             editor: preferences?.editor,
+            preOpenedWindow: hasWebEditor ? preOpenWindow() : null,
           })
           break
         case 'terminal':
@@ -381,7 +394,7 @@ export function OpenInModal() {
                 const url = remotes?.[0]?.url
                 if (url) openExternal(`${url}/tree/${branch}`)
               } else {
-                openRemotePicker(targetPath as string, remoteName => {
+                openRemotePicker(targetPath, remoteName => {
                   const remote = remotes.find(r => r.name === remoteName)
                   if (remote) openExternal(`${remote.url}/tree/${branch}`)
                 })
@@ -399,6 +412,7 @@ export function OpenInModal() {
     [
       portOptions,
       contextOptions,
+      hasWebEditor,
       targetPath,
       openInEditor,
       openInTerminal,

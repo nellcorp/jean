@@ -1,4 +1,9 @@
-import { test, expect, activateWorktree } from '../fixtures/tauri-mock'
+import {
+  test,
+  expect,
+  activateWorktree,
+  createJeanSession,
+} from '../fixtures/tauri-mock'
 
 test.describe('Chat Messaging', () => {
   test('send a message and receive a streamed response', async ({
@@ -12,7 +17,7 @@ test.describe('Chat Messaging', () => {
     await activateWorktree(mockPage, 'fuzzy-tiger')
 
     // Create a session first
-    await mockPage.locator('button[aria-label="New session"]').click()
+    await createJeanSession(mockPage)
     await mockPage.waitForTimeout(500)
 
     // Find the chat textarea and send a message
@@ -64,7 +69,7 @@ test.describe('Chat Messaging', () => {
     await activateWorktree(mockPage, 'fuzzy-tiger')
 
     // Create a session
-    await mockPage.locator('button[aria-label="New session"]').click()
+    await createJeanSession(mockPage)
     await mockPage.waitForTimeout(500)
 
     const textarea = mockPage.locator('textarea').first()

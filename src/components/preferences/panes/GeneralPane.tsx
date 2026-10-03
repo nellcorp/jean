@@ -6,11 +6,17 @@ import React, {
   useRef,
   type FC,
 } from 'react'
-import { invoke } from '@/lib/transport'
+import { invoke, signOutOfWebAccess } from '@/lib/transport'
 import { loginArgsForBackend } from '@/lib/cli-auth'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Loader2, Check, ChevronsUpDown, Play } from 'lucide-react'
+import {
+  Loader2,
+  Check,
+  ChevronsUpDown,
+  LogOut,
+  Play,
+} from '@/components/icons/reicon'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -193,6 +199,7 @@ import {
 } from '@/components/chat/toolbar/toolbar-options'
 import {
   formatCursorModelLabel,
+  formatGrokModelOptionLabel,
   formatOpencodeModelLabel,
   formatPiModelLabel,
 } from '@/components/chat/toolbar/toolbar-utils'
@@ -204,7 +211,11 @@ import {
   formatJeanVersionLabel,
 } from '@/lib/remote-version'
 import type { ThinkingLevel, EffortLevel } from '@/types/chat'
-import { hasBackend, isNativeApp } from '@/lib/environment'
+import {
+  hasBackend,
+  isNativeApp,
+  webAccessServerLabel,
+} from '@/lib/environment'
 import { isWindows, openExternal } from '@/lib/platform'
 import { isNewerVersion } from '@/lib/version-utils'
 import { cn } from '@/lib/utils'
@@ -353,8 +364,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
       : grokReasoningOptions,
     selectedGrokModel
   )
-  const selectedClaudeModel =
-    preferences?.selected_model ?? 'claude-opus-4-8[1m]'
+  const selectedClaudeModel = preferences?.selected_model ?? 'claude-opus-5-5'
   const claudeReasoning = getCatalogModelReasoning(
     modelCatalog,
     'claude',
@@ -1213,16 +1223,16 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
     availableGrokModels?.length
       ? availableGrokModels.map(model => ({
           value: `grok/${model.id}` as GrokModel,
-          label: model.label,
+          label: formatGrokModelOptionLabel(`grok/${model.id}`, model.label),
         }))
       : (GROK_MODEL_OPTIONS as { value: GrokModel; label: string }[])
   ).map(option => ({
     value: option.value,
-    label: option.label,
+    label: formatGrokModelOptionLabel(option.value, option.label),
   }))
   const selectedGrokModelLabel =
     grokModelOptions.find(option => option.value === selectedGrokModel)
-      ?.label ?? selectedGrokModel.replace(/^grok\//, '')
+      ?.label ?? formatGrokModelOptionLabel(selectedGrokModel)
   const selectedKimiModel = preferences?.selected_kimi_model ?? 'kimi/default'
   const kimiModelOptions: { value: KimiModel; label: string }[] = [
     ...(KIMI_MODEL_OPTIONS as { value: KimiModel; label: string }[]),
@@ -2488,7 +2498,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               </p>
             )}
             {codexStatus?.installed && codexStatus.sandbox_ready === false && (
-              <p className="text-xs text-amber-600 dark:text-amber-400 px-1">
+              <p className="text-xs text-warning px-1">
                 {codexStatus.sandbox_message ??
                   'Codex sandbox requires bubblewrap. Install it with: sudo apt install bubblewrap'}
               </p>
@@ -3029,7 +3039,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               }
             >
               <Select
-                value={preferences?.selected_model ?? 'claude-opus-4-8[1m]'}
+                value={preferences?.selected_model ?? 'claude-opus-5-5'}
                 onValueChange={handleModelChange}
               >
                 <SelectTrigger className="w-full sm:w-80">
@@ -3188,7 +3198,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
 
             <InlineField
               label="Goal execution mode"
-              description="Mode used when starting a Codex /goal"
+              description="Mode used when starting a Codex or Claude /goal"
             >
               <Select
                 value={preferences?.codex_goal_execution_mode ?? 'build'}
@@ -3209,7 +3219,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               description="Prompts sent while Codex is working are injected into the current turn instead of queued"
             >
               <Switch
-                checked={preferences?.codex_auto_steer_enabled ?? true}
+                checked={preferences?.codex_auto_steer_enabled ?? false}
                 onCheckedChange={handleCodexAutoSteerToggle}
               />
             </InlineField>
@@ -3316,7 +3326,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               description="Text-only prompts sent while OpenCode is working are injected into the current turn instead of queued (attachments always queue)"
             >
               <Switch
-                checked={preferences?.opencode_auto_steer_enabled ?? true}
+                checked={preferences?.opencode_auto_steer_enabled ?? false}
                 onCheckedChange={handleOpenCodeAutoSteerToggle}
               />
             </InlineField>
@@ -3475,7 +3485,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
               description="Text-only prompts sent while PI is working are injected into the current turn instead of queued (attachments always queue)"
             >
               <Switch
-                checked={preferences?.pi_auto_steer_enabled ?? true}
+                checked={preferences?.pi_auto_steer_enabled ?? false}
                 onCheckedChange={handlePiAutoSteerToggle}
               />
             </InlineField>
@@ -3678,7 +3688,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                 description="Text-only prompts sent while Grok is working are injected into the current turn instead of queued (attachments always queue)"
               >
                 <Switch
-                  checked={preferences?.grok_auto_steer_enabled ?? true}
+                  checked={preferences?.grok_auto_steer_enabled ?? false}
                   onCheckedChange={handleGrokAutoSteerToggle}
                 />
               </InlineField>
@@ -4169,7 +4179,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                             ? commandCodeModelOptions
                             : effectiveBuildBackend === 'grok'
                               ? grokModelOptions
-                            : remoteClaudeModelOptions
+                              : remoteClaudeModelOptions
                         ).map(option => (
                           <SelectItem key={option.value} value={option.value}>
                             {option.label}
@@ -4416,7 +4426,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                             ? commandCodeModelOptions
                             : effectiveYoloBackend === 'grok'
                               ? grokModelOptions
-                            : remoteClaudeModelOptions
+                              : remoteClaudeModelOptions
                         ).map(option => (
                           <SelectItem key={option.value} value={option.value}>
                             {option.label}
@@ -4602,6 +4612,18 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
                   ))}
                 </SelectContent>
               </Select>
+            </InlineField>
+
+            <InlineField
+              label="Combined git sync button"
+              description="Replace separate Pull and Push badges with one Sync button that does both"
+            >
+              <Switch
+                checked={preferences?.git_sync_button ?? true}
+                onCheckedChange={checked => {
+                  patchPreferences.mutate({ git_sync_button: checked })
+                }}
+              />
             </InlineField>
 
             <InlineField
@@ -5064,6 +5086,30 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             </div>
           </SettingsSection>
         </>
+      )}
+
+      {isGeneralScope && isWebAccessView && (
+        <SettingsSection
+          title="This browser"
+          description="You are signed in to this Jean server with an access token kept in this browser."
+          anchorId="pref-general-section-session"
+          variant="card"
+        >
+          <InlineField
+            label={webAccessServerLabel()}
+            description="Signing out forgets the token on this device only. The server keeps running and your other devices stay signed in."
+          >
+            <Button
+              variant="outline"
+              size="sm"
+              className="sm:ml-auto"
+              onClick={signOutOfWebAccess}
+            >
+              <LogOut className="size-3.5" />
+              Sign out
+            </Button>
+          </InlineField>
+        </SettingsSection>
       )}
 
       <AlertDialog

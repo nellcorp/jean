@@ -18,9 +18,10 @@ import rehypeRaw from 'rehype-raw'
 import remarkGfm from 'remark-gfm'
 import remend from 'remend'
 import { remarkFixInterruptedLists } from '@/lib/remark-fix-interrupted-lists'
-import { Copy, Check, Table, ListChecks } from 'lucide-react'
+import { Copy, Check, Table, ListChecks } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import { copyToClipboard } from '@/lib/clipboard'
+import { extractFilePath, openLocalFile } from '@/lib/local-file'
 import {
   Tooltip,
   TooltipTrigger,
@@ -29,7 +30,6 @@ import {
 import { Checkbox } from '@/components/ui/checkbox'
 import { cn } from '@/lib/utils'
 import { useChatStore } from '@/store/chat-store'
-import { useUIStore } from '@/store/ui-store'
 import { convertFileSrc } from '@/lib/transport'
 
 interface MarkdownProps {
@@ -89,17 +89,14 @@ function openLocalFileLink(href: string | undefined): boolean {
     return false
   }
 
-  const decodedHref = decodeURIComponent(href)
-  const isAbsolute = decodedHref.startsWith('/') || /^[a-z]:[\\/]/i.test(decodedHref)
-  const rootPath = useChatStore.getState().activeWorktreePath
-  if (!isAbsolute && !rootPath) return false
+  return openLocalFile(decodeURIComponent(href))
+}
 
-  const separator = rootPath?.includes('\\') ? '\\' : '/'
-  const path = isAbsolute
-    ? decodedHref
-    : `${rootPath?.replace(/[\\/]+$/, '')}${separator}${decodedHref.replace(/^[\\/]+/, '')}`
-  useUIStore.getState().setViewingFilePath(path)
-  return true
+function handleFilePathClick(event: React.MouseEvent<HTMLElement>) {
+  // Keep drag-to-select usable: only a plain click opens the file.
+  if (window.getSelection()?.toString().trim()) return
+  const path = event.currentTarget.dataset.filePath
+  if (path && !openLocalFile(path)) toast.error('Cannot resolve file path')
 }
 
 function CodeBlock({ children }: { children: ReactNode }) {
@@ -317,7 +314,9 @@ function TableBlock({ children, tableOffset }: TableBlockProps) {
                 type="button"
                 onClick={handleToggleChecklist}
                 className={checklistEnabled ? activeBtnClass : btnClass}
-                aria-label={checklistEnabled ? 'Turn off checklist' : 'Toggle checklist'}
+                aria-label={
+                  checklistEnabled ? 'Turn off checklist' : 'Toggle checklist'
+                }
                 aria-pressed={checklistEnabled}
               >
                 <ListChecks className="size-4" />
@@ -330,7 +329,12 @@ function TableBlock({ children, tableOffset }: TableBlockProps) {
         )}
         <Tooltip>
           <TooltipTrigger asChild>
-            <button type="button" onClick={() => handleCopy('markdown')} aria-label="Copy as Markdown" className={btnClass}>
+            <button
+              type="button"
+              onClick={() => handleCopy('markdown')}
+              aria-label="Copy as Markdown"
+              className={btnClass}
+            >
               {copiedFormat === 'markdown' ? (
                 <Check className="size-4" />
               ) : (
@@ -342,7 +346,12 @@ function TableBlock({ children, tableOffset }: TableBlockProps) {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <button type="button" onClick={() => handleCopy('tsv')} aria-label="Copy for spreadsheet" className={btnClass}>
+            <button
+              type="button"
+              onClick={() => handleCopy('tsv')}
+              aria-label="Copy for spreadsheet"
+              className={btnClass}
+            >
               {copiedFormat === 'tsv' ? (
                 <Check className="size-4" />
               ) : (
@@ -410,9 +419,21 @@ const components: Components = {
     if (isBlock) {
       return <code className={className}>{children}</code>
     }
-    // Inline code
+    // Inline code. File paths open in the file viewer on click, and get
+    // Open/Download items in the message context menu
+    // (see MessageThreadContextMenu).
+    const filePath =
+      typeof children === 'string' ? extractFilePath(children) : null
     return (
-      <code className="rounded-md bg-muted px-1.5 py-0.5 text-[0.875em]">
+      <code
+        className={cn(
+          'rounded-md bg-muted px-1.5 py-0.5 text-[0.875em]',
+          filePath &&
+            'underline decoration-dotted underline-offset-2 hover:text-foreground'
+        )}
+        data-file-path={filePath ?? undefined}
+        onClick={filePath ? handleFilePathClick : undefined}
+      >
         {children}
       </code>
     )

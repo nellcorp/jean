@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Loader2 } from 'lucide-react'
+import { Loader2 } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { invoke } from '@/lib/transport'

@@ -1,9 +1,25 @@
 import { useQuery } from '@tanstack/react-query'
-import { invoke } from '@/lib/transport'
+import { invoke, invokeForServer } from '@/lib/transport'
+import { parseServerResourceKey } from '@/lib/server-resource'
+import { LOCAL_SERVER_ID } from '@/types/server-resource'
 import { logger } from '@/lib/logger'
 import type { OutlineCollection } from '@/types/outline'
 import { isTauri, useProjects } from './projects'
 import { usePreferences } from './preferences'
+
+function invokeProject<T>(
+  command: string,
+  args: { projectId: string } & Record<string, unknown>
+): Promise<T> {
+  const reference = parseServerResourceKey(args.projectId)
+  const resourceArgs = {
+    ...args,
+    projectId: reference?.resourceId ?? args.projectId,
+  }
+  return reference && reference.serverId !== LOCAL_SERVER_ID
+    ? invokeForServer<T>(reference.serverId, command, resourceArgs)
+    : invoke<T>(command, resourceArgs)
+}
 
 function hasValue(value: string | null | undefined): boolean {
   return !!value?.trim()
@@ -15,12 +31,16 @@ function hasValue(value: string | null | undefined): boolean {
  */
 export function useHasOutlineAccess(projectId: string | null): boolean {
   const { data: projects } = useProjects()
-  const { data: preferences } = usePreferences()
+  const serverId =
+    parseServerResourceKey(projectId ?? '')?.serverId ?? LOCAL_SERVER_ID
+  const { data: preferences } = usePreferences(serverId)
   const project = projects?.find(p => p.id === projectId)
 
   const hasKey =
     hasValue(project?.outline_api_key ?? null) ||
-    hasValue(preferences?.outline_api_key ?? null)
+    hasValue(preferences?.outline_api_key ?? null) ||
+    (serverId !== LOCAL_SERVER_ID &&
+      preferences?.outline_api_key_configured === true)
   const hasUrl = hasValue(preferences?.outline_url ?? null)
   return hasKey && hasUrl
 }
@@ -52,7 +72,7 @@ export function useOutlineCollections(
 
       try {
         logger.debug('Fetching Outline collections', { projectId })
-        const result = await invoke<OutlineCollection[]>(
+        const result = await invokeProject<OutlineCollection[]>(
           'list_outline_collections',
           { projectId }
         )

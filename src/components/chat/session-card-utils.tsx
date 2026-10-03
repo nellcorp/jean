@@ -1,7 +1,6 @@
 import type {
   IndicatorShape,
   IndicatorStatus,
-  IndicatorVariant,
 } from '@/components/ui/status-indicator'
 import {
   isAskUserQuestion,
@@ -29,6 +28,7 @@ import {
   preferResolvedCliCommand,
 } from '@/services/cli-binary'
 import { findPlanFilePath, resolvePlanContent } from './tool-call-utils'
+import { shouldShowPermissionApproval } from './permission-approval-utils'
 
 /**
  * Lossless session status for canvas/sidebar/tabs/summaries.
@@ -55,9 +55,12 @@ export type SessionStatus =
   | 'crashed'
 
 /**
- * User-settable status overrides. Automatic live states (running, waiting for
- * input, permissions, …) still win while active; the override applies once the
- * session is idle/terminal so users can pin review/completed/cancelled/idle.
+ * User-settable status overrides. Automatic live states (running, scheduled,
+ * crashed) still win; the override applies once the session is idle/terminal
+ * so users can pin review/completed/cancelled/idle. Persisted waiting states
+ * (stale permission denials, unanswered plans) yield to an explicit
+ * completed/cancelled/idle override while no run is active — a new run clears
+ * the override.
  */
 export type ManualSessionStatus = 'idle' | 'review' | 'completed' | 'cancelled'
 
@@ -135,7 +138,6 @@ export interface SessionCardProps {
   onSelect: () => void
   onArchive: () => void
   onDelete: () => void
-  onPlanView: () => void
   onApprove?: () => void
   onYolo?: () => void
   onClearContextApprove?: () => void
@@ -161,7 +163,6 @@ export const statusConfig: Record<
   {
     label: string
     indicatorStatus: IndicatorStatus
-    indicatorVariant?: IndicatorVariant
     indicatorShape?: IndicatorShape
   }
 > = {
@@ -180,12 +181,10 @@ export const statusConfig: Record<
   yoloing: {
     label: 'Yoloing',
     indicatorStatus: 'running',
-    indicatorVariant: 'destructive',
   },
   reviewing: {
     label: 'Reviewing',
     indicatorStatus: 'running',
-    indicatorVariant: 'loading',
   },
   waiting: {
     label: 'Waiting',
@@ -505,13 +504,18 @@ export function computeSessionCardData(
     }
 
     // Check the last assistant message for pending questions/plans
+    let hasFollowUpUserMessage = false
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
+      if (msg?.role === 'user') hasFollowUpUserMessage = true
       if (msg?.role === 'assistant' && msg.tool_calls) {
-        // Check for unanswered questions
-        hasPendingQuestion = msg.tool_calls.some(
-          tc => isAskUserQuestion(tc) && !answeredSet?.has(tc.id)
-        )
+        // Check for unanswered questions (a later user message answers them,
+        // matching MessageItem)
+        hasPendingQuestion =
+          !hasFollowUpUserMessage &&
+          msg.tool_calls.some(
+            tc => isAskUserQuestion(tc) && !answeredSet?.has(tc.id)
+          )
         // Check for unanswered plan approval
         const hasExitPlan = msg.tool_calls.some(isPlanToolCall)
         if (hasExitPlan && !msg.plan_approved && !approvedPlanIds.has(msg.id)) {
@@ -549,8 +553,11 @@ export function computeSessionCardData(
     reviewingSessions,
   })
   const hasActionableStreamingPlan = hasStreamingExitPlan && !sessionSending
+  // A previous turn's tool calls can remain in the store while the next turn
+  // runs. Only pending request queues can require input during an active turn.
   const isWaitingFromMessages =
     runCanBeWaiting &&
+    !sessionSending &&
     (hasStreamingQuestion ||
       hasActionableStreamingPlan ||
       hasPendingQuestion ||
@@ -558,7 +565,7 @@ export function computeSessionCardData(
   // When sessionSending is true, persisted waiting_for_input from TanStack Query
   // may be stale (not yet refetched after approval). Only use it as fallback when idle.
   const isWaiting = sessionSending
-    ? isWaitingFromMessages || isExplicitlyWaiting
+    ? isWaitingFromMessages
     : isWaitingFromMessages || isExplicitlyWaiting || persistedWaitingForInput
 
   // hasExitPlanMode should also consider persisted state
@@ -584,8 +591,6 @@ export function computeSessionCardData(
   // Check for pending permission denials (Claude-style)
   const sessionDenials = pendingPermissionDenials[session.id] ?? []
   const persistedDenials = session.pending_permission_denials ?? []
-  const hasPermissionDenials =
-    sessionDenials.length > 0 || persistedDenials.length > 0
   const permissionDenialCount =
     sessionDenials.length > 0 ? sessionDenials.length : persistedDenials.length
 
@@ -625,6 +630,12 @@ export function computeSessionCardData(
       session.selected_execution_mode ??
       'plan')
     : (executionModes[session.id] ?? session.selected_execution_mode ?? 'plan')
+  const hasPermissionDenials = shouldShowPermissionApproval({
+    pendingDenialsCount: permissionDenialCount,
+    isSending: sessionSending,
+    executionMode,
+    isCodexBackend: session.backend === 'codex',
+  })
 
   // Determine status — lossless priority matrix (actionable first, then active,
   // then terminal run outcomes). Never collapse cancelled/crashed into idle.
@@ -699,9 +710,18 @@ export function computeSessionCardData(
     sessionStatusOverrides: sessionStatusOverrides ?? {},
     reviewingSessions,
   })
-  // Manual override sits next to automatic status: live/actionable automatic
-  // states still win; otherwise the user-pinned override is displayed.
-  if (statusOverride && !isAutomaticPriorityStatus(automaticStatus)) {
+  // Manual override sits next to automatic status: live automatic states still
+  // win; otherwise the user-pinned override is displayed. Waiting states only
+  // win while a run is active — when idle they come from persisted flags the
+  // user explicitly dismissed by picking a status. 'review' is excluded because
+  // the backend also sets it automatically on run completion.
+  if (
+    statusOverride &&
+    (!isAutomaticPriorityStatus(automaticStatus) ||
+      (statusOverride !== 'review' &&
+        !sessionSending &&
+        isActionableWaitingStatus(automaticStatus)))
+  ) {
     status = statusOverride
   }
 
@@ -737,6 +757,70 @@ export function computeSessionCardData(
     planContent,
     pendingPlanMessageId,
     label,
+  }
+}
+
+/**
+ * Cache canvas card derivation by the immutable Session object and only the
+ * store entries that can affect that session. A project canvas subscribes to
+ * several live maps, so an update for one session should not rescan messages
+ * for every other session. WeakMap keys let deleted query objects be garbage
+ * collected instead of turning this optimization into another retention path.
+ */
+export function createSessionCardDataCache(): (
+  session: Session,
+  storeState: ChatStoreState
+) => SessionCardData {
+  const cache = new WeakMap<
+    Session,
+    {
+      fingerprint: readonly unknown[]
+      card: SessionCardData
+    }
+  >()
+
+  return (session, storeState) => {
+    const sessionId = session.id
+    const activeToolCalls = storeState.activeToolCalls[sessionId]
+    const streaming =
+      activeToolCalls && activeToolCalls.length > 0
+        ? storeState.getStreamingText(sessionId)
+        : null
+    const fingerprint: readonly unknown[] = [
+      storeState.getStreamingText,
+      storeState.sendingSessionIds[sessionId],
+      storeState.executingModes[sessionId],
+      storeState.executionModes[sessionId],
+      activeToolCalls,
+      storeState.answeredQuestions[sessionId],
+      storeState.waitingForInputSessionIds[sessionId],
+      storeState.reviewingSessions[sessionId],
+      storeState.sessionStatusOverrides[sessionId],
+      storeState.pendingPermissionDenials[sessionId],
+      storeState.pendingCodexPermissionRequests[sessionId],
+      storeState.pendingOpencodePermissionRequests[sessionId],
+      storeState.pendingCodexCommandApprovalRequests[sessionId],
+      storeState.pendingCodexUserInputRequests[sessionId],
+      storeState.pendingCodexMcpElicitationRequests[sessionId],
+      storeState.pendingCodexDynamicToolCallRequests[sessionId],
+      storeState.sessionLabels[sessionId],
+      streaming?.content ?? null,
+      streaming && streaming.blocks.length > 0 ? streaming.blocks : null,
+    ]
+    const previous = cache.get(session)
+    if (
+      previous &&
+      previous.fingerprint.length === fingerprint.length &&
+      previous.fingerprint.every((value, index) =>
+        Object.is(value, fingerprint[index])
+      )
+    ) {
+      return previous.card
+    }
+
+    const card = computeSessionCardData(session, storeState)
+    cache.set(session, { fingerprint, card })
+    return card
   }
 }
 
@@ -776,7 +860,8 @@ export function getResumeSessionId(session: Session): string | null {
   if (session.backend === 'pi') return session.pi_session_id ?? null
   if (session.backend === 'grok') return session.grok_session_id ?? null
   if (session.backend === 'kimi') return session.kimi_session_id ?? null
-  if (session.backend === 'antigravity') return session.antigravity_session_id ?? null
+  if (session.backend === 'antigravity')
+    return session.antigravity_session_id ?? null
   return null
 }
 

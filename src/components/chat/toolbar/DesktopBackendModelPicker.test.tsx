@@ -4,6 +4,7 @@ import type * as ModelCatalogModule from '@/services/model-catalog'
 import { render, screen, within } from '@/test/test-utils'
 import { DesktopBackendModelPicker } from './DesktopBackendModelPicker'
 import type * as EnvironmentModule from '@/lib/environment'
+import type * as ModelCatalogService from '@/services/model-catalog'
 
 class ResizeObserverMock {
   observe() {
@@ -72,6 +73,12 @@ vi.mock('@/services/pi-cli', () => ({
   useAvailablePiModels: () => ({
     data: modelMocks.piModels,
   }),
+}))
+
+vi.mock('@/services/model-catalog', async importOriginal => ({
+  ...(await importOriginal<typeof ModelCatalogService>()),
+  useModelCatalog: () => ({ data: undefined }),
+  useRefreshModelCatalog: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }))
 
 beforeEach(() => {

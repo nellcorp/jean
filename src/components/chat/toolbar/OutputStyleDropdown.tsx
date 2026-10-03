@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from 'react'
-import { Palette } from 'lucide-react'
+import { Palette } from '@/components/icons/reicon'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,6 +14,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { parseServerResourceKey } from '@/lib/server-resource'
 import { cn } from '@/lib/utils'
 import { compareVersions } from '@/lib/version-utils'
 import {
@@ -26,6 +27,7 @@ import type { ClaudeOutputStyle } from '@/types/output-styles'
 interface OutputStyleDropdownProps {
   selectedOutputStyle: string | null
   worktreePath?: string | null
+  worktreeId?: string | null
   cliVersion?: string | null
   disabled?: boolean
   onOutputStyleChange: (style: string | null) => void
@@ -44,14 +46,18 @@ function isUnavailable(style: ClaudeOutputStyle, cliVersion?: string | null) {
 export function OutputStyleDropdown({
   selectedOutputStyle,
   worktreePath,
+  worktreeId,
   cliVersion,
   disabled = false,
   onOutputStyleChange,
   className,
   align = 'start',
 }: OutputStyleDropdownProps) {
-  const { data: styles = [] } = useClaudeOutputStyles(worktreePath)
-  const installOutputStyle = useInstallOutputStyle()
+  const serverId = worktreeId
+    ? (parseServerResourceKey(worktreeId)?.serverId ?? 'local')
+    : undefined
+  const { data: styles = [] } = useClaudeOutputStyles(worktreePath, serverId)
+  const installOutputStyle = useInstallOutputStyle(serverId)
 
   const { builtIns, custom, bundledByCategory } = useMemo(() => {
     const builtIns = styles.filter(style => style.source === 'built-in')
