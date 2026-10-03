@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
+import type * as ModelCatalogModule from '@/services/model-catalog'
 import { render, screen, within } from '@/test/test-utils'
 import { DesktopBackendModelPicker } from './DesktopBackendModelPicker'
 import type * as EnvironmentModule from '@/lib/environment'
@@ -16,6 +17,15 @@ class ResizeObserverMock {
     return undefined
   }
 }
+
+vi.mock('@/services/model-catalog', async importOriginal => {
+  const actual = await importOriginal<typeof ModelCatalogModule>()
+  return {
+    ...actual,
+    // Use the production fallback without fetching the live CDN catalog.
+    useModelCatalog: () => ({ data: undefined }),
+  }
+})
 
 vi.stubGlobal('ResizeObserver', ResizeObserverMock)
 HTMLCanvasElement.prototype.getContext = vi.fn(() => null)
@@ -177,9 +187,9 @@ describe('DesktopBackendModelPicker', () => {
     await user.click(
       within(list as HTMLElement).getByRole('tab', { name: 'Codex' })
     )
-    await user.click(within(list as HTMLElement).getByText('GPT 5.4'))
+    await user.click(within(list as HTMLElement).getByText('GPT 5.6 Sol'))
 
-    expect(onBackendModelChange).toHaveBeenCalledWith('codex', 'gpt-5.4')
+    expect(onBackendModelChange).toHaveBeenCalledWith('codex', 'gpt-5.6-sol')
     expect(onModelChange).not.toHaveBeenCalled()
   })
 
@@ -206,10 +216,10 @@ describe('DesktopBackendModelPicker', () => {
 
     const searchInput =
       await screen.findByPlaceholderText(/search codex models/i)
-    await user.type(searchInput, 'gpt 5.4')
-    await user.click(screen.getByText('GPT 5.4'))
+    await user.type(searchInput, 'gpt 5.6 sol')
+    await user.click(screen.getByText('GPT 5.6 Sol'))
 
-    expect(onModelChange).toHaveBeenCalledWith('gpt-5.4')
+    expect(onModelChange).toHaveBeenCalledWith('gpt-5.6-sol')
     expect(onBackendModelChange).not.toHaveBeenCalled()
   })
 

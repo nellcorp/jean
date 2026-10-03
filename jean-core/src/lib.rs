@@ -929,6 +929,37 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn cli_auto_selection_only_applies_to_absent_raw_source_fields() {
+        for field in [
+            "claude_cli_source",
+            "codex_cli_source",
+            "opencode_cli_source",
+            "coderabbit_cli_source",
+        ] {
+            assert!(should_auto_select_cli_source(None, field));
+            assert!(should_auto_select_cli_source(Some(&json!({})), field));
+            for source in [json!("jean"), json!("path"), json!(""), json!(null)] {
+                let mut raw = json!({});
+                raw[field] = source;
+                assert!(!should_auto_select_cli_source(Some(&raw), field));
+            }
+            assert!(should_auto_select_cli_source(
+                Some(&json!({"theme": "dark"})),
+                field
+            ));
+        }
+        let raw = json!({"claude_cli_source": "jean"});
+        assert!(!should_auto_select_cli_source(
+            Some(&raw),
+            "claude_cli_source"
+        ));
+        assert!(should_auto_select_cli_source(
+            Some(&raw),
+            "codex_cli_source"
+        ));
+    }
+
+    #[test]
     fn cli_source_auto_selection_only_applies_before_a_source_is_saved() {
         assert!(should_auto_select_cli_source(None, "codex_cli_source"));
         assert!(should_auto_select_cli_source(

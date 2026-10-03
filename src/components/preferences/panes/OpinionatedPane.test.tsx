@@ -124,7 +124,7 @@ describe('OpinionatedPane', () => {
       within(superpowersRow as HTMLElement).getByText('Superpowers')
     )
 
-    expect(screen.getByText('Backend status')).toBeInTheDocument()
+    expect(await screen.findByText('Backend status')).toBeInTheDocument()
     expect(screen.getByText('Claude')).toBeInTheDocument()
     expect(screen.getByText('Codex')).toBeInTheDocument()
     expect(screen.getByText('OpenCode')).toBeInTheDocument()
@@ -146,7 +146,7 @@ describe('OpinionatedPane', () => {
     if (!cavemanHeader) throw new Error('Expected Caveman card header')
 
     expect(
-      within(cavemanHeader as HTMLElement).getByText('Partial')
+      await within(cavemanHeader as HTMLElement).findByText('Partial')
     ).toBeInTheDocument()
     expect(
       within(cavemanHeader as HTMLElement).getByText('Reinstall')
@@ -165,9 +165,9 @@ describe('OpinionatedPane', () => {
     expect(header).toHaveClass('flex-col')
     expect(header).toHaveClass('sm:flex-row')
     expect(
-      within(header as HTMLElement)
-        .getByText('Reinstall')
-        .closest('span')
+      (await within(header as HTMLElement).findByText('Reinstall')).closest(
+        'span'
+      )
     ).toHaveClass('flex-wrap')
   })
 
@@ -198,7 +198,7 @@ describe('OpinionatedPane', () => {
     if (!rtkCard) throw new Error('Expected RTK card')
 
     expect(
-      within(rtkCard as HTMLElement).getByRole('button', {
+      await within(rtkCard as HTMLElement).findByRole('button', {
         name: 'Unsupported',
       })
     ).toBeDisabled()

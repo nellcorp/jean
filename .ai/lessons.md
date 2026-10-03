@@ -111,3 +111,18 @@
 - UI chrome is monochrome (`primary`, `foreground`, `muted-foreground`, `accent`). Use color only for status.
 - Status colors: `success`, `warning`, `info`, `destructive` (+ `*-foreground` on solid backgrounds). They have light and dark values in `src/App.css`; opacity modifiers work (`bg-warning/10`).
 - Do not add hardcoded hues such as `text-yellow-400`: they are tuned for one theme and fail contrast in the other. For categorical identity colors (file types, brands, GitHub closed/merged purple), use a `-600` + `dark:-400` pair.
+
+## Make managed installation reachable before source selection
+
+- Offer installation directly on the managed-source card even when PATH is selected; do not require selecting an absent installation first.
+- Track managed installation separately from effective execution availability. Settings can show the selected source as missing without hiding a usable fallback backend elsewhere.
+
+## Typecheck test mocks before handing back
+
+- Verify module exports before referencing fixtures in partial mocks. Missing exports can silently return undefined at runtime.
+- Run `bun run typecheck` alongside targeted tests; passing runtime tests alone does not validate typed mock setup.
+
+## Keep small fixes fast
+
+- Finish production edits and review before the final Docker build; do not trigger another expensive image build for a late review correction.
+- Reuse a cached Rust quality container and report a short ETA when verification dominates the task.
