@@ -8,10 +8,10 @@ import {
   GitPullRequest,
   Shield,
   ShieldAlert,
-  Bug,
-} from 'lucide-react'
+  Sentry,
+} from '@/components/icons/reicon'
 import { LinearIcon } from '@/components/icons/LinearIcon'
-import type { LucideIcon } from 'lucide-react'
+import type { LucideIcon } from '@/components/icons/reicon'
 import {
   Dialog,
   DialogContent,
@@ -22,6 +22,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Markdown } from '@/components/ui/markdown'
 import { cn } from '@/lib/utils'
 import { usePreferences } from '@/services/preferences'
+import { parseServerResourceKey } from '@/lib/server-resource'
 import { useGhLogin } from '@/hooks/useGhLogin'
 import { IssuePreviewModal } from '@/components/worktree/IssuePreviewModal'
 import { githubQueryKeys } from '@/services/github'
@@ -50,7 +51,7 @@ const TABS: Tab[] = [
   { id: 'prs', label: 'PRs', key: '3', icon: GitPullRequest },
   { id: 'security', label: 'Security', key: '4', icon: Shield },
   { id: 'linear', label: 'Linear', key: '5', icon: LinearIcon },
-  { id: 'sentry', label: 'Sentry', key: '6', icon: Bug },
+  { id: 'sentry', label: 'Sentry', key: '6', icon: Sentry },
 ]
 
 interface LoadContextModalProps {
@@ -74,7 +75,10 @@ export function LoadContextModal({
 }: LoadContextModalProps) {
   const queryClient = useQueryClient()
   const { triggerLogin: triggerGhLogin, isGhInstalled } = useGhLogin()
-  const { data: preferences } = usePreferences()
+  const serverId = worktreeId
+    ? parseServerResourceKey(worktreeId)?.serverId
+    : undefined
+  const { data: preferences } = usePreferences(serverId)
 
   // Navigation state
   const [activeTab, setActiveTab] = useState<TabId>('issues')
@@ -582,15 +586,15 @@ export function LoadContextModal({
                 <DialogHeader>
                   <DialogTitle className="flex items-center gap-2">
                     {handlers.viewingContext.type === 'security' ? (
-                      <Shield className="h-4 w-4 text-orange-500" />
+                      <Shield className="h-4 w-4 text-warning" />
                     ) : handlers.viewingContext.type === 'advisory' ? (
-                      <ShieldAlert className="h-4 w-4 text-orange-500" />
+                      <ShieldAlert className="h-4 w-4 text-warning" />
                     ) : handlers.viewingContext.type === 'linear' ? (
-                      <LinearIcon className="h-4 w-4 text-violet-500" />
+                      <LinearIcon className="h-4 w-4 text-violet-600 dark:text-violet-400" />
                     ) : handlers.viewingContext.type === 'sentry' ? (
-                      <Bug className="h-4 w-4 text-orange-500" />
+                      <Sentry className="h-4 w-4 text-warning" />
                     ) : (
-                      <FolderOpen className="h-4 w-4 text-blue-500" />
+                      <FolderOpen className="h-4 w-4 text-muted-foreground" />
                     )}
                     {handlers.viewingContext.title}
                   </DialogTitle>

@@ -8,7 +8,7 @@ import {
   Plus,
   Settings,
   Star,
-} from 'lucide-react'
+} from '@/components/icons/reicon'
 import {
   Tooltip,
   TooltipTrigger,
@@ -138,8 +138,7 @@ export function QuickActionsTab({
     })
   }, [defaultBranch, branches])
 
-  const effectiveBaseBranch =
-    selectedBaseBranch || defaultBranch || undefined
+  const effectiveBaseBranch = selectedBaseBranch || defaultBranch || undefined
 
   // Remotes that actually have the *selected* base branch fetched. Parent may
   // pass default-branch remotes as a fallback while this query loads.
@@ -303,9 +302,7 @@ export function QuickActionsTab({
                             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
                           )}
                           aria-label={
-                            isStarred
-                              ? `Unstar ${branch}`
-                              : `Star ${branch}`
+                            isStarred ? `Unstar ${branch}` : `Star ${branch}`
                           }
                           aria-pressed={isStarred}
                           onClick={event => {
@@ -322,7 +319,7 @@ export function QuickActionsTab({
                           <Star
                             className={cn(
                               'h-3.5 w-3.5',
-                              isStarred && 'fill-yellow-500 text-yellow-500'
+                              isStarred && 'fill-warning text-warning'
                             )}
                           />
                         </button>

@@ -1,5 +1,10 @@
 import React, { useEffect, useMemo } from 'react'
-import { CheckCircle, Loader2, ShieldAlert, XCircle } from 'lucide-react'
+import {
+  CheckCircle,
+  Loader2,
+  ShieldAlert,
+  XCircle,
+} from '@/components/icons/reicon'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -18,6 +23,7 @@ import {
   useAllBackendsMcpHealth,
   groupServersByBackend,
   mcpKey,
+  isRequiredMcpServer,
   migrateLegacyMcpKeys,
 } from '@/services/mcp'
 import { useInstalledBackends } from '@/hooks/useInstalledBackends'
@@ -68,7 +74,7 @@ function HealthIndicator({
       return (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
+            <span className="flex items-center gap-1.5 text-xs text-success">
               <CheckCircle className="size-3.5" />
               connected
             </span>
@@ -80,7 +86,7 @@ function HealthIndicator({
       return (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+            <span className="flex items-center gap-1.5 text-xs text-warning">
               <ShieldAlert className="size-3.5" />
               needs auth
             </span>
@@ -92,7 +98,7 @@ function HealthIndicator({
       return (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className="flex items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+            <span className="flex items-center gap-1.5 text-xs text-destructive">
               <XCircle className="size-3.5" />
               connection failed
             </span>
@@ -212,16 +218,14 @@ export const McpServersPane: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <JeanMcpSection />
+      <JeanMcpSection mcpServers={mcpServers ?? []} />
       <AgentBrowserSection />
       <SettingsSection
         title="Default MCP Servers"
         anchorId="pref-mcp-section-default-servers"
       >
         <p className="text-sm text-muted-foreground">
-          Selected servers will be enabled by default in new sessions. You can
-          override per-session from the toolbar. Antigravity loads its
-          configured servers automatically.
+          Defaults for new sessions. Change a session from its toolbar.
         </p>
 
         {isLoading ? (
@@ -249,7 +253,7 @@ export const McpServersPane: React.FC = () => {
                   <div
                     key={`${backend}-${server.name}`}
                     className={cn(
-                      'flex items-center gap-3 rounded-md border px-4 py-3',
+                      'flex items-center gap-3 rounded-md border px-3 py-2',
                       server.disabled && 'opacity-50'
                     )}
                   >
@@ -261,7 +265,11 @@ export const McpServersPane: React.FC = () => {
                           enabledServersSet.has(mcpKey(backend, server.name)))
                       }
                       onCheckedChange={() => handleToggle(backend, server.name)}
-                      disabled={server.disabled || backend === 'antigravity'}
+                      disabled={
+                        server.disabled ||
+                        backend === 'antigravity' ||
+                        isRequiredMcpServer(server.name)
+                      }
                     />
                     <Label
                       htmlFor={`mcp-${backend}-${server.name}`}
@@ -285,7 +293,8 @@ export const McpServersPane: React.FC = () => {
                     <span className="text-xs text-muted-foreground">
                       {server.disabled
                         ? 'disabled'
-                        : backend === 'antigravity'
+                        : backend === 'antigravity' ||
+                            isRequiredMcpServer(server.name)
                           ? 'automatic'
                           : server.scope}
                     </span>

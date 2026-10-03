@@ -6,7 +6,7 @@ import {
   Github,
   ChevronDown,
   Settings,
-} from 'lucide-react'
+} from '@/components/icons/reicon'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -31,18 +31,22 @@ import { usePreferences } from '@/services/preferences'
 import { getOpenInDefaultLabel } from '@/types/preferences'
 import {
   canOpenInEditor,
-  canOpenNativeApps,
+  canOpenInFinder,
+  canOpenInTerminal,
 } from '@/lib/environment'
+import { preOpenWindow } from '@/lib/platform'
 import { useUIStore } from '@/store/ui-store'
 
 interface OpenInButtonProps {
   worktreePath: string
+  serverId?: string
   branch?: string | null
   className?: string
 }
 
 export function OpenInButton({
   worktreePath,
+  serverId,
   branch,
   className,
 }: OpenInButtonProps) {
@@ -53,11 +57,11 @@ export function OpenInButton({
   const openInFinder = useOpenWorktreeInFinder()
   const openOnGitHub = useOpenBranchOnGitHub()
 
-  const canNative = canOpenNativeApps()
+  const canFinder = canOpenInFinder(serverId)
   const canEditor = canOpenInEditor()
-  // In a browser (web access / remote client), the browser-based editor is
-  // always reachable via a `/code` URL — independent of native-open capability.
+  const canTerminal = canOpenInTerminal()
   const canWebEditor = useWebEditorUrl() !== null
+  const editorAvailable = canEditor || canWebEditor
 
   const openAction = useCallback(
     (target: string) => {
@@ -74,13 +78,22 @@ export function OpenInButton({
         case 'github':
           if (branch) openOnGitHub.mutate({ repoPath: worktreePath, branch })
           else
-            openInEditor.mutate({ worktreePath, editor: preferences?.editor })
+            openInEditor.mutate({
+              worktreePath,
+              editor: preferences?.editor,
+              preOpenedWindow: canWebEditor ? preOpenWindow() : null,
+            })
           break
         default:
-          openInEditor.mutate({ worktreePath, editor: preferences?.editor })
+          openInEditor.mutate({
+            worktreePath,
+            editor: preferences?.editor,
+            preOpenedWindow: canWebEditor ? preOpenWindow() : null,
+          })
       }
     },
     [
+      canWebEditor,
       openInEditor,
       openInTerminal,
       openInFinder,
@@ -95,17 +108,23 @@ export function OpenInButton({
   // Prefer the user's default when that target is available on this host.
   const preferred = preferences?.open_in ?? 'editor'
   const effectiveDefault =
-    preferred === 'editor' && canEditor
+    preferred === 'editor' && editorAvailable
       ? 'editor'
-      : (preferred === 'terminal' || preferred === 'finder') && canNative
+      : preferred === 'terminal' && canTerminal
         ? preferred
-        : preferred === 'github' && branch
-          ? 'github'
-          : canEditor
-            ? 'editor'
-            : branch
-              ? 'github'
-              : 'editor'
+        : preferred === 'finder' && canFinder
+          ? preferred
+          : preferred === 'github' && branch
+            ? 'github'
+            : editorAvailable
+              ? 'editor'
+              : canTerminal
+                ? 'terminal'
+                : canFinder
+                  ? 'finder'
+                  : branch
+                    ? 'github'
+                    : 'editor'
 
   const defaultLabel = getOpenInDefaultLabel(
     effectiveDefault,
@@ -113,40 +132,30 @@ export function OpenInButton({
     preferences?.terminal
   )
 
-  if (!canEditor && !canNative && !canWebEditor) return null
+  if (!editorAvailable && !canTerminal && !canFinder) return null
 
-  // In web/remote mode (no native app launching), render a simplified
-  // single-purpose "Open Editor" button that launches the browser-based
-  // editor. The native split-button below shows Finder/Terminal/GitHub
-  // options that don't apply.
-  if (canWebEditor && !canNative) {
-    if (!branch && !worktreePath) return null
+  if (canWebEditor && !canEditor && !canTerminal && !canFinder) {
     return (
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            variant="ghost"
-            className={`hidden h-7 rounded-md border border-border/50 bg-muted/50 px-2.5 text-xs text-muted-foreground hover:text-foreground sm:inline-flex ${className ?? ''}`}
-            onClick={() => openAction('editor')}
-          >
-            <Code className="mr-1.5 h-3.5 w-3.5" />
-            Open Editor
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>Open Editor</TooltipContent>
-      </Tooltip>
+      <Button
+        variant="ghost"
+        className={`hidden h-7 rounded-md border border-border/50 bg-muted/50 px-2.5 text-xs text-muted-foreground hover:text-foreground sm:inline-flex ${className ?? ''}`}
+        onClick={() => openAction('editor')}
+      >
+        <Code className="mr-1.5 h-3.5 w-3.5" />
+        Open Editor
+      </Button>
     )
   }
 
   return (
     <div
-      className={`hidden items-center rounded-md border border-border/50 bg-muted/50 sm:inline-flex ${className ?? ''}`}
+      className={`hidden h-7 items-center rounded-md border border-primary bg-primary sm:inline-flex dark:border-border/50 dark:bg-muted/50 ${className ?? ''}`}
     >
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             variant="ghost"
-            className="h-7 rounded-r-none border-0 px-2.5 text-xs text-muted-foreground hover:text-foreground"
+            className="h-full rounded-r-none border-0 px-2.5 text-xs text-primary-foreground/85 hover:bg-primary-foreground/10 hover:text-primary-foreground dark:text-muted-foreground dark:hover:text-foreground"
             onClick={() => openAction(effectiveDefault)}
           >
             Open in {defaultLabel}
@@ -154,19 +163,19 @@ export function OpenInButton({
         </TooltipTrigger>
         <TooltipContent>Open in {defaultLabel}</TooltipContent>
       </Tooltip>
-      <div className="h-4 w-px bg-border/50" />
+      <div className="h-4 w-px bg-primary-foreground/20 dark:bg-border/50" />
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-6 rounded-l-none border-0 px-0 text-muted-foreground hover:text-foreground"
+            className="h-full w-6 rounded-l-none border-0 px-0 text-primary-foreground/85 hover:bg-primary-foreground/10 hover:text-primary-foreground dark:text-muted-foreground dark:hover:text-foreground"
           >
             <ChevronDown className="h-3 w-3" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          {canEditor && (
+          {editorAvailable && (
             <DropdownMenuItem onSelect={() => openAction('editor')}>
               <Code className="h-4 w-4" />
               {getOpenInDefaultLabel(
@@ -176,7 +185,7 @@ export function OpenInButton({
               )}
             </DropdownMenuItem>
           )}
-          {canNative && (
+          {canTerminal && (
             <DropdownMenuItem onSelect={() => openAction('terminal')}>
               <Terminal className="h-4 w-4" />
               {getOpenInDefaultLabel(
@@ -186,7 +195,7 @@ export function OpenInButton({
               )}
             </DropdownMenuItem>
           )}
-          {canNative && (
+          {canFinder && (
             <DropdownMenuItem onSelect={() => openAction('finder')}>
               <FolderOpen className="h-4 w-4" />
               Finder

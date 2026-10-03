@@ -62,6 +62,27 @@ struct WsAuth {
     /// when the disk copy is stale. Used to scope the init payload to only the
     /// worktrees/sessions the user is currently viewing.
     selected_project: Option<String>,
+    /// `?download=true` makes file routes send `Content-Disposition: attachment`.
+    #[serde(default)]
+    download: bool,
+}
+
+/// `Content-Disposition` value that makes browsers save the file under its own name.
+fn attachment_disposition(path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    let encoded: String = name
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'_' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect();
+    format!("attachment; filename*=UTF-8''{encoded}")
 }
 
 #[derive(Deserialize)]
@@ -544,7 +565,14 @@ async fn init_handler(
     response["appVersion"] = Value::String(build_info.app_version.clone());
     response["serverPlatform"] = Value::String(crate::server_platform_name().to_string());
     response["nativeOpenAllowed"] = Value::Bool(crate::platform::native_open_allowed());
+    if let Ok(name) = std::env::var("JEAN_SERVER_NAME") {
+        let name = name.trim();
+        if !name.is_empty() {
+            response["serverName"] = Value::String(name.to_string());
+        }
+    }
 
+    let projects_load_failed = projects_result.is_err();
     let projects = match projects_result {
         Ok(projects) => projects,
         Err(e) => {
@@ -565,9 +593,11 @@ async fn init_handler(
         selected_project_id_for_init(params.selected_project.as_deref(), ui_state.as_ref());
 
     // Validate the selected project exists and is a real project (not a folder).
-    let selected_project = selected_project_id
-        .as_deref()
-        .and_then(|id| projects.iter().find(|p| p.id == id && !p.is_folder));
+    let selected_project = selected_project_id.as_deref().and_then(|id| {
+        projects
+            .iter()
+            .find(|p| p.project.id == id && !p.project.is_folder)
+    });
 
     // Fetch worktrees first (cheap JSON read), then overlap session lists with
     // windowed active-session messages so /api/init is one parallel disk phase.
@@ -577,7 +607,7 @@ async fn init_handler(
         SessionsByWorktree,
         std::collections::HashMap<String, crate::chat::types::Session>,
     ) = if let Some(project) = selected_project {
-        let project_id = project.id.clone();
+        let project_id = project.project.id.clone();
         let worktrees = crate::projects::list_worktrees(state.app.clone(), project_id.clone())
             .await
             .unwrap_or_default();
@@ -794,9 +824,13 @@ async fn init_handler(
         }
     }
 
-    // Serialize projects (always included)
-    if let Ok(val) = serde_json::to_value(&projects) {
-        response["projects"] = val;
+    // Do not serialize a failed project load as an empty list. Omitting the key
+    // lets the frontend run its normal list_projects query and surface the
+    // storage error instead of presenting data corruption as an empty account.
+    if !projects_load_failed {
+        if let Ok(val) = serde_json::to_value(&projects) {
+            response["projects"] = val;
+        }
     }
 
     // Only emit worktrees/sessions keys when we actually have data.
@@ -943,8 +977,10 @@ async fn file_handler(
         }
     };
 
-    // Build requested path and canonicalize
-    let requested = app_data_dir.join(&filepath);
+    // Axum wildcard captures include a leading slash. Treat ordinary wildcard
+    // values as app-data-relative, while accepting persisted absolute paths
+    // only when they already point inside this app-data directory.
+    let requested = resolve_app_data_file_path(&app_data_dir, &filepath);
     let canonical = match requested.canonicalize() {
         Ok(p) => p,
         Err(_) => return (StatusCode::NOT_FOUND, "File not found").into_response(),
@@ -976,6 +1012,18 @@ async fn file_handler(
             .unwrap()
             .into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "Cannot read file").into_response(),
+    }
+}
+
+fn resolve_app_data_file_path(
+    app_data_dir: &std::path::Path,
+    filepath: &str,
+) -> std::path::PathBuf {
+    let candidate = std::path::Path::new(filepath);
+    if candidate.starts_with(app_data_dir) {
+        candidate.to_path_buf()
+    } else {
+        app_data_dir.join(filepath.trim_start_matches(['/', '\\']))
     }
 }
 
@@ -1018,7 +1066,8 @@ fn path_is_in_known_roots(path: &std::path::Path, roots: &[std::path::PathBuf]) 
 
 /// Serve files from known project/worktree directories (authenticated).
 /// Used by browser-mode clients for auto-detected project avatars, matching
-/// the native asset protocol's project directory allowlist.
+/// the native asset protocol's project directory allowlist. With
+/// `?download=true`, any absolute file path is allowed.
 async fn project_file_handler(
     AxumPath(filepath): AxumPath<String>,
     headers: HeaderMap,
@@ -1042,22 +1091,29 @@ async fn project_file_handler(
         return (StatusCode::NOT_FOUND, "Not a file").into_response();
     }
 
-    let roots = match canonicalize_known_project_roots(&state.app) {
-        Ok(roots) => roots,
-        Err(response) => return response,
-    };
-    if !path_is_in_known_roots(&canonical, &roots) {
-        return (StatusCode::FORBIDDEN, "Access denied").into_response();
+    // Explicit downloads may read any file: web access users already have full
+    // server access (terminals, agents). Previews stay limited to projects.
+    if !params.download {
+        let roots = match canonicalize_known_project_roots(&state.app) {
+            Ok(roots) => roots,
+            Err(response) => return response,
+        };
+        if !path_is_in_known_roots(&canonical, &roots) {
+            return (StatusCode::FORBIDDEN, "Access denied").into_response();
+        }
     }
 
     let mime = mime_from_extension(&canonical);
     match tokio::fs::read(&canonical).await {
-        Ok(bytes) => Response::builder()
-            .header("Content-Type", mime)
-            .header("Cache-Control", "private, max-age=3600")
-            .body(Body::from(bytes))
-            .unwrap()
-            .into_response(),
+        Ok(bytes) => {
+            let mut builder = Response::builder()
+                .header("Content-Type", mime)
+                .header("Cache-Control", "private, max-age=3600");
+            if params.download {
+                builder = builder.header("Content-Disposition", attachment_disposition(&canonical));
+            }
+            builder.body(Body::from(bytes)).unwrap().into_response()
+        }
         Err(_) => (StatusCode::NOT_FOUND, "Cannot read file").into_response(),
     }
 }
@@ -1405,13 +1461,21 @@ pub async fn get_server_status(app: AppHandle) -> ServerStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_host_option_label, bind_host_option_rank, display_host_for_bind_ip,
-        display_ip_for_bind_ip_with_candidates, embedded_asset_path_for_request, format_http_url,
-        is_tailscale_ipv4, parse_bind_ip, path_is_in_known_roots, token_from_query_or_bearer,
-        validate_bind_host,
+        attachment_disposition, bind_host_option_label, bind_host_option_rank,
+        display_host_for_bind_ip, display_ip_for_bind_ip_with_candidates,
+        embedded_asset_path_for_request, format_http_url, is_tailscale_ipv4, parse_bind_ip,
+        path_is_in_known_roots, token_from_query_or_bearer, validate_bind_host,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn attachment_disposition_percent_encodes_file_name() {
+        assert_eq!(
+            attachment_disposition(std::path::Path::new("/tmp/out/my show\"reel.mp4")),
+            "attachment; filename*=UTF-8''my%20show%22reel.mp4"
+        );
+    }
 
     #[test]
     fn parse_bind_ip_accepts_localhost_and_ip_literals() {
@@ -1709,5 +1773,22 @@ mod tests {
             &canonical_sibling,
             &[canonical_root]
         ));
+    }
+
+    #[test]
+    fn app_data_file_path_handles_axum_wildcards_and_persisted_absolute_paths() {
+        let base = std::path::Path::new("/tmp/com.jean.desktop");
+
+        assert_eq!(
+            super::resolve_app_data_file_path(base, "/pasted-images/image.png"),
+            base.join("pasted-images/image.png")
+        );
+        assert_eq!(
+            super::resolve_app_data_file_path(
+                base,
+                "/tmp/com.jean.desktop/pasted-images/image.png"
+            ),
+            base.join("pasted-images/image.png")
+        );
     }
 }

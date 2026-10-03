@@ -75,6 +75,36 @@ export const test = base.extend<TauriMockFixtures>({
           string,
           (args?: Record<string, unknown>) => unknown
         > = {
+          get_worktree: args =>
+            structuredClone(
+              worktreeStore.find(
+                worktree => worktree.id === args?.worktreeId
+              ) ?? null
+            ),
+          bootstrap_project: args => {
+            const projectId = args?.projectId
+            const worktrees = worktreeStore.filter(
+              worktree => worktree.project_id === projectId
+            )
+            const sessionsByWorktree = Object.fromEntries(
+              worktrees.map(worktree => {
+                const worktreeId = String(worktree.id)
+                return [
+                  worktreeId,
+                  {
+                    worktree_id: worktreeId,
+                    ...getWorktreeStore(worktreeId),
+                    version: 2,
+                  },
+                ]
+              })
+            )
+            return {
+              worktrees: structuredClone(worktrees),
+              sessionsByWorktree: structuredClone(sessionsByWorktree),
+              runningSessions: [],
+            }
+          },
           get_sessions: args => {
             const wid = (args?.worktreeId as string) ?? 'unknown'
             const store = getWorktreeStore(wid)
@@ -249,20 +279,21 @@ export async function activateWorktree(
   page: Page,
   worktreeName: string
 ): Promise<void> {
-  // Ensure sidebar is visible
-  const projectsHeader = page.getByText('PROJECTS')
-  if (!(await projectsHeader.isVisible().catch(() => false))) {
-    await page.keyboard.press('Meta+b')
-    await page.waitForTimeout(500)
-  }
-  await expect(projectsHeader).toBeVisible({ timeout: 3000 })
-
-  // Click the worktree
-  await page.getByText(worktreeName).click()
-  await page.waitForTimeout(1000)
-
-  // Wait for chat view (dashboard empty state should be gone)
+  const worktree = page.getByText(worktreeName, { exact: true }).first()
+  await expect(worktree).toBeVisible({ timeout: 5000 })
+  await worktree.click()
   await expect(
-    page.getByText('Your imagination is the only limit')
-  ).not.toBeVisible({ timeout: 3000 })
+    page.getByRole('button', { name: 'New session', exact: true }).first()
+  ).toBeVisible({ timeout: 5000 })
+}
+
+export async function createJeanSession(page: Page): Promise<void> {
+  await page
+    .getByRole('button', { name: 'New session', exact: true })
+    .first()
+    .click()
+  const chooser = page.getByRole('dialog', { name: 'New session', exact: true })
+  await expect(chooser).toBeVisible()
+  await chooser.getByRole('button', { name: /^Jean Chat/ }).click()
+  await expect(chooser).not.toBeVisible()
 }

@@ -28,6 +28,7 @@ pub use github_actions::*;
 pub use github_issues::*;
 pub use linear_issues::*;
 pub use linear_pm::*;
+pub(crate) use names::is_generated_workspace_name;
 pub use outline::*;
 pub use saved_contexts::*;
 pub use sentry_issues::*;

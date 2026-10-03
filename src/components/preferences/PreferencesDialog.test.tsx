@@ -5,6 +5,31 @@ import { useUIStore } from '@/store/ui-store'
 import type * as KeybindingsPaneModule from './panes/KeybindingsPane'
 import type * as MagicPromptsPaneModule from './panes/MagicPromptsPane'
 import { PreferencesDialog } from './PreferencesDialog'
+import type * as EnvironmentModule from '@/lib/environment'
+
+const settingsServerMocks = vi.hoisted(() => ({
+  native: false,
+  connections: [] as {
+    id: string
+    name: string
+    url: string
+    token: string
+  }[],
+  snapshots: new Map(),
+}))
+
+vi.mock('@/lib/environment', async importOriginal => ({
+  ...(await importOriginal<typeof EnvironmentModule>()),
+  isNativeApp: () => settingsServerMocks.native,
+}))
+
+vi.mock('@/lib/remote-connections', () => ({
+  useRemoteConnections: () => settingsServerMocks.connections,
+}))
+
+vi.mock('@/lib/server-connections', () => ({
+  useServerConnectionSnapshots: () => settingsServerMocks.snapshots,
+}))
 
 vi.mock('./panes/GeneralPane', () => ({
   GeneralPane: () => <div>General pane</div>,
@@ -84,6 +109,14 @@ vi.mock('./panes/WebAccessPane', () => ({
 
 describe('PreferencesDialog', () => {
   beforeEach(() => {
+    HTMLElement.prototype.hasPointerCapture = vi.fn(() => false)
+    HTMLElement.prototype.setPointerCapture = vi.fn()
+    HTMLElement.prototype.releasePointerCapture = vi.fn()
+    HTMLElement.prototype.scrollIntoView = vi.fn()
+    settingsServerMocks.native = false
+    settingsServerMocks.connections = []
+    settingsServerMocks.snapshots = new Map()
+    window.localStorage.clear()
     globalThis.ResizeObserver = class ResizeObserver {
       observe = vi.fn()
       unobserve = vi.fn()
@@ -94,6 +127,31 @@ describe('PreferencesDialog', () => {
       preferencesOpen: true,
       preferencesPane: null,
     })
+  })
+
+  it('selects the server whose settings are shown in native mode', async () => {
+    const user = userEvent.setup()
+    settingsServerMocks.native = true
+    settingsServerMocks.connections = [
+      {
+        id: 'dev-server',
+        name: 'Dev Server',
+        url: 'http://dev.test',
+        token: 'token',
+      },
+    ]
+    settingsServerMocks.snapshots = new Map([
+      ['dev-server', { status: 'online' }],
+    ])
+
+    render(<PreferencesDialog />)
+
+    const selector = screen.getByRole('combobox', { name: 'Settings server' })
+    expect(selector).toHaveTextContent('Local')
+    await user.click(selector)
+    await user.click(screen.getByRole('option', { name: 'Dev Server' }))
+
+    expect(selector).toHaveTextContent('Dev Server')
   })
 
   it('still closes from the desktop header close button while search is open', async () => {
@@ -138,7 +196,7 @@ describe('PreferencesDialog', () => {
     expect(
       within(navigationMenu)
         .getAllByRole('button')
-        .map(button => button.textContent)
+        .map(button => button.textContent?.replace(/\s+/g, ' ').trim())
     ).toEqual([
       'General',
       'Appearance',
@@ -201,7 +259,7 @@ describe('PreferencesDialog', () => {
     }
 
     expect(within(antigravityButton).getByText('Beta')).toHaveClass(
-      'bg-yellow-500/10'
+      'bg-warning/10'
     )
 
     const kimiButton = within(navigationMenu)
@@ -214,6 +272,20 @@ describe('PreferencesDialog', () => {
     expect(within(kimiButton).getByLabelText('Kimi Code')).toHaveClass(
       'translate-x-0.5'
     )
+  })
+
+  it('shows Web Access but hides Keybindings in the mobile pane selector', async () => {
+    const user = userEvent.setup()
+
+    render(<PreferencesDialog />)
+
+    await user.click(screen.getByRole('combobox'))
+
+    const options = screen
+      .getAllByRole('option')
+      .map(option => option.textContent?.trim())
+    expect(options).toContain('Web Access')
+    expect(options).not.toContain('Keybindings')
   })
 
   it('keeps the dialog open when Escape clears the desktop search', async () => {

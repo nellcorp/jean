@@ -1,11 +1,19 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import userEvent from '@testing-library/user-event'
-import { Zap } from 'lucide-react'
+import { Zap } from '@/components/icons/reicon'
 import { fireEvent, render, screen, within } from '@/test/test-utils'
 import { MobileSettingsMenu } from './MobileSettingsMenu'
 import * as platform from '@/lib/platform'
 import type * as ProjectsService from '@/services/projects'
 import type * as GitHubService from '@/services/github'
+
+const { listOutputStyles } = vi.hoisted(() => ({ listOutputStyles: vi.fn() }))
+
+vi.mock('@/services/output-styles', () => ({
+  useClaudeOutputStyles: (...args: unknown[]) => {
+    return { data: listOutputStyles(...args) ?? [] }
+  },
+}))
 
 interface PortInfo {
   port: number
@@ -50,6 +58,7 @@ vi.mock('@/services/github', async importOriginal => {
 })
 
 beforeEach(() => {
+  listOutputStyles.mockReset()
   usePortsMock.mockReturnValue({ data: [] })
   useWorktreeMock.mockReturnValue({
     data: {
@@ -137,7 +146,7 @@ describe('MobileSettingsMenu', () => {
       await user.click(screen.getByRole('button', { name: /settings/i }))
 
       const effortItem = screen.getByText('Effort').closest('[role="menuitem"]')
-      const effortIcon = effortItem?.querySelector('svg.lucide-brain')
+      const effortIcon = effortItem?.querySelector('svg')
       expect(effortIcon).not.toHaveClass('mr-2')
     } finally {
       Object.defineProperty(window, 'innerWidth', {
@@ -171,7 +180,7 @@ describe('MobileSettingsMenu', () => {
     await user.click(screen.getByRole('button', { name: /settings/i }))
 
     const mcpItem = screen.getByText('MCP').closest('[role="menuitem"]')
-    const mcpIcon = mcpItem?.querySelector('svg.lucide-plug')
+    const mcpIcon = mcpItem?.querySelector('svg')
     expect(mcpItem).toHaveAttribute('aria-disabled', 'true')
     expect(mcpIcon).not.toHaveClass('mr-2')
     expect(mcpItem?.querySelector('svg.lucide-chevron-right')).toBeNull()
@@ -314,7 +323,7 @@ describe('MobileSettingsMenu', () => {
       within(sheet)
         .getByRole('button', { name: 'Unfavorite lint' })
         .querySelector('svg')
-    ).toHaveClass('fill-yellow-500', 'text-yellow-500')
+    ).toHaveClass('fill-warning', 'text-warning')
     await user.click(
       within(sheet).getByRole('button', { name: 'Favorite test:unit' })
     )
@@ -406,7 +415,7 @@ describe('MobileSettingsMenu', () => {
     expect(
       within(prRow as HTMLElement).queryByText('Open')
     ).not.toBeInTheDocument()
-    expect(prRow?.querySelector('svg.lucide-external-link')).toBeInTheDocument()
+    expect(prRow?.querySelector('svg')).toBeInTheDocument()
 
     await user.click(screen.getByText('PR #9999'))
     expect(openSpy).toHaveBeenCalledWith(
@@ -454,9 +463,8 @@ describe('MobileSettingsMenu', () => {
     const portItem = screen
       .getByText('App (localhost:1420)')
       .closest('[role="menuitem"]')
-    expect(githubItem?.querySelector('svg.lucide-external-link')).toBeTruthy()
-    expect(portItem?.querySelector('svg.lucide-globe')).toBeTruthy()
-    expect(portItem?.querySelector('svg.lucide-external-link')).toBeTruthy()
+    expect(githubItem?.querySelector('svg')).toBeInTheDocument()
+    expect(portItem?.querySelectorAll('svg').length).toBeGreaterThanOrEqual(2)
 
     await user.click(screen.getByText('App (localhost:1420)'))
     expect(openSpy).toHaveBeenCalledWith('http://localhost:1420')
@@ -762,4 +770,100 @@ describe('MobileSettingsMenu', () => {
       screen.queryByRole('dialog', { name: 'Select thinking' })
     ).not.toBeInTheDocument()
   })
+})
+
+describe('mobile output style scope', () => {
+  it('lists project styles on the owning worktree server', () => {
+    listOutputStyles.mockClear()
+    render(
+      <MobileSettingsMenu
+        {...baseProps}
+        worktreePath="/remote/project/worktree"
+        worktreeId="remote:worktree"
+      />
+    )
+    expect(listOutputStyles).toHaveBeenCalledWith(
+      '/remote/project/worktree',
+      'remote'
+    )
+  })
+})
+
+describe('mobile output style picker', () => {
+  it('opens a bottom sheet and selects Default without a clipped submenu', async () => {
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 390,
+    })
+    const onOutputStyleChange = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <MobileSettingsMenu
+        {...baseProps}
+        selectedOutputStyle="Concise"
+        onOutputStyleChange={onOutputStyleChange}
+      />
+    )
+    await user.click(screen.getByRole('button', { name: /settings/i }))
+    await user.click(screen.getByText('Output style'))
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Select output style',
+    })
+    await user.click(within(dialog).getByRole('button', { name: 'Default' }))
+    expect(onOutputStyleChange).toHaveBeenCalledWith(null)
+    expect(
+      screen.queryByRole('dialog', { name: 'Select output style' })
+    ).toBeNull()
+  })
+})
+
+it('selects project styles in the mobile sheet and disables unsupported styles', async () => {
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    value: 390,
+  })
+  listOutputStyles.mockReturnValue([
+    {
+      name: 'Project Style',
+      source: 'project',
+      installed: true,
+      minCliVersion: null,
+    },
+    {
+      name: 'Future Style',
+      source: 'user',
+      installed: true,
+      minCliVersion: '99.0.0',
+    },
+    {
+      name: 'Uninstalled Style',
+      source: 'bundled',
+      installed: false,
+      minCliVersion: null,
+    },
+  ])
+  const onOutputStyleChange = vi.fn()
+  const user = userEvent.setup()
+  render(
+    <MobileSettingsMenu
+      {...baseProps}
+      claudeCliVersion="2.1.0"
+      onOutputStyleChange={onOutputStyleChange}
+    />
+  )
+  await user.click(screen.getByRole('button', { name: /settings/i }))
+  await user.click(screen.getByText('Output style'))
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Select output style',
+  })
+  expect(
+    within(dialog).getByRole('button', { name: 'Future Style' })
+  ).toBeDisabled()
+  expect(
+    within(dialog).queryByRole('button', { name: 'Uninstalled Style' })
+  ).toBeNull()
+  await user.click(
+    within(dialog).getByRole('button', { name: 'Project Style' })
+  )
+  expect(onOutputStyleChange).toHaveBeenCalledWith('Project Style')
 })

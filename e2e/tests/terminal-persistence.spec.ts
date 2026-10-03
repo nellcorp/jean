@@ -82,6 +82,15 @@ test.describe('Terminal session persistence on web refresh', () => {
         const mock = (window as any).__JEAN_E2E_MOCK__
         if (!mock) return
         mock.invokeHandlers['load_ui_state'] = () => uiState
+        localStorage.setItem(
+          'jean-client-view-state-v1',
+          JSON.stringify({
+            ...uiState,
+            terminal_visible_by_worktree: {
+              [uiState.active_worktree_id]: uiState.terminal_visible ?? false,
+            },
+          })
+        )
         // Inject terminal-related handlers.
         mock.invokeHandlers['get_active_terminals'] = () => liveIds
         mock.invokeHandlers['has_active_terminal'] = () => true
@@ -100,12 +109,12 @@ test.describe('Terminal session persistence on web refresh', () => {
     await mockPage.goto('/')
 
     // Wait for the persisted tabs to render.
-    const shellTab = mockPage
-      .locator('button')
-      .filter({ hasText: PERSISTED_TERM_LABELS.shell })
-    const devTab = mockPage
-      .locator('button')
-      .filter({ hasText: PERSISTED_TERM_LABELS.dev })
+    const shellTab = mockPage.getByText(PERSISTED_TERM_LABELS.shell, {
+      exact: true,
+    })
+    const devTab = mockPage.getByText(PERSISTED_TERM_LABELS.dev, {
+      exact: true,
+    })
 
     await expect(shellTab).toHaveCount(1, { timeout: 10_000 })
     await expect(devTab).toHaveCount(1, { timeout: 10_000 })
@@ -113,11 +122,7 @@ test.describe('Terminal session persistence on web refresh', () => {
     // REGRESSION GUARD: no extra default-labeled "Shell" tab from the
     // pre-hydration auto-create race. The persisted labels are
     // "MyShell"/"MyDev" — different from the auto-create default "Shell".
-    // Match "Shell" but exclude buttons that also contain "MyShell".
-    const defaultShellTab = mockPage
-      .locator('button')
-      .filter({ hasText: 'Shell' })
-      .filter({ hasNotText: PERSISTED_TERM_LABELS.shell })
+    const defaultShellTab = mockPage.getByText('Shell', { exact: true })
     await expect(defaultShellTab).toHaveCount(0, { timeout: 3_000 })
 
     // Now simulate a refresh: reload the page. addInitScripts re-run.
@@ -146,6 +151,15 @@ test.describe('Terminal session persistence on web refresh', () => {
         const mock = (window as any).__JEAN_E2E_MOCK__
         if (!mock) return
         mock.invokeHandlers['load_ui_state'] = () => uiState
+        localStorage.setItem(
+          'jean-client-view-state-v1',
+          JSON.stringify({
+            ...uiState,
+            terminal_visible_by_worktree: {
+              [uiState.active_worktree_id]: uiState.terminal_visible ?? false,
+            },
+          })
+        )
         mock.invokeHandlers['get_active_terminals'] = () => liveIds
         mock.invokeHandlers['has_active_terminal'] = (args: any) => {
           // Only return true for the live IDs. This makes the frontend
@@ -175,9 +189,7 @@ test.describe('Terminal session persistence on web refresh', () => {
 
     // Wait for tabs to render — proves hydration completed.
     await expect(
-      mockPage
-        .locator('button')
-        .filter({ hasText: PERSISTED_TERM_LABELS.shell })
+      mockPage.getByText(PERSISTED_TERM_LABELS.shell, { exact: true })
     ).toHaveCount(1, { timeout: 10_000 })
 
     // Inspect start_terminal calls. There must be ZERO phantom ids.
@@ -201,6 +213,15 @@ test.describe('Terminal session persistence on web refresh', () => {
         const mock = (window as any).__JEAN_E2E_MOCK__
         if (!mock) return
         mock.invokeHandlers['load_ui_state'] = () => uiState
+        localStorage.setItem(
+          'jean-client-view-state-v1',
+          JSON.stringify({
+            ...uiState,
+            terminal_visible_by_worktree: {
+              [uiState.active_worktree_id]: uiState.terminal_visible ?? false,
+            },
+          })
+        )
         // Backend has no surviving PTYs.
         mock.invokeHandlers['get_active_terminals'] = () => []
         mock.invokeHandlers['has_active_terminal'] = () => false
@@ -223,12 +244,10 @@ test.describe('Terminal session persistence on web refresh', () => {
     // the DOM anywhere — the dead-PTY branch clears them from the store
     // and TerminalView's auto-create won't re-spawn them.
     await expect(
-      mockPage
-        .locator('button')
-        .filter({ hasText: PERSISTED_TERM_LABELS.shell })
+      mockPage.getByText(PERSISTED_TERM_LABELS.shell, { exact: true })
     ).toHaveCount(0, { timeout: 5_000 })
     await expect(
-      mockPage.locator('button').filter({ hasText: PERSISTED_TERM_LABELS.dev })
+      mockPage.getByText(PERSISTED_TERM_LABELS.dev, { exact: true })
     ).toHaveCount(0, { timeout: 5_000 })
 
     // Reload — same invariant must hold (no orphan terminal labels
@@ -238,12 +257,10 @@ test.describe('Terminal session persistence on web refresh', () => {
       timeout: 10_000,
     })
     await expect(
-      mockPage
-        .locator('button')
-        .filter({ hasText: PERSISTED_TERM_LABELS.shell })
+      mockPage.getByText(PERSISTED_TERM_LABELS.shell, { exact: true })
     ).toHaveCount(0, { timeout: 5_000 })
     await expect(
-      mockPage.locator('button').filter({ hasText: PERSISTED_TERM_LABELS.dev })
+      mockPage.getByText(PERSISTED_TERM_LABELS.dev, { exact: true })
     ).toHaveCount(0, { timeout: 5_000 })
   })
 
@@ -258,6 +275,15 @@ test.describe('Terminal session persistence on web refresh', () => {
         const mock = (window as any).__JEAN_E2E_MOCK__
         if (!mock) return
         mock.invokeHandlers['load_ui_state'] = () => uiState
+        localStorage.setItem(
+          'jean-client-view-state-v1',
+          JSON.stringify({
+            ...uiState,
+            terminal_visible_by_worktree: {
+              [uiState.active_worktree_id]: uiState.terminal_visible ?? false,
+            },
+          })
+        )
         mock.invokeHandlers['get_active_terminals'] = () => []
         mock.invokeHandlers['has_active_terminal'] = () => false
         mock.invokeHandlers['start_terminal'] = () => null
@@ -299,7 +325,7 @@ test.describe('Terminal session persistence on web refresh', () => {
     ).toBeVisible({ timeout: 10_000 })
 
     // The auto-created default shell tab exists in the DOM.
-    const defaultShell = mockPage.locator('button').filter({ hasText: 'Shell' })
+    const defaultShell = mockPage.getByText('Shell', { exact: true })
     await expect(defaultShell.first()).toBeVisible({ timeout: 10_000 })
 
     // Reload — same invariant must hold.

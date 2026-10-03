@@ -25,31 +25,12 @@ export const ExperimentalPane: React.FC = () => {
   const patchPreferences = usePatchPreferences()
   return (
     <div className="space-y-6">
-      <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-4">
+      <div className="rounded-lg border border-warning/20 bg-warning/5 p-4">
         <p className="text-sm text-muted-foreground">
           These features are experimental and may change or be removed in future
           versions. Use at your own risk.
         </p>
       </div>
-
-      <SettingsSection
-        title="Features"
-        anchorId="pref-experimental-section-features"
-      >
-        <div className="space-y-4">
-          <InlineField
-            label="Combined git sync button"
-            description="Replace separate Pull and Push badges with one Sync button that does both"
-          >
-            <Switch
-              checked={preferences?.git_sync_button ?? false}
-              onCheckedChange={checked => {
-                patchPreferences.mutate({ git_sync_button: checked })
-              }}
-            />
-          </InlineField>
-        </div>
-      </SettingsSection>
 
       <SettingsSection
         title="Developer Tools"

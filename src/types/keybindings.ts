@@ -25,7 +25,6 @@ export type KeybindingAction =
   | 'approve_plan_clear_context_build'
   | 'approve_plan_worktree_build'
   | 'approve_plan_worktree_yolo'
-  | 'open_plan'
   | 'restore_last_archived'
   | 'focus_canvas_search'
   | 'toggle_terminal'
@@ -78,8 +77,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   open_magic_modal: 'mod+m',
   new_session: 'mod+t',
   open_new_session_modal: 'mod+shift+t',
-  next_session: 'mod+alt+arrowright',
-  previous_session: 'mod+alt+arrowleft',
+  next_session: 'mod+arrowright',
+  previous_session: 'mod+arrowleft',
   close_session_or_worktree: 'mod+w',
   new_worktree: 'mod+n',
   cycle_execution_mode: 'shift+tab',
@@ -89,7 +88,6 @@ export const DEFAULT_KEYBINDINGS: KeybindingsMap = {
   approve_plan_clear_context_build: 'mod+shift+enter',
   approve_plan_worktree_build: 'mod+alt+enter',
   approve_plan_worktree_yolo: 'mod+alt+y',
-  open_plan: 'p',
   restore_last_archived: 'mod+shift+alt+t',
   focus_canvas_search: 'slash',
   toggle_terminal: 'mod+backquote',
@@ -197,14 +195,14 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     action: 'next_session',
     label: 'Next session',
     description: 'Switch to the next chat session',
-    default_shortcut: 'mod+alt+arrowright',
+    default_shortcut: 'mod+arrowright',
     category: 'chat',
   },
   {
     action: 'previous_session',
     label: 'Previous session',
     description: 'Switch to the previous chat session',
-    default_shortcut: 'mod+alt+arrowleft',
+    default_shortcut: 'mod+arrowleft',
     category: 'chat',
   },
   {
@@ -264,14 +262,6 @@ export const KEYBINDING_DEFINITIONS: KeybindingDefinition[] = [
     default_shortcut: 'mod+alt+y',
     category: 'chat',
   },
-  {
-    action: 'open_plan',
-    label: 'Open plan',
-    description: 'Open the plan dialog for the selected session',
-    default_shortcut: 'p',
-    category: 'chat',
-  },
-
   {
     action: 'new_worktree',
     label: 'New worktree',
@@ -444,7 +434,8 @@ export function formatShortcutDisplay(
   if (!shortcut) return ''
 
   // On macOS web, Cmd shortcuts are intercepted by the browser.
-  // Ctrl+key already works (both map to "mod"), so show ⌃ instead of ⌘.
+  // Ctrl+key already works (both map to "mod"). Use a text label because the
+  // Control glyph is not available in all browser fonts.
   const isWeb =
     typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)
   const useMacCtrl = isClientMacOS && isWeb
@@ -454,7 +445,7 @@ export function formatShortcutDisplay(
     .map(part => {
       switch (part) {
         case 'mod':
-          return useMacCtrl ? '⌃' : isClientMacOS ? '⌘' : 'Ctrl'
+          return useMacCtrl ? 'Ctrl' : isClientMacOS ? '⌘' : 'Ctrl'
         case 'shift':
           return isClientMacOS ? '⇧' : 'Shift'
         case 'alt':

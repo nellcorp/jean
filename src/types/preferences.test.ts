@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_RELEASE_NOTES_PROMPT,
-  DEFAULT_SMOKE_TEST_PROMPT,
   ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_BACKENDS,
   ANTIGRAVITY_DEFAULT_MAGIC_PROMPT_MODELS,
   COMMANDCODE_DEFAULT_MAGIC_PROMPT_BACKENDS,
@@ -37,26 +36,6 @@ describe('default release notes prompt', () => {
 })
 
 describe('magic prompt preference resolvers', () => {
-  it('provides configurable smoke test defaults', () => {
-    expect(defaultPreferences.magic_prompts.smoke_test).toBeNull()
-    expect(defaultPreferences.magic_prompt_models.smoke_test_model).toBe(
-      'claude-opus-4-8[1m]'
-    )
-    expect(defaultPreferences.magic_prompt_modes.smoke_test_mode).toBe('yolo')
-    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('{worktree_id}')
-    expect(DEFAULT_SMOKE_TEST_PROMPT).not.toContain('{source_session_id}')
-    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('current branch')
-    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('changed files and diff')
-    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('get_run_environments')
-    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain('start_run_environment')
-    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain(
-      'Wait for the environment to become ready and stable'
-    )
-    expect(DEFAULT_SMOKE_TEST_PROMPT).toContain(
-      'Discover and prepare the prerequisites for realistic testing'
-    )
-  })
-
   it('defines an audit-only final review prompt with tabular output', () => {
     expect(defaultPreferences.magic_prompt_modes.code_review_fix_mode).toBe(
       'plan'
@@ -139,8 +118,8 @@ describe('magic prompt preference resolvers', () => {
     expect(defaultPreferences.default_grok_reasoning_effort).toBe('high')
   })
 
-  it('defaults Claude to Opus 4.8 and Codex/OpenCode to GPT 5.6 Sol', () => {
-    expect(defaultPreferences.selected_model).toBe('claude-opus-4-8[1m]')
+  it('defaults Claude to Opus 5.5 and Codex/OpenCode to GPT 5.6 Sol', () => {
+    expect(defaultPreferences.selected_model).toBe('claude-opus-5-5')
     expect(defaultPreferences.selected_codex_model).toBe('gpt-5.6-sol')
     expect(defaultPreferences.selected_opencode_model).toBe(
       'opencode/gpt-5.6-sol'
@@ -169,7 +148,7 @@ describe('magic prompt preference resolvers', () => {
   it('provides dedicated defaults for Sentry investigations', () => {
     expect(
       defaultPreferences.magic_prompt_models.investigate_sentry_issue_model
-    ).toBe('claude-opus-4-8[1m]')
+    ).toBe('claude-opus-5-5')
     expect(
       defaultPreferences.magic_prompt_modes.investigate_sentry_issue_mode
     ).toBe('plan')
@@ -197,6 +176,19 @@ describe('magic prompt preference resolvers', () => {
     expect(DEFAULT_INVESTIGATE_SENTRY_ISSUE_PROMPT).not.toContain(
       yoloConditional
     )
+  })
+
+  it.each([
+    ['issue', DEFAULT_INVESTIGATE_ISSUE_PROMPT],
+    ['pull request', DEFAULT_INVESTIGATE_PR_PROMPT],
+    ['security advisory', DEFAULT_INVESTIGATE_ADVISORY_PROMPT],
+  ])('validates the %s before deeper investigation', (_name, prompt) => {
+    const normalized = prompt.toLowerCase()
+
+    expect(normalized).toContain('1. validate')
+    expect(normalized).toContain('still valid')
+    expect(normalized).toContain('whether it makes sense to work on it now')
+    expect(normalized).toContain('if not, stop and explain why')
   })
 
   it('keeps fixing and pushing workflow failures until the pushed commit is green', () => {

@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from 'react'
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Trash2 } from '@/components/icons/reicon'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -7,7 +7,8 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { invoke } from '@/lib/transport'
+import { useSettingsTargetServerId } from '@/lib/settings-target'
+import { invokeForServer } from '@/lib/transport'
 import {
   useDeleteJeanSkill,
   useJeanSkills,
@@ -36,6 +37,7 @@ description: When to use this skill
 Instructions for the agent...`
 
 export const SkillsPane: React.FC = () => {
+  const serverId = useSettingsTargetServerId()
   const { data: skills = [], isLoading } = useJeanSkills()
   const { data: backends = [] } = useSkillBackends()
   const saveSkill = useSaveJeanSkill()
@@ -58,22 +60,29 @@ export const SkillsPane: React.FC = () => {
     })
   }, [allBackendIds])
 
-  const startEdit = useCallback(async (slug: string) => {
-    try {
-      const document = await invoke<JeanSkillDocument>('read_jean_skill', {
-        slug,
-      })
-      setEditor({
-        content: document.content,
-        name: document.name,
-        description: document.description ?? '',
-        backends: document.backends,
-        previousSlug: document.slug,
-      })
-    } catch (error) {
-      toast.error('Failed to open skill', { description: String(error) })
-    }
-  }, [])
+  const startEdit = useCallback(
+    async (slug: string) => {
+      try {
+        const document = await invokeForServer<JeanSkillDocument>(
+          serverId,
+          'read_jean_skill',
+          {
+            slug,
+          }
+        )
+        setEditor({
+          content: document.content,
+          name: document.name,
+          description: document.description ?? '',
+          backends: document.backends,
+          previousSlug: document.slug,
+        })
+      } catch (error) {
+        toast.error('Failed to open skill', { description: String(error) })
+      }
+    },
+    [serverId]
+  )
 
   const toggleBackend = (id: string) => {
     if (!editor) return
@@ -86,7 +95,8 @@ export const SkillsPane: React.FC = () => {
   }
 
   const handleSave = () => {
-    if (!editor || !editor.content.trim() || editor.backends.length === 0) return
+    if (!editor || !editor.content.trim() || editor.backends.length === 0)
+      return
 
     saveSkill.mutate(
       {

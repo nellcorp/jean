@@ -1,7 +1,20 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
+import type { CliBackend } from '@/types/preferences'
+import type { IssueContext } from '@/types/github'
 import type { CliType } from '@/lib/cli-update'
 import { mergeSeenFailedWorkflowRunIds } from '@/components/shared/workflow-run-utils'
+
+export interface InvestigationOverride {
+  backend?: CliBackend
+  model?: string
+  provider?: string | null
+  forceNewSession?: boolean
+  prompt?: string
+  promptTemplate?: string
+  issueContext?: IssueContext
+  openSession?: boolean
+}
 
 export type PreferencePane =
   | 'general'
@@ -85,6 +98,13 @@ export type CliLoginModalType =
   | 'coderabbit'
   | null
 
+export interface MinimizedCliUpdate {
+  type: Exclude<CliLoginModalType, null>
+  name: string
+  kind: 'reinstall' | 'terminal'
+  progress: number | null
+}
+
 interface UIState {
   leftSidebarVisible: boolean
   leftSidebarSize: number // Width in pixels, persisted across sessions
@@ -138,6 +158,8 @@ interface UIState {
   cliLoginModalCommand: string | null
   cliLoginModalCommandArgs: string[] | null
   cliLoginModalAction: 'login' | 'update' | 'install'
+  /** Active CLI update hidden from its modal while the process keeps running. */
+  minimizedCliUpdate: MinimizedCliUpdate | null
   /** Worktree IDs that should auto-trigger investigate-issue when created */
   autoInvestigateWorktreeIds: Set<string>
   /** Worktree IDs that should auto-trigger investigate-pr when created */
@@ -150,6 +172,7 @@ interface UIState {
   autoInvestigateLinearIssueWorktreeIds: Set<string>
   /** Worktree IDs that should auto-trigger Sentry issue investigation */
   autoInvestigateSentryIssueWorktreeIds: Set<string>
+  autoInvestigateOverrides: Record<string, InvestigationOverride>
   /** Counter for background worktree creations (CMD+Click) — skip auto-navigation */
   pendingBackgroundCreations: number
   /** Worktree IDs that should auto-open first session modal when canvas mounts */
@@ -207,6 +230,12 @@ interface UIState {
   toggleLeftSidebar: () => void
   setLeftSidebarVisible: (visible: boolean) => void
   setLeftSidebarSize: (size: number) => void
+  leftSidebarSwipe: {
+    isDragging: boolean
+    dragOffset: number
+    dragTransition: string
+  }
+  setLeftSidebarSwipe: (swipe: UIState['leftSidebarSwipe']) => void
   toggleFileBrowser: () => void
   setFileBrowserVisible: (visible: boolean) => void
   setFileBrowserSize: (size: number) => void
@@ -263,11 +292,20 @@ interface UIState {
     action?: 'login' | 'update' | 'install'
   ) => void
   closeCliLoginModal: () => void
+  setMinimizedCliUpdate: (update: MinimizedCliUpdate | null) => void
+  updateMinimizedCliUpdateProgress: (progress: number) => void
+  restoreMinimizedCliUpdate: () => void
   incrementPendingBackgroundCreations: () => void
   consumePendingBackgroundCreation: () => boolean
-  markWorktreeForAutoInvestigate: (worktreeId: string) => void
+  markWorktreeForAutoInvestigate: (
+    worktreeId: string,
+    override?: InvestigationOverride
+  ) => void
   consumeAutoInvestigate: (worktreeId: string) => boolean
-  markWorktreeForAutoInvestigatePR: (worktreeId: string) => void
+  markWorktreeForAutoInvestigatePR: (
+    worktreeId: string,
+    override?: InvestigationOverride
+  ) => void
   consumeAutoInvestigatePR: (worktreeId: string) => boolean
   markWorktreeForAutoInvestigateSecurityAlert: (worktreeId: string) => void
   consumeAutoInvestigateSecurityAlert: (worktreeId: string) => boolean
@@ -292,6 +330,10 @@ interface UIState {
   ) => void
   setSessionTerminalId: (sessionId: string, terminalId: string) => void
   clearSessionTerminalSurface: (sessionId: string) => string | undefined
+  clearWorktreeState: (
+    worktreeId: string,
+    sessionIds?: readonly string[]
+  ) => void
   openNewSessionModeModal: (target: NewSessionModeTarget) => void
   closeNewSessionModeModal: () => void
   setChatToolbarMounted: (mounted: boolean) => void
@@ -343,6 +385,11 @@ export const useUIStore = create<UIState>()(
     (set, get) => ({
       leftSidebarVisible: false,
       leftSidebarSize: 250, // Default width in pixels
+      leftSidebarSwipe: {
+        isDragging: false,
+        dragOffset: 0,
+        dragTransition: '',
+      },
       fileBrowserVisible: false,
       fileBrowserSize: 280,
       viewingFilePath: null,
@@ -378,12 +425,14 @@ export const useUIStore = create<UIState>()(
       cliLoginModalCommand: null,
       cliLoginModalCommandArgs: null,
       cliLoginModalAction: 'login',
+      minimizedCliUpdate: null,
       autoInvestigateWorktreeIds: new Set(),
       autoInvestigatePRWorktreeIds: new Set(),
       autoInvestigateSecurityAlertWorktreeIds: new Set(),
       autoInvestigateAdvisoryWorktreeIds: new Set(),
       autoInvestigateLinearIssueWorktreeIds: new Set(),
       autoInvestigateSentryIssueWorktreeIds: new Set(),
+      autoInvestigateOverrides: {},
       pendingBackgroundCreations: 0,
       autoOpenSessionWorktreeIds: new Set(),
       pendingAutoOpenSessionIds: {},
@@ -476,6 +525,18 @@ export const useUIStore = create<UIState>()(
           'setLeftSidebarSize'
         ),
 
+      setLeftSidebarSwipe: swipe =>
+        set(
+          state =>
+            state.leftSidebarSwipe.isDragging === swipe.isDragging &&
+            state.leftSidebarSwipe.dragOffset === swipe.dragOffset &&
+            state.leftSidebarSwipe.dragTransition === swipe.dragTransition
+              ? state
+              : { leftSidebarSwipe: swipe },
+          undefined,
+          'setLeftSidebarSwipe'
+        ),
+
       toggleFileBrowser: () =>
         set(
           state => ({ fileBrowserVisible: !state.fileBrowserVisible }),
@@ -500,7 +561,6 @@ export const useUIStore = create<UIState>()(
           undefined,
           'setFileBrowserSize'
         ),
-
       setViewingFilePath: path =>
         set(
           state =>
@@ -746,14 +806,22 @@ export const useUIStore = create<UIState>()(
 
       openCliUpdateModal: type =>
         set(
-          { cliUpdateModalOpen: true, cliUpdateModalType: type },
+          {
+            cliUpdateModalOpen: true,
+            cliUpdateModalType: type,
+            minimizedCliUpdate: null,
+          },
           undefined,
           'openCliUpdateModal'
         ),
 
       closeCliUpdateModal: () =>
         set(
-          { cliUpdateModalOpen: false, cliUpdateModalType: null },
+          {
+            cliUpdateModalOpen: false,
+            cliUpdateModalType: null,
+            minimizedCliUpdate: null,
+          },
           undefined,
           'closeCliUpdateModal'
         ),
@@ -766,6 +834,7 @@ export const useUIStore = create<UIState>()(
             cliLoginModalCommand: command,
             cliLoginModalCommandArgs: commandArgs ?? null,
             cliLoginModalAction: action ?? 'login',
+            minimizedCliUpdate: null,
           },
           undefined,
           'openCliLoginModal'
@@ -779,9 +848,39 @@ export const useUIStore = create<UIState>()(
             cliLoginModalCommand: null,
             cliLoginModalCommandArgs: null,
             cliLoginModalAction: 'login',
+            minimizedCliUpdate: null,
           },
           undefined,
           'closeCliLoginModal'
+        ),
+
+      setMinimizedCliUpdate: update =>
+        set(
+          state =>
+            state.minimizedCliUpdate === update
+              ? state
+              : { minimizedCliUpdate: update },
+          undefined,
+          'setMinimizedCliUpdate'
+        ),
+
+      updateMinimizedCliUpdateProgress: progress =>
+        set(
+          state => {
+            const update = state.minimizedCliUpdate
+            if (!update || update.progress === progress) return state
+            return { minimizedCliUpdate: { ...update, progress } }
+          },
+          undefined,
+          'updateMinimizedCliUpdateProgress'
+        ),
+
+      restoreMinimizedCliUpdate: () =>
+        set(
+          state =>
+            state.minimizedCliUpdate ? { minimizedCliUpdate: null } : state,
+          undefined,
+          'restoreMinimizedCliUpdate'
         ),
 
       incrementPendingBackgroundCreations: () =>
@@ -808,13 +907,16 @@ export const useUIStore = create<UIState>()(
         return false
       },
 
-      markWorktreeForAutoInvestigate: worktreeId =>
+      markWorktreeForAutoInvestigate: (worktreeId, override) =>
         set(
           state => ({
             autoInvestigateWorktreeIds: new Set([
               ...state.autoInvestigateWorktreeIds,
               worktreeId,
             ]),
+            autoInvestigateOverrides: override
+              ? { ...state.autoInvestigateOverrides, [worktreeId]: override }
+              : state.autoInvestigateOverrides,
           }),
           undefined,
           'markWorktreeForAutoInvestigate'
@@ -826,7 +928,12 @@ export const useUIStore = create<UIState>()(
             state => {
               const newSet = new Set(state.autoInvestigateWorktreeIds)
               newSet.delete(worktreeId)
-              return { autoInvestigateWorktreeIds: newSet }
+              const { [worktreeId]: _, ...autoInvestigateOverrides } =
+                state.autoInvestigateOverrides
+              return {
+                autoInvestigateWorktreeIds: newSet,
+                autoInvestigateOverrides,
+              }
             },
             undefined,
             'consumeAutoInvestigate'
@@ -836,13 +943,16 @@ export const useUIStore = create<UIState>()(
         return false
       },
 
-      markWorktreeForAutoInvestigatePR: worktreeId =>
+      markWorktreeForAutoInvestigatePR: (worktreeId, override) =>
         set(
           state => ({
             autoInvestigatePRWorktreeIds: new Set([
               ...state.autoInvestigatePRWorktreeIds,
               worktreeId,
             ]),
+            autoInvestigateOverrides: override
+              ? { ...state.autoInvestigateOverrides, [worktreeId]: override }
+              : state.autoInvestigateOverrides,
           }),
           undefined,
           'markWorktreeForAutoInvestigatePR'
@@ -854,7 +964,12 @@ export const useUIStore = create<UIState>()(
             state => {
               const newSet = new Set(state.autoInvestigatePRWorktreeIds)
               newSet.delete(worktreeId)
-              return { autoInvestigatePRWorktreeIds: newSet }
+              const { [worktreeId]: _, ...autoInvestigateOverrides } =
+                state.autoInvestigateOverrides
+              return {
+                autoInvestigatePRWorktreeIds: newSet,
+                autoInvestigateOverrides,
+              }
             },
             undefined,
             'consumeAutoInvestigatePR'
@@ -1108,6 +1223,121 @@ export const useUIStore = create<UIState>()(
 
         return terminalId
       },
+
+      clearWorktreeState: (
+        worktreeId: string,
+        sessionIds: readonly string[] = []
+      ) =>
+        set(
+          state => {
+            const sessionIdSet = new Set(sessionIds)
+            const removeSession = (value: string): boolean =>
+              sessionIdSet.has(value)
+            const removeFromSet = (values: Set<string>): Set<string> => {
+              let changed = false
+              const next = new Set(values)
+              if (next.delete(worktreeId)) changed = true
+              return changed ? next : values
+            }
+            const removeRecordEntries = <T>(
+              record: Record<string, T>,
+              predicate: (key: string, value: T) => boolean
+            ): Record<string, T> => {
+              let changed = false
+              const next: Record<string, T> = {}
+              for (const [key, value] of Object.entries(record)) {
+                if (predicate(key, value)) {
+                  changed = true
+                } else {
+                  next[key] = value
+                }
+              }
+              return changed ? next : record
+            }
+
+            const autoInvestigateWorktreeIds = removeFromSet(
+              state.autoInvestigateWorktreeIds
+            )
+            const autoInvestigatePRWorktreeIds = removeFromSet(
+              state.autoInvestigatePRWorktreeIds
+            )
+            const autoInvestigateSecurityAlertWorktreeIds = removeFromSet(
+              state.autoInvestigateSecurityAlertWorktreeIds
+            )
+            const autoInvestigateAdvisoryWorktreeIds = removeFromSet(
+              state.autoInvestigateAdvisoryWorktreeIds
+            )
+            const autoInvestigateLinearIssueWorktreeIds = removeFromSet(
+              state.autoInvestigateLinearIssueWorktreeIds
+            )
+            const autoInvestigateSentryIssueWorktreeIds = removeFromSet(
+              state.autoInvestigateSentryIssueWorktreeIds
+            )
+            const autoOpenSessionWorktreeIds = removeFromSet(
+              state.autoOpenSessionWorktreeIds
+            )
+            const pendingAutoOpenSessionIds = removeRecordEntries(
+              state.pendingAutoOpenSessionIds,
+              key => key === worktreeId
+            )
+            const sessionPrimarySurface = removeRecordEntries(
+              state.sessionPrimarySurface,
+              sessionId => removeSession(sessionId)
+            )
+            const sessionTerminalIds = removeRecordEntries(
+              state.sessionTerminalIds,
+              sessionId => removeSession(sessionId)
+            )
+
+            const worktreeStateChanged =
+              autoInvestigateWorktreeIds !== state.autoInvestigateWorktreeIds ||
+              autoInvestigatePRWorktreeIds !==
+                state.autoInvestigatePRWorktreeIds ||
+              autoInvestigateSecurityAlertWorktreeIds !==
+                state.autoInvestigateSecurityAlertWorktreeIds ||
+              autoInvestigateAdvisoryWorktreeIds !==
+                state.autoInvestigateAdvisoryWorktreeIds ||
+              autoInvestigateLinearIssueWorktreeIds !==
+                state.autoInvestigateLinearIssueWorktreeIds ||
+              autoInvestigateSentryIssueWorktreeIds !==
+                state.autoInvestigateSentryIssueWorktreeIds ||
+              autoOpenSessionWorktreeIds !== state.autoOpenSessionWorktreeIds ||
+              pendingAutoOpenSessionIds !== state.pendingAutoOpenSessionIds ||
+              sessionPrimarySurface !== state.sessionPrimarySurface ||
+              sessionTerminalIds !== state.sessionTerminalIds ||
+              state.sessionChatModalWorktreeId === worktreeId ||
+              state.newSessionModeTarget?.worktreeId === worktreeId
+
+            if (!worktreeStateChanged) return state
+
+            return {
+              autoInvestigateWorktreeIds,
+              autoInvestigatePRWorktreeIds,
+              autoInvestigateSecurityAlertWorktreeIds,
+              autoInvestigateAdvisoryWorktreeIds,
+              autoInvestigateLinearIssueWorktreeIds,
+              autoInvestigateSentryIssueWorktreeIds,
+              autoOpenSessionWorktreeIds,
+              pendingAutoOpenSessionIds,
+              sessionPrimarySurface,
+              sessionTerminalIds,
+              sessionChatModalOpen:
+                state.sessionChatModalWorktreeId === worktreeId
+                  ? false
+                  : state.sessionChatModalOpen,
+              sessionChatModalWorktreeId:
+                state.sessionChatModalWorktreeId === worktreeId
+                  ? null
+                  : state.sessionChatModalWorktreeId,
+              newSessionModeTarget:
+                state.newSessionModeTarget?.worktreeId === worktreeId
+                  ? null
+                  : state.newSessionModeTarget,
+            }
+          },
+          undefined,
+          'clearWorktreeState'
+        ),
 
       openNewSessionModeModal: (target: NewSessionModeTarget) =>
         set(

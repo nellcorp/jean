@@ -108,7 +108,7 @@ import {
 import { WslSetupStep } from './WslSetupStep'
 import { UsageModeStep, type OnboardingUsageMode } from './UsageModeStep'
 import { RemoteSetupStep } from './RemoteSetupStep'
-import { ArrowLeft, Loader2 } from 'lucide-react'
+import { ArrowLeft, Loader2 } from '@/components/icons/reicon'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import {
   checkSystemPrerequisites,
@@ -1281,7 +1281,8 @@ function OnboardingDialogContent() {
     if (step !== 'antigravity-auth-checking') return
     if (antigravityAuth.isLoading || antigravityAuth.isFetching) return
 
-    if (antigravityAuth.data?.authenticated) {
+    if (antigravityAuth.data?.authenticated || antigravityAuth.data?.timedOut) {
+      // A timed-out `agy models` probe is unknown, not signed-out.
       queueMicrotask(() => moveToNextBackendOrGh('antigravity'))
     } else {
       queueMicrotask(() => setStep('antigravity-auth-login'))
@@ -1291,6 +1292,7 @@ function OnboardingDialogContent() {
     antigravityAuth.isLoading,
     antigravityAuth.isFetching,
     antigravityAuth.data?.authenticated,
+    antigravityAuth.data?.timedOut,
     moveToNextBackendOrGh,
     setStep,
   ])
@@ -2752,7 +2754,7 @@ function OnboardingDialogContent() {
             isBackendSelection || isBackendStep
               ? 'bg-primary text-primary-foreground'
               : backendComplete
-                ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
+                ? 'bg-success/10 text-success'
                 : 'bg-muted text-muted-foreground'
           }`}
         >
@@ -2765,7 +2767,7 @@ function OnboardingDialogContent() {
             isGhStep
               ? 'bg-primary text-primary-foreground'
               : ghComplete
-                ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
+                ? 'bg-success/10 text-success'
                 : 'bg-muted text-muted-foreground'
           }`}
         >
@@ -2776,7 +2778,7 @@ function OnboardingDialogContent() {
         <div
           className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs ${
             step === 'complete'
-              ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
+              ? 'bg-success/10 text-success'
               : 'bg-muted text-muted-foreground'
           }`}
         >
@@ -2821,7 +2823,7 @@ function OnboardingDialogContent() {
             {step === 'usage-mode' ? (
               <UsageModeStep onSelect={handleUsageModeSelect} />
             ) : step === 'remote-setup' ? (
-              <RemoteSetupStep />
+              <RemoteSetupStep onComplete={continueAfterLocalChoice} />
             ) : step === 'wsl-setup' ? (
               <WslSetupStep
                 onComplete={() => {
@@ -3544,12 +3546,12 @@ function BackendSelectionState({
                 <div className="flex items-center gap-2">
                   <p className="text-sm font-medium">{label}</p>
                   {BETA_BACKENDS.has(backend) && (
-                    <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300">
+                    <span className="text-xs px-2 py-0.5 rounded bg-warning/10 text-warning">
                       beta
                     </span>
                   )}
                   {isReady && (
-                    <span className="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">
+                    <span className="text-xs px-2 py-0.5 rounded bg-success/10 text-success">
                       installed
                     </span>
                   )}

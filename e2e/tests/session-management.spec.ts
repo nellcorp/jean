@@ -1,4 +1,9 @@
-import { test, expect, activateWorktree } from '../fixtures/tauri-mock'
+import {
+  test,
+  expect,
+  activateWorktree,
+  createJeanSession,
+} from '../fixtures/tauri-mock'
 
 test.describe('Session Management', () => {
   test('create new session via + button', async ({ mockPage }) => {
@@ -9,7 +14,7 @@ test.describe('Session Management', () => {
     await activateWorktree(mockPage, 'fuzzy-tiger')
 
     // Click new session button
-    await mockPage.locator('button[aria-label="New session"]').click()
+    await createJeanSession(mockPage)
     await mockPage.waitForTimeout(500)
 
     // A session tab should appear with data-session-id
@@ -28,9 +33,9 @@ test.describe('Session Management', () => {
     await activateWorktree(mockPage, 'fuzzy-tiger')
 
     // Create two sessions
-    await mockPage.locator('button[aria-label="New session"]').click()
+    await createJeanSession(mockPage)
     await mockPage.waitForTimeout(500)
-    await mockPage.locator('button[aria-label="New session"]').click()
+    await createJeanSession(mockPage)
     await mockPage.waitForTimeout(500)
 
     // Should have 2 session tabs
@@ -42,8 +47,11 @@ test.describe('Session Management', () => {
     await secondTab.click()
     await mockPage.waitForTimeout(500)
 
-    // The clicked tab should now have the active class (font-medium)
-    await expect(secondTab).toHaveClass(/font-medium/, { timeout: 2000 })
+    // The selected tab uses active styling while the other tab is inactive.
+    await expect(secondTab).toHaveClass(/bg-muted text-foreground/, {
+      timeout: 2000,
+    })
+    await expect(tabs.first()).not.toHaveClass(/bg-muted text-foreground/)
   })
 
   test('rename session via double-click', async ({ mockPage }) => {
@@ -54,7 +62,7 @@ test.describe('Session Management', () => {
     await activateWorktree(mockPage, 'fuzzy-tiger')
 
     // Create a session
-    await mockPage.locator('button[aria-label="New session"]').click()
+    await createJeanSession(mockPage)
     await mockPage.waitForTimeout(500)
 
     const sessionTab = mockPage.locator('[data-session-id]').first()
@@ -70,7 +78,7 @@ test.describe('Session Management', () => {
 
     // Clear and type new name (force click to bypass DnD sortable disabled state)
     await input.click({ force: true })
-    await mockPage.keyboard.press('Meta+a')
+    await mockPage.keyboard.press('Control+a')
     await mockPage.keyboard.type('My Renamed Session')
     await mockPage.keyboard.press('Enter')
     await mockPage.waitForTimeout(300)

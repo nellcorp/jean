@@ -7,7 +7,7 @@ test.describe('Preferences', () => {
     await expect(mockPage.getByText('Test Project')).toBeVisible({
       timeout: 5000,
     })
-    await mockPage.keyboard.press('Meta+,')
+    await mockPage.keyboard.press('Control+,')
     const dialog = mockPage.getByRole('dialog')
     await expect(dialog).toBeVisible({ timeout: 3000 })
     return dialog
@@ -17,7 +17,7 @@ test.describe('Preferences', () => {
     dialog: ReturnType<typeof openDialog> extends Promise<infer T> ? T : never
   ) => dialog.locator('header').getByPlaceholder('Search settings...')
 
-  test('Cmd+, opens settings dialog', async ({ mockPage }) => {
+  test('Ctrl+, opens settings dialog', async ({ mockPage }) => {
     await openDialog(mockPage)
     await expect(
       mockPage.getByRole('dialog').filter({ hasText: 'Settings' })
@@ -68,16 +68,15 @@ test.describe('Preferences', () => {
     await mockPage.setViewportSize({ width: 1280, height: 720 })
     const dialog = await openDialog(mockPage)
     const searchInput = getDesktopHeaderSearchInput(dialog)
-    const desktopHeaderActions = searchInput.locator(
-      'xpath=ancestor::div[contains(@class, "ml-auto") and contains(@class, "md:flex")][1]'
-    )
-
     await searchInput.fill('provider')
     await expect(
       dialog.getByRole('option', { name: /Provider/i }).first()
     ).toBeVisible()
 
-    await desktopHeaderActions.getByRole('button', { name: 'Close' }).click()
+    await dialog
+      .locator('header')
+      .getByRole('button', { name: 'Close', exact: true })
+      .click()
 
     await expect(dialog).toBeHidden()
   })

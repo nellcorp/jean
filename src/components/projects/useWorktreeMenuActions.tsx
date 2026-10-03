@@ -7,12 +7,14 @@ import {
   useOpenWorktreeInFinder,
   useOpenWorktreeInTerminal,
   useOpenWorktreeInEditor,
+  useWebEditorUrl,
   useRunScripts,
 } from '@/services/projects'
 import { usePreferences } from '@/services/preferences'
 import { useSessions } from '@/services/chat'
 import { useTerminalStore } from '@/store/terminal-store'
 import { useUIStore } from '@/store/ui-store'
+import { preOpenWindow } from '@/lib/platform'
 
 interface UseWorktreeMenuActionsProps {
   worktree: Worktree
@@ -30,6 +32,7 @@ export function useWorktreeMenuActions({
   const openInFinder = useOpenWorktreeInFinder()
   const openInTerminal = useOpenWorktreeInTerminal()
   const openInEditor = useOpenWorktreeInEditor()
+  const hasWebEditor = useWebEditorUrl() !== null
   const { data: runScripts = [] } = useRunScripts(worktree.path)
   const { data: preferences } = usePreferences()
   const { data: sessionsData } = useSessions(worktree.id, worktree.path)
@@ -76,8 +79,9 @@ export function useWorktreeMenuActions({
     openInEditor.mutate({
       worktreePath: worktree.path,
       editor: preferences?.editor,
+      preOpenedWindow: hasWebEditor ? preOpenWindow() : null,
     })
-  }, [openInEditor, worktree.path, preferences?.editor])
+  }, [openInEditor, worktree.path, preferences?.editor, hasWebEditor])
 
   const handleArchiveOrClose = useCallback(() => {
     if (isBase) {

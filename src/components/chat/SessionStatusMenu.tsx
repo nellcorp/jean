@@ -1,4 +1,4 @@
-import { Check, CircleDashed } from 'lucide-react'
+import { Check, CircleDashed } from '@/components/icons/reicon'
 import { StatusIndicator } from '@/components/ui/status-indicator'
 import {
   ContextMenuItem,
@@ -51,11 +51,6 @@ export function SessionStatusMenu({
                 ? statusConfig[statusOverride].indicatorStatus
                 : automaticConfig.indicatorStatus
             }
-            variant={
-              statusOverride
-                ? statusConfig[statusOverride].indicatorVariant
-                : automaticConfig.indicatorVariant
-            }
             shape={
               statusOverride
                 ? statusConfig[statusOverride].indicatorShape
@@ -90,7 +85,6 @@ export function SessionStatusMenu({
             >
               <StatusIndicator
                 status={config.indicatorStatus}
-                variant={config.indicatorVariant}
                 shape={config.indicatorShape}
                 label={config.label}
                 className="h-2 w-2"

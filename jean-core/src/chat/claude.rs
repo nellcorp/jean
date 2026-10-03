@@ -1,5 +1,5 @@
 use super::coalesce::ChunkCoalescer;
-use super::run_log::tool_result_content_to_string;
+use super::run_log::{tool_result_content_to_string, tool_result_is_error};
 use super::types::{
     is_claude_compaction_summary_text, CompactMetadata, ContentBlock, EffortLevel,
     PermissionDenial, PermissionDeniedEvent, ThinkingLevel, ToolCall, UsageData,
@@ -7,8 +7,8 @@ use super::types::{
 use crate::claude_cli::output_styles::DEFAULT_OUTPUT_STYLE;
 use crate::http_server::EmitExt;
 use crate::projects::github_issues::{
-    get_github_contexts_dir, get_session_advisory_refs, get_session_issue_refs,
-    get_session_pr_refs, get_session_security_refs,
+    get_github_contexts_dir, get_preferred_issue_refs, get_preferred_pr_refs,
+    get_session_advisory_refs, get_session_security_refs,
 };
 use crate::projects::linear_issues::get_session_linear_refs;
 use crate::projects::sentry_issues::get_session_sentry_refs;
@@ -47,17 +47,24 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 - One task per subagent for focused execution\n\
 \n\
 ### 4. Self-Improvement Loop\n\
-- After ANY correction from the user: update '.ai/lessons.md' with the pattern\n\
-- Write rules for yourself that prevent the same mistake\n\
-- Ruthlessly iterate on these lessons until mistake rate drops\n\
+- Only update '.ai/lessons.md' for general, project-wide learning that applies across features\n\
+- Do not add feature-specific, bug-fix-specific, or small/local lessons\n\
+- Remove narrow or specific entries when you detect them\n\
 - Review lessons at session start for relevant project\n\
+- Keep '.ai/lessons.md' concise by merging duplicate rules and removing obsolete entries\n\
 \n\
 ### 5. Verification Before Done\n\
 - Never mark a task complete without proving it works\n\
 - Diff behavior between main and your changes when relevant\n\
 - Ask yourself: \"Would a staff engineer approve this?\"\n\
-- Run tests, check logs, demonstrate correctness\n\
+- Scale verification to risk: run the narrowest check that proves the change (one test file/name, one crate/package, or a typecheck of the touched area)\n\
+- Do NOT run the full test suite, full lint, or project-wide check scripts after every edit. Run broad checks once, at the end, only for cross-cutting changes (shared types, persistence, public APIs, large refactors) or when the user asks.\n\
+- Skip tests for docs, copy, comments, styling-only, and prompt/config text changes; say that you skipped them.\n\
+- Do not re-run a passing check when the code it covers has not changed since.\n\
+- Write new tests only for behavior that can break silently: business logic, parsing/serialization, state transitions, persistence, and a regression test for each fixed bug.\n\
+- Do NOT write tests that only check DOM markup, CSS classes, snapshots, static text or prompt copy, constants, simple prop pass-through, library/framework behavior, or that only assert mocks were called. Verify UI changes in the running app instead.\n\
 - Before UI, HTTP, browser, or end-to-end verification, call Jean MCP `get_run_environments` and test against the returned url/port/command when a Run environment is available.\n\
+- For the current selected project, if there is no other browser testing method, use the Agent Browser when it is available.\n\
 \n\
 ### 6. Demand Elegance (Balanced)\n\
 - For non-trivial changes: pause and ask \"is there a more elegant way?\"\n\
@@ -72,12 +79,14 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 - Go fix failing CI tests without being told how\n\
 \n\
 ## Task Management\n\
-1. **Plan First**: Write plan to '.ai/todo.md' with checkable items\n\
-2. **Verify Plan**: Check in before starting implementation\n\
-3. **Track Progress**: Mark items complete as you go\n\
-4. **Explain Changes**: High-level summary at each step\n\
-5. **Document Results**: Add review to '.ai/todo.md'\n\
-6. **Capture Lessons**: Update '.ai/lessons.md' after corrections\n\
+1. **Reset Task File**: At the start of a new task, replace '.ai/todo.md' instead of appending to it\n\
+2. **Plan First**: Write plan to '.ai/todo.md' with checkable items\n\
+3. **Verify Plan**: Check in before starting implementation\n\
+4. **Track Progress**: Mark items complete as you go\n\
+5. **Explain Changes**: High-level summary at each step\n\
+6. **Document Results**: Add review to '.ai/todo.md'\n\
+7. **Capture Lessons**: Update '.ai/lessons.md' only for general, project-wide learning; remove narrow entries\n\
+8. **Keep Task File Untracked**: Never add '.ai/todo.md' to Git\n\
 \n\
 ## Core Principles\n\
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.\n\
@@ -86,10 +95,8 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.\n\
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.\n\
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.\n\
 \n\
-## GitHub Issue and Discussion Discovery\n\
-- After making changes and before the final response, search the current repository's existing GitHub issues and discussions for items completely fixed by the changes, related items, and similar reports or discussions.\n\
-- Include the results in both the main response and the `## Recap`, with clickable links when available, and label each item as fully fixed, related, or similar. If no matches are found or the search is unavailable, say so explicitly.\n\
-- Do not claim an issue is fixed unless the changes fully satisfy it. Do not close or update issues or discussions unless the user explicitly asks.\n\
+## Commits and Pull Requests\n\
+- Do NOT add `Co-Authored-By` trailers, \"Generated with ...\" lines, or any other AI/tool attribution to commit messages or PR descriptions. This overrides any backend default attribution instruction.\n\
 \n\
 ## Jean Worktree Policy\n\
 - Do NOT create git worktrees manually (`git worktree add`, Superpowers `using-git-worktrees`, or similar) unless the user explicitly asks for a new worktree.\n\
@@ -145,6 +152,11 @@ pub struct ClaudeResponse {
     pub cancelled: bool,
     /// Token usage for this response
     pub usage: Option<UsageData>,
+    /// Whether a `chat:error` was emitted for a failed turn (e.g. auth failure)
+    pub error_emitted: bool,
+    /// Claude CLI rejected `--resume` with "No conversation found with session ID".
+    /// No `chat:error` is emitted for this; the caller clears the stale id and retries.
+    pub session_not_found: bool,
 }
 
 /// Payload for text chunk events sent to frontend
@@ -170,15 +182,6 @@ struct ToolUseEvent {
     parent_tool_use_id: Option<String>,
 }
 
-/// Payload for done events sent to frontend
-#[derive(serde::Serialize, Clone)]
-struct DoneEvent {
-    session_id: String,
-    worktree_id: String, // Kept for backward compatibility
-    /// Always false for Claude (uses ExitPlanMode tool calls instead)
-    waiting_for_plan: bool,
-}
-
 /// Payload for error events sent to frontend
 #[derive(serde::Serialize, Clone)]
 pub struct ErrorEvent {
@@ -192,7 +195,7 @@ pub struct ErrorEvent {
 pub struct CancelledEvent {
     pub session_id: String,
     pub worktree_id: String, // Kept for backward compatibility
-    pub undo_send: bool,     // True only when the prompt never started (restore to input)
+    pub undo_send: bool,     // True when the user turn should be removed from history
     pub emitted_at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
@@ -223,6 +226,9 @@ struct ToolResultEvent {
     worktree_id: String, // Kept for backward compatibility
     tool_use_id: String,
     output: String,
+    /// `Some(true)` when the tool result was flagged `is_error`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_error: Option<bool>,
 }
 
 /// Payload for live tool-event (e.g. Monitor notifications) streamed to frontend.
@@ -318,6 +324,20 @@ fn stream_event_content_block_stop(msg: &serde_json::Value) -> Option<usize> {
     Some(event.get("index")?.as_u64()? as usize)
 }
 
+/// Complete tool input from streamed `input_json_delta` chunks, or `None`
+/// while the JSON is still incomplete. Claude CLI sends an empty first delta
+/// after a `content_block_start` with `input: {}`; that is not a finished input.
+fn streamed_tool_input(
+    start_input: &serde_json::Value,
+    input_buf: &str,
+) -> Option<serde_json::Value> {
+    if input_buf.trim().is_empty() {
+        let has_input = start_input.as_object().is_some_and(|obj| !obj.is_empty());
+        return has_input.then(|| start_input.clone());
+    }
+    serde_json::from_str(input_buf).ok()
+}
+
 // =============================================================================
 // Detached Claude CLI execution
 // =============================================================================
@@ -395,76 +415,6 @@ pub fn apply_custom_profile_env(cmd: &mut std::process::Command, profile_name: O
     }
 }
 
-/// Merge Jean-managed settings over a custom CLI profile's settings JSON.
-///
-/// Claude CLI's `--settings` is a non-variadic option, so passing it twice makes
-/// the last one win and silently discards the first. Both sources must therefore
-/// be combined into a single value. Jean's keys take precedence on conflict.
-fn merge_claude_settings(
-    profile_settings: Option<&str>,
-    jean_settings: Option<&serde_json::Value>,
-) -> Option<serde_json::Value> {
-    let profile_obj =
-        profile_settings.and_then(|raw| match serde_json::from_str::<serde_json::Value>(raw) {
-            Ok(serde_json::Value::Object(map)) => Some(map),
-            Ok(_) => {
-                log::warn!("CLI profile settings is not a JSON object; ignoring");
-                None
-            }
-            Err(e) => {
-                log::warn!("Invalid CLI profile JSON: {e}");
-                None
-            }
-        });
-    let jean_obj = jean_settings.and_then(|value| value.as_object());
-
-    match (profile_obj, jean_obj) {
-        (None, None) => None,
-        (None, Some(jean)) => Some(serde_json::Value::Object(jean.clone())),
-        (Some(profile), None) => Some(serde_json::Value::Object(profile)),
-        (Some(mut profile), Some(jean)) => {
-            for (key, value) in jean {
-                profile.insert(key.clone(), value.clone());
-            }
-            Some(serde_json::Value::Object(profile))
-        }
-    }
-}
-
-/// Write merged settings to a per-session file so profile secrets never appear
-/// in the process arguments. Returns the path to pass to `--settings`.
-fn write_merged_settings_file(
-    app: &tauri::AppHandle,
-    session_id: &str,
-    settings: &serde_json::Value,
-) -> Result<String, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?
-        .join("runs")
-        .join(session_id);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
-
-    let path = dir.join("claude-settings.json");
-    let temp_path = dir.join("claude-settings.json.tmp");
-    let contents = serde_json::to_string_pretty(settings)
-        .map_err(|e| format!("Failed to serialize settings: {e}"))?;
-    std::fs::write(&temp_path, contents)
-        .map_err(|e| format!("Failed to write {}: {e}", temp_path.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600));
-    }
-
-    std::fs::rename(&temp_path, &path)
-        .map_err(|e| format!("Failed to finalize {}: {e}", path.display()))?;
-    Ok(path.to_string_lossy().to_string())
-}
-
 fn should_mirror_custom_profile_env_for_detached() -> bool {
     cfg!(windows) && !crate::platform::get_wsl_config().enabled
 }
@@ -479,20 +429,221 @@ fn split_fast_model(model: &str) -> (&str, bool) {
     }
 }
 
-fn claude_permission_mode(execution_mode: Option<&str>, running_as_root: bool) -> &'static str {
+fn claude_permission_mode(execution_mode: Option<&str>) -> &'static str {
     match execution_mode.unwrap_or("plan") {
         "build" => "acceptEdits",
-        // Claude Code rejects bypassPermissions when the process runs as root.
-        // Fall back to its most permissive supported mode so server installs
-        // can still start a Claude turn instead of producing no chat output.
-        "yolo" if running_as_root => "acceptEdits",
         "yolo" => "bypassPermissions",
         _ => "plan",
     }
 }
 
+/// Claude Code refuses bypassPermissions as root unless the process declares a
+/// deliberate sandbox (`IS_SANDBOX=1`, checked by the CLI's
+/// `isRootOutsideDeliberateSandbox`). The user opted into YOLO explicitly, so
+/// set it for root YOLO runs instead of degrading to acceptEdits (which denies
+/// WebFetch, WebSearch, MCP tools, etc. in headless mode).
+fn claude_needs_root_sandbox_env(execution_mode: Option<&str>, running_as_root: bool) -> bool {
+    running_as_root && execution_mode == Some("yolo")
+}
+
 fn claude_allows_all_bash(execution_mode: Option<&str>) -> bool {
     execution_mode == Some("yolo")
+}
+
+/// Extract `--json-schema` structured output from Claude stream-json output.
+///
+/// Prefers the final `result` event's `structured_output` field (the CLI sets
+/// it to the last StructuredOutput call). Falls back to the LAST
+/// `StructuredOutput` tool_use input, since Claude may retry the tool after a
+/// schema validation failure.
+pub fn extract_claude_structured_output(output: &str) -> Option<serde_json::Value> {
+    let mut from_result = None;
+    let mut last_tool_input = None;
+
+    for line in output.lines() {
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        match parsed.get("type").and_then(|t| t.as_str()) {
+            Some("result") => {
+                if let Some(value) = parsed.get("structured_output").filter(|v| !v.is_null()) {
+                    from_result = Some(value.clone());
+                }
+            }
+            Some("assistant") => {
+                let blocks = parsed
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array());
+                for block in blocks.into_iter().flatten() {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                        && block.get("name").and_then(|n| n.as_str()) == Some("StructuredOutput")
+                    {
+                        if let Some(input) = block.get("input") {
+                            last_tool_input = Some(input.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    from_result.or(last_tool_input)
+}
+
+const SYSTEM_PROMPT_SNAPSHOT_FLAG: &str = "--system-prompt-snapshot";
+
+fn help_text_mentions_flag(help: &str, flag: &str) -> bool {
+    help.split(|c: char| c.is_whitespace() || c == ',')
+        .any(|token| token == flag)
+}
+
+/// Whether the Claude CLI at `cli_path` lists `flag` in `--help`.
+/// Cached per (binary, mtime, flag); failed probes are not cached.
+fn claude_cli_supports_flag(cli_path: &std::path::Path, flag: &'static str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    type Key = (
+        std::path::PathBuf,
+        Option<std::time::SystemTime>,
+        &'static str,
+    );
+    static CACHE: OnceLock<Mutex<HashMap<Key, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    // Include mtime so an in-app install/downgrade re-probes the new binary.
+    let modified = std::fs::metadata(cli_path).and_then(|m| m.modified()).ok();
+    let key = (cli_path.to_path_buf(), modified, flag);
+    if let Some(supported) = cache.lock().ok().and_then(|c| c.get(&key).copied()) {
+        return supported;
+    }
+
+    let output = match crate::platform::cli_command(&cli_path.to_string_lossy(), None)
+        .arg("--help")
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        // Don't cache probe failures; omit the flag for this run only.
+        _ => return false,
+    };
+    let supported = help_text_mentions_flag(&String::from_utf8_lossy(&output.stdout), flag);
+    if !supported {
+        log::debug!("Claude CLI {} does not support {flag}", cli_path.display());
+    }
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, supported);
+    }
+    supported
+}
+
+/// Runtime Claude settings (thinking, fast mode, ultracode) merged on top of
+/// a custom profile's settings object. Runtime keys win.
+fn merge_claude_settings(
+    profile_settings: Option<serde_json::Value>,
+    runtime_settings: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut merged = match profile_settings {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    merged.extend(runtime_settings);
+    serde_json::Value::Object(merged)
+}
+
+/// Write settings that may contain profile secrets to a private file (0600 on
+/// Unix) so they never appear on the command line.
+fn write_private_settings_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        let mut file = options.open(path)?;
+        // mode() only applies on create; tighten pre-existing files too.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        options.open(path)?.write_all(contents.as_bytes())
+    }
+}
+
+/// Resolve the single `--settings` value for a Claude run.
+///
+/// Claude CLI's `--settings` is single-valued, so the custom profile file and
+/// runtime settings must be combined. With a profile, the merged JSON is
+/// written to a private per-session file under app data (secrets stay off the
+/// command line). Without a profile, runtime settings are passed inline.
+fn resolve_claude_settings_arg(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    custom_profile_name: Option<&str>,
+    runtime_settings: serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let profile_path = custom_profile_name
+        .filter(|name| !name.is_empty())
+        .and_then(|name| match crate::get_cli_profile_path(name) {
+            Ok(path) if path.exists() => Some(path),
+            Ok(path) => {
+                log::warn!(
+                    "CLI profile file not found for '{name}': {}",
+                    path.display()
+                );
+                None
+            }
+            Err(_) => None,
+        });
+
+    let Some(profile_path) = profile_path else {
+        return (!runtime_settings.is_empty())
+            .then(|| serde_json::Value::Object(runtime_settings).to_string());
+    };
+    let profile_arg = profile_path.to_string_lossy().to_string();
+    if runtime_settings.is_empty() {
+        return Some(profile_arg);
+    }
+
+    let profile_settings = match std::fs::read_to_string(&profile_path)
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string()))
+    {
+        Ok(value) => value,
+        Err(error) => {
+            log::warn!(
+                "Failed to read CLI profile '{}', ignoring runtime settings: {error}",
+                profile_path.display()
+            );
+            return Some(profile_arg);
+        }
+    };
+
+    let merged = merge_claude_settings(Some(profile_settings), runtime_settings);
+    let merged_path = match app.path().app_data_dir() {
+        Ok(dir) => dir
+            .join("claude-settings")
+            .join(format!("{session_id}.json")),
+        Err(error) => {
+            log::warn!("No app data dir for merged Claude settings: {error}");
+            return Some(profile_arg);
+        }
+    };
+    match write_private_settings_file(&merged_path, &merged.to_string()) {
+        Ok(()) => Some(merged_path.to_string_lossy().to_string()),
+        Err(error) => {
+            log::warn!(
+                "Failed to write merged Claude settings {}: {error}",
+                merged_path.display()
+            );
+            Some(profile_arg)
+        }
+    }
 }
 
 fn is_running_as_root() -> bool {
@@ -613,10 +764,12 @@ fn build_claude_args(
     };
 
     // Permission mode
-    let running_as_root = is_running_as_root();
-    let perm_mode = claude_permission_mode(execution_mode, running_as_root);
+    let perm_mode = claude_permission_mode(execution_mode);
     args.push("--permission-mode".to_string());
     args.push(perm_mode.to_string());
+    if claude_needs_root_sandbox_env(execution_mode, is_running_as_root()) {
+        env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
+    }
 
     // In build/yolo, remove ExitPlanMode entirely so Claude can't loop back
     // into plan-approval after the user already approved one.
@@ -625,66 +778,35 @@ fn build_claude_args(
         args.push("ExitPlanMode".to_string());
     }
 
-    // Custom profile settings: read the profile file so it can be merged with
-    // Jean's own settings below (a single --settings flag wins; two would not).
-    let mut profile_settings: Option<String> = None;
-    let mut profile_path: Option<std::path::PathBuf> = None;
-    if let Some(name) = custom_profile_name {
-        if !name.is_empty() {
-            if let Ok(path) = crate::get_cli_profile_path(name) {
-                if path.exists() {
-                    match std::fs::read_to_string(&path) {
-                        Ok(contents) => {
-                            profile_settings = Some(contents);
-                            profile_path = Some(path);
-                        }
-                        Err(e) => log::warn!(
-                            "Failed to read CLI profile '{name}' at {}: {e}",
-                            path.display()
-                        ),
-                    }
-                } else {
-                    log::warn!(
-                        "CLI profile file not found for '{name}': {}",
-                        path.display()
-                    );
-                }
-            }
-        }
-    }
     if should_mirror_custom_profile_env_for_detached() {
         env_vars.extend(load_custom_profile_env_vars(custom_profile_name));
     }
 
-    // Thinking/effort settings: passed as separate --settings JSON (no secrets here)
-    let mut settings_json: Option<serde_json::Value> = None;
+    // Runtime settings merged with the custom profile into ONE --settings value
+    // (the CLI option is single-valued; a second --settings replaces the first).
+    let mut runtime_settings = serde_json::Map::new();
 
     if let Some(effort) = effort_level {
-        // Opus 4.6 adaptive thinking: use effort parameter via --settings JSON
-        if let Some(effort_value) = effort.effort_value() {
-            let obj = settings_json.get_or_insert_with(|| serde_json::json!({}));
-            if let Some(map) = obj.as_object_mut() {
-                map.insert(
-                    "effortLevel".to_string(),
-                    serde_json::Value::String(effort_value.to_string()),
-                );
-            }
+        // --effort accepts low/medium/high/xhigh/max (settings effortLevel
+        // silently drops max). Off / Adaptive omit it so the model decides.
+        if let Some(flag) = effort.claude_effort_flag() {
+            args.push("--effort".to_string());
+            args.push(flag.to_string());
         }
-        // Off / Adaptive: omit thinking/effort settings so the model decides
-        // (still send custom profile / other settings if present)
+        if effort.is_claude_ultracode() {
+            // Session-scoped ultracode: xhigh effort + workflow orchestration.
+            runtime_settings.insert("ultracode".to_string(), serde_json::Value::Bool(true));
+        }
     } else {
         // Traditional thinking levels (Sonnet, Haiku)
         if let Some(level) = thinking_level {
             // Adaptive: omit alwaysThinkingEnabled / MAX_THINKING_TOKENS so
             // models that support adaptive thinking can choose depth.
             if !level.omits_thinking_settings() {
-                let obj = settings_json.get_or_insert_with(|| serde_json::json!({}));
-                if let Some(map) = obj.as_object_mut() {
-                    map.insert(
-                        "alwaysThinkingEnabled".to_string(),
-                        serde_json::Value::Bool(level.is_enabled()),
-                    );
-                }
+                runtime_settings.insert(
+                    "alwaysThinkingEnabled".to_string(),
+                    serde_json::Value::Bool(level.is_enabled()),
+                );
 
                 if let Some(tokens) = level.thinking_tokens() {
                     env_vars.push(("MAX_THINKING_TOKENS".to_string(), tokens.to_string()));
@@ -693,12 +815,9 @@ fn build_claude_args(
         }
     }
 
-    // Fast mode: inject "fastMode": true into settings JSON
+    // Fast mode: inject "fastMode": true into settings
     if is_fast {
-        let obj = settings_json.get_or_insert_with(|| serde_json::json!({}));
-        if let Some(map) = obj.as_object_mut() {
-            map.insert("fastMode".to_string(), serde_json::Value::Bool(true));
-        }
+        runtime_settings.insert("fastMode".to_string(), serde_json::Value::Bool(true));
     }
 
     // Fast mode picks the CLI's default fast Opus version (4.8 in Claude Code
@@ -711,48 +830,25 @@ fn build_claude_args(
         ));
     }
 
-    // Output style: Claude CLI's `outputStyle` settings key. Unset = Default.
-    if let Some(style) = output_style {
-        let style = style.trim();
-        if !style.is_empty() && style != DEFAULT_OUTPUT_STYLE {
-            let obj = settings_json.get_or_insert_with(|| serde_json::json!({}));
-            if let Some(map) = obj.as_object_mut() {
-                map.insert(
-                    "outputStyle".to_string(),
-                    serde_json::Value::String(style.to_string()),
-                );
-            }
-        }
+    if let Some(style) = output_style
+        .map(str::trim)
+        .filter(|style| !style.is_empty() && *style != DEFAULT_OUTPUT_STYLE)
+    {
+        runtime_settings.insert(
+            "outputStyle".to_string(),
+            serde_json::Value::String(style.to_string()),
+        );
     }
 
-    // Emit a single --settings: profile settings merged with Jean's (Jean wins).
-    if let Some(merged) = merge_claude_settings(profile_settings.as_deref(), settings_json.as_ref())
+    if let Some(settings) =
+        resolve_claude_settings_arg(app, session_id, custom_profile_name, runtime_settings)
     {
-        if profile_settings.is_some() {
-            // The profile may hold API keys, so write them to a file instead of
-            // exposing them in the process arguments.
-            match write_merged_settings_file(app, session_id, &merged) {
-                Ok(path) => {
-                    args.push("--settings".to_string());
-                    args.push(path);
-                }
-                Err(e) => {
-                    log::warn!("Failed to write merged Claude settings ({e}); falling back to the profile file alone");
-                    if let Some(path) = &profile_path {
-                        args.push("--settings".to_string());
-                        args.push(path.to_string_lossy().to_string());
-                    }
-                }
-            }
-        } else {
-            args.push("--settings".to_string());
-            args.push(merged.to_string());
-        }
+        args.push("--settings".to_string());
+        args.push(settings);
     }
 
     // Allowed tools
-    // Make unrestricted shell access explicit for every YOLO session. This is
-    // also required when root uses the acceptEdits compatibility fallback.
+    // Make unrestricted shell access explicit for every YOLO session.
     if claude_allows_all_bash(execution_mode) {
         args.push("--allowedTools".to_string());
         args.push("Bash(*)".to_string());
@@ -783,6 +879,15 @@ fn build_claude_args(
     // Chrome browser integration (beta)
     if chrome_enabled {
         args.push("--chrome".to_string());
+        // Claude in Chrome asks for per-site approval even in bypassPermissions
+        // mode (allow rules do not skip it), and headless runs deny every ask.
+        // In YOLO, route every ask to Jean MCP, which approves it.
+        if execution_mode == Some("yolo") {
+            if let Some(tool) = jean_permission_prompt_tool(mcp_config) {
+                args.push("--permission-prompt-tool".to_string());
+                args.push(tool);
+            }
+        }
     }
 
     // Build combined system prompt parts
@@ -896,16 +1001,7 @@ fn build_claude_args(
     let mut all_context_paths: Vec<std::path::PathBuf> = Vec::new();
 
     // Check for issue context files (shared storage)
-    // Merge session_id refs + worktree_id refs (worktree refs cover PR/issue-based worktrees
-    // where the background thread may not have copied refs to the session yet)
-    let mut issue_keys = get_session_issue_refs(app, session_id).unwrap_or_default();
-    if let Ok(wt_keys) = get_session_issue_refs(app, worktree_id) {
-        for key in wt_keys {
-            if !issue_keys.contains(&key) {
-                issue_keys.push(key);
-            }
-        }
-    }
+    let issue_keys = get_preferred_issue_refs(app, session_id, worktree_id);
     if !issue_keys.is_empty() {
         if let Ok(contexts_dir) = get_github_contexts_dir(app) {
             log::debug!(
@@ -930,14 +1026,7 @@ fn build_claude_args(
     }
 
     // Check for PR context files (shared storage)
-    let mut pr_keys = get_session_pr_refs(app, session_id).unwrap_or_default();
-    if let Ok(wt_keys) = get_session_pr_refs(app, worktree_id) {
-        for key in wt_keys {
-            if !pr_keys.contains(&key) {
-                pr_keys.push(key);
-            }
-        }
-    }
+    let pr_keys = get_preferred_pr_refs(app, session_id, worktree_id);
     if !pr_keys.is_empty() {
         if let Ok(contexts_dir) = get_github_contexts_dir(app) {
             for key in pr_keys {
@@ -1220,6 +1309,16 @@ fn build_claude_args(
         args.push(claude_sid.to_string());
     }
 
+    // Claude records the first turn's system prompt and replays it verbatim on
+    // every resume (snapshot "on" by default). Jean's per-turn appended prompt
+    // (execution mode, attached context) changes between turns, so render it
+    // fresh. Older CLIs reject unknown flags, so probe support first.
+    let cli_path = crate::claude_cli::resolve_cli_binary(app);
+    if claude_cli_supports_flag(&cli_path, SYSTEM_PROMPT_SNAPSHOT_FLAG) {
+        args.push(SYSTEM_PROMPT_SNAPSHOT_FLAG.to_string());
+        args.push("off".to_string());
+    }
+
     // Disable background tasks - forces all Task subagents to run in foreground.
     // Background tasks are killed when --print mode exits the CLI process.
     // Foreground tasks still run in parallel when called in the same message.
@@ -1283,6 +1382,17 @@ fn append_mcp_config_args(args: &mut Vec<String>, mcp_config: Option<&str>) {
             }
         }
     }
+}
+
+/// Jean MCP permission hook tool name, when the Jean MCP server is in `mcp_config`.
+fn jean_permission_prompt_tool(mcp_config: Option<&str>) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(mcp_config?).ok()?;
+    let server_name = crate::jean_mcp_config::current_mode().server_name();
+    parsed.get("mcpServers")?.get(server_name)?;
+    Some(format!(
+        "mcp__{server_name}__{}",
+        crate::jean_mcp_core::CLAUDE_PERMISSION_PROMPT_TOOL
+    ))
 }
 
 /// Execute Claude CLI in detached mode.
@@ -1419,6 +1529,8 @@ pub fn execute_claude_detached(
                 content_blocks: vec![],
                 cancelled: true,
                 usage: None,
+                error_emitted: false,
+                session_not_found: false,
             },
         ));
     }
@@ -1429,12 +1541,12 @@ pub fn execute_claude_detached(
     let response = match tail_claude_output(app, session_id, worktree_id, output_file, pid) {
         Ok(resp) => {
             super::decrement_tailer_count();
-            super::registry::unregister_process(session_id);
+            super::registry::unregister_process_if_owned(session_id, pid);
             resp
         }
         Err(e) => {
             super::decrement_tailer_count();
-            super::registry::unregister_process(session_id);
+            super::registry::unregister_process_if_owned(session_id, pid);
             return Err(e);
         }
     };
@@ -1501,15 +1613,16 @@ fn startup_failure_message(
     )
 }
 
-fn terminate_failed_startup(pid: u32) {
+/// Kill a detached Claude CLI and its children (same process-tree kill as cancel).
+fn kill_claude_process_tree(pid: u32) {
     if pid <= 1 {
         return;
     }
 
     if let Err(tree_error) = crate::platform::kill_process_tree(pid) {
-        log::warn!("Failed to terminate startup process group {pid}: {tree_error}");
+        log::warn!("Failed to kill Claude process group {pid}: {tree_error}");
         if let Err(process_error) = crate::platform::kill_process(pid) {
-            log::warn!("Failed to terminate startup process {pid}: {process_error}");
+            log::warn!("Failed to kill Claude process {pid}: {process_error}");
         }
     }
 }
@@ -1569,6 +1682,11 @@ pub fn tail_claude_output(
     // detect those results, map them back to the originating tool_use, and
     // merge them into the denial event emitted on the result message.
     let mut synthesized_denials: Vec<PermissionDenial> = Vec::new();
+    // API failure (auth, billing, ...) reported before any real output. Kept
+    // out of the transcript so the turn fails instead of completing (#780).
+    let mut api_error: Option<String> = None;
+    // `--resume` with an unknown session id ("No conversation found ...").
+    let mut session_not_found = false;
 
     // Track Monitor tool_use_ids that are currently armed along with their
     // arm-time and declared timeout_ms. Claude CLI keeps the stream open
@@ -1658,6 +1776,9 @@ pub fn tail_claude_output(
                 Err(e) => {
                     log::trace!("Failed to parse line as JSON: {e}");
                     let trimmed = line.trim().to_string();
+                    if is_claude_session_not_found_text(&trimmed) {
+                        session_not_found = true;
+                    }
                     if !trimmed.is_empty() {
                         error_lines.push(trimmed);
                     }
@@ -1726,11 +1847,8 @@ pub fn tail_claude_output(
                         continue;
                     }
 
-                    let input = if input_buf.trim().is_empty() {
-                        pending_tool.input.clone()
-                    } else {
-                        serde_json::from_str::<serde_json::Value>(&input_buf)
-                            .unwrap_or_else(|_| pending_tool.input.clone())
+                    let Some(input) = streamed_tool_input(&pending_tool.input, &input_buf) else {
+                        continue;
                     };
 
                     let id = pending_tool.id.clone();
@@ -1741,6 +1859,7 @@ pub fn tail_claude_output(
                         name: name.clone(),
                         input: input.clone(),
                         output: None,
+                        is_error: None,
                         parent_tool_use_id: current_parent_tool_use_id.clone(),
                     });
                     content_blocks.push(ContentBlock::ToolUse {
@@ -1771,25 +1890,7 @@ pub fn tail_claude_output(
                     log::trace!(
                         "Detected blocking tool {name} from stream_event, killing detached process"
                     );
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGKILL);
-                    }
-                    #[cfg(windows)]
-                    {
-                        let _ = crate::platform::silent_command("taskkill")
-                            .args(["/F", "/PID", &pid.to_string()])
-                            .output();
-                    }
-
-                    let done_event = DoneEvent {
-                        session_id: session_id.to_string(),
-                        worktree_id: worktree_id.to_string(),
-                        waiting_for_plan: false,
-                    };
-                    if let Err(e) = app.emit_all("chat:done", &done_event) {
-                        log::error!("Failed to emit done event: {e}");
-                    }
+                    kill_claude_process_tree(pid);
 
                     return Ok(ClaudeResponse {
                         content: full_content,
@@ -1798,6 +1899,8 @@ pub fn tail_claude_output(
                         content_blocks,
                         cancelled: false,
                         usage: None,
+                        error_emitted: false,
+                        session_not_found: false,
                     });
                 }
             }
@@ -1818,6 +1921,18 @@ pub fn tail_claude_output(
                         .find(|(_, arm)| arm.initial_turn_finished)
                         .map(|(id, _)| id.clone());
 
+                    // Synthetic API-error message (auth, billing, overload...).
+                    // Always a failed turn, even after partial output; keep its
+                    // text out of the transcript and report it via chat:error.
+                    if let Some(text) = assistant_api_error_text(&msg) {
+                        api_error = Some(text);
+                        continue;
+                    }
+
+                    // Subagent (Task/Agent) text and thinking belong to the
+                    // subagent, not the main reply. Its tool calls stay.
+                    let is_subagent = current_parent_tool_use_id.is_some();
+
                     if let Some(message) = msg.get("message") {
                         if let Some(blocks) = message.get("content").and_then(|c| c.as_array()) {
                             for block in blocks {
@@ -1825,7 +1940,7 @@ pub fn tail_claude_output(
                                     block.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                                 match block_type {
-                                    "text" => {
+                                    "text" if !is_subagent => {
                                         if let Some(text) =
                                             block.get("text").and_then(|v| v.as_str())
                                         {
@@ -1977,6 +2092,7 @@ pub fn tail_claude_output(
                                             input: input.clone(),
                                             output: None,
                                             parent_tool_use_id: current_parent_tool_use_id.clone(),
+                                            is_error: None,
                                         });
 
                                         content_blocks.push(ContentBlock::ToolUse {
@@ -2067,27 +2183,8 @@ pub fn tail_claude_output(
                                         if name == "AskUserQuestion" || name == "ExitPlanMode" {
                                             log::trace!("Detected blocking tool {name}, killing detached process");
 
-                                            // Kill the detached process
-                                            #[cfg(unix)]
-                                            unsafe {
-                                                libc::kill(pid as i32, libc::SIGKILL);
-                                            }
-                                            #[cfg(windows)]
-                                            {
-                                                let _ = crate::platform::silent_command("taskkill")
-                                                    .args(["/F", "/PID", &pid.to_string()])
-                                                    .output();
-                                            }
-
-                                            // Emit done event so frontend knows streaming is complete
-                                            let done_event = DoneEvent {
-                                                session_id: session_id.to_string(),
-                                                worktree_id: worktree_id.to_string(),
-                                                waiting_for_plan: false,
-                                            };
-                                            if let Err(e) = app.emit_all("chat:done", &done_event) {
-                                                log::error!("Failed to emit done event: {e}");
-                                            }
+                                            // Kill the detached process tree
+                                            kill_claude_process_tree(pid);
 
                                             // Return partial response (blocking tool is already in tool_calls)
                                             return Ok(ClaudeResponse {
@@ -2097,12 +2194,16 @@ pub fn tail_claude_output(
                                                 content_blocks,
                                                 cancelled: false,
                                                 usage: None, // No usage for partial responses
+                                                error_emitted: false,
+                                                session_not_found: false,
                                             });
                                         }
                                     }
-                                    "thinking" => {
-                                        if let Some(thinking) =
-                                            block.get("thinking").and_then(|v| v.as_str())
+                                    "thinking" if !is_subagent => {
+                                        if let Some(thinking) = block
+                                            .get("thinking")
+                                            .and_then(|v| v.as_str())
+                                            .filter(|t| !t.is_empty())
                                         {
                                             // Thinking events must not overtake buffered text.
                                             flush_pending_chunks(
@@ -2220,12 +2321,14 @@ pub fn tail_claude_output(
                                         .get("content")
                                         .map(tool_result_content_to_string)
                                         .unwrap_or_default();
+                                    let is_error = tool_result_is_error(block);
 
                                     // Update matching tool call's output
                                     if let Some(tc) =
                                         tool_calls.iter_mut().find(|t| t.id == tool_id)
                                     {
                                         tc.output = Some(output.clone());
+                                        tc.is_error = is_error;
                                     }
 
                                     // Synthesize a denial when Claude CLI rejected the tool for
@@ -2261,6 +2364,7 @@ pub fn tail_claude_output(
                                         worktree_id: worktree_id.to_string(),
                                         tool_use_id: tool_id.to_string(),
                                         output,
+                                        is_error,
                                     };
                                     if let Err(e) = app.emit_all("chat:tool_result", &event) {
                                         log::error!("Failed to emit tool_result: {e}");
@@ -2272,45 +2376,39 @@ pub fn tail_claude_output(
                 }
                 "result" => {
                     // Final result - Claude CLI completed
-                    if full_content.is_empty() {
-                        if let Some(result) = msg.get("result").and_then(|v| v.as_str()) {
-                            full_content = result.to_string();
+                    // `is_error` results (error_during_execution, error_max_turns,
+                    // auth...) fail the turn even after partial output. Their
+                    // `result` text is never inserted as reply content.
+                    if let Some(error) = result_error_text(&msg) {
+                        if is_claude_session_not_found_text(&error) {
+                            session_not_found = true;
+                        } else {
+                            api_error = Some(error);
+                        }
+                    } else {
+                        // A later successful turn (e.g. Monitor wake-up or CLI
+                        // retry) supersedes an earlier error.
+                        api_error = None;
+                        if full_content.is_empty() {
+                            if let Some(result) = msg.get("result").and_then(|v| v.as_str()) {
+                                full_content = result.to_string();
+                            }
                         }
                     }
 
-                    // Extract token usage data
+                    // Token usage: one `result` per turn; Monitor wake-ups can
+                    // produce several turns in one run, so accumulate.
                     if let Some(usage_obj) = msg.get("usage") {
-                        usage = Some(UsageData {
-                            input_tokens: usage_obj
-                                .get("input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            output_tokens: usage_obj
-                                .get("output_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            cache_read_input_tokens: usage_obj
-                                .get("cache_read_input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            cache_creation_input_tokens: usage_obj
-                                .get("cache_creation_input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                        });
-                        log::trace!(
-                            "Token usage: input={}, output={}, cache_read={}, cache_create={}",
-                            usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
-                            usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
-                            usage
-                                .as_ref()
-                                .map(|u| u.cache_read_input_tokens)
-                                .unwrap_or(0),
-                            usage
-                                .as_ref()
-                                .map(|u| u.cache_creation_input_tokens)
-                                .unwrap_or(0),
-                        );
+                        add_result_usage(&mut usage, usage_obj);
+                        if let Some(u) = usage.as_ref() {
+                            log::trace!(
+                                "Token usage: input={}, output={}, cache_read={}, cache_create={}",
+                                u.input_tokens,
+                                u.output_tokens,
+                                u.cache_read_input_tokens,
+                                u.cache_creation_input_tokens,
+                            );
+                        }
                     }
 
                     // Collect permission denials from the CLI result and merge with the
@@ -2512,6 +2610,18 @@ pub fn tail_claude_output(
                         }
                     }
                 }
+                "rate_limit_event" => {
+                    // Free usage data from the CLI — keeps the Usage UI fresh
+                    // without hitting the rate-limited OAuth usage API.
+                    if crate::claude_cli::record_claude_rate_limit_event(&msg) {
+                        if let Err(e) = app.emit_all(
+                            "cache:invalidate",
+                            &serde_json::json!({ "keys": ["claude-usage"] }),
+                        ) {
+                            log::error!("Failed to emit claude-usage cache invalidation: {e}");
+                        }
+                    }
+                }
                 _ => {
                     // Unknown msg_type. Only forward if it explicitly references an
                     // armed Monitor by tool_use_id — avoids flooding the UI with
@@ -2599,7 +2709,9 @@ pub fn tail_claude_output(
         // Check if externally cancelled (process removed from registry by cancel_process)
         // This allows the tailer to exit quickly when user cancels, instead of waiting
         // for the dead_process_timeout
-        if !super::registry::is_process_running(session_id) {
+        // PID-scoped: a newer run of the same session must not keep this
+        // (cancelled) tailer alive.
+        if !super::registry::is_process_registered(session_id, pid) {
             log::trace!("Session {session_id} cancelled externally, stopping tail");
             user_cancelled = true;
             cancelled = true;
@@ -2710,13 +2822,33 @@ pub fn tail_claude_output(
         }
     }
 
+    if error_lines
+        .iter()
+        .any(|line| is_claude_session_not_found_text(line))
+    {
+        session_not_found = true;
+    }
+    if session_not_found && !user_cancelled && full_content.is_empty() && tool_calls.is_empty() {
+        log::warn!("Claude CLI could not resume session for {session_id}: conversation not found");
+        return Ok(ClaudeResponse {
+            content: full_content,
+            session_id: claude_session_id,
+            tool_calls,
+            content_blocks,
+            cancelled,
+            usage,
+            error_emitted: false,
+            session_not_found: true,
+        });
+    }
+
     if let Some(error) =
         startup_failure_message(startup_failed, user_cancelled, &full_content, &error_lines)
     {
         // A startup timeout can leave a live process behind. End the complete
         // process group before returning the terminal error to the caller.
         if is_process_alive(pid) {
-            terminate_failed_startup(pid);
+            kill_claude_process_tree(pid);
         }
         log::warn!("Claude CLI startup failed for session {session_id}: {error}");
         let _ = app.emit_all(
@@ -2730,7 +2862,23 @@ pub fn tail_claude_output(
         return Err(error);
     }
 
-    if !error_lines.is_empty() && full_content.is_empty() {
+    // API / is_error failures fail the turn even after partial output (the
+    // partial content is kept by the caller); user cancel wins.
+    let api_error = api_error.filter(|_| !user_cancelled);
+    let mut error_emitted = api_error.is_some();
+
+    if let Some(error) = api_error {
+        log::warn!("Claude API error for session {session_id}: {error}");
+        let _ = app.emit_all(
+            "chat:error",
+            &ErrorEvent {
+                session_id: session_id.to_string(),
+                worktree_id: worktree_id.to_string(),
+                error,
+            },
+        );
+    } else if !error_lines.is_empty() && full_content.is_empty() {
+        error_emitted = true;
         let error_text = error_lines.join("\n");
         log::warn!("CLI error output for session {session_id}: {error_text}");
         let _ = app.emit_all(
@@ -2741,22 +2889,6 @@ pub fn tail_claude_output(
                 error: format!("Claude CLI failed: {error_text}"),
             },
         );
-    }
-
-    // Emit done event unless the user explicitly cancelled (cancel_process
-    // already emitted chat:cancelled in that case, avoid double event).
-    // When the process died naturally (not user cancel) but produced content,
-    // we still emit chat:done so the frontend properly transitions from
-    // streaming to persisted state (#209).
-    if !user_cancelled {
-        let done_event = DoneEvent {
-            session_id: session_id.to_string(),
-            worktree_id: worktree_id.to_string(),
-            waiting_for_plan: false,
-        };
-        if let Err(e) = app.emit_all("chat:done", &done_event) {
-            log::error!("Failed to emit done event: {e}");
-        }
     }
 
     log::trace!(
@@ -2772,7 +2904,98 @@ pub fn tail_claude_output(
         content_blocks,
         cancelled,
         usage,
+        error_emitted,
+        session_not_found: false,
     })
+}
+
+/// Text Claude CLI prints (plain line or `result.errors`) when `--resume`
+/// gets a session id it does not know.
+const CLAUDE_SESSION_NOT_FOUND_TEXT: &str = "No conversation found with session ID";
+
+fn is_claude_session_not_found_text(text: &str) -> bool {
+    text.contains(CLAUDE_SESSION_NOT_FOUND_TEXT)
+}
+
+/// Add one `result` message's `usage` object to the run total.
+fn add_result_usage(total: &mut Option<UsageData>, usage_obj: &serde_json::Value) {
+    let field = |key: &str| usage_obj.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+    let total = total.get_or_insert(UsageData {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    });
+    total.input_tokens += field("input_tokens");
+    total.output_tokens += field("output_tokens");
+    total.cache_read_input_tokens += field("cache_read_input_tokens");
+    total.cache_creation_input_tokens += field("cache_creation_input_tokens");
+}
+
+/// Error text of the synthetic assistant message Claude CLI emits when the
+/// API call fails (auth, billing, rate limit...). It carries a top-level
+/// `error` code, e.g. `"authentication_failed"`.
+fn assistant_api_error_text(msg: &serde_json::Value) -> Option<String> {
+    let code = msg.get("error").and_then(|v| v.as_str())?;
+    if msg
+        .get("parent_tool_use_id")
+        .and_then(|v| v.as_str())
+        .is_some()
+    {
+        return None;
+    }
+    let text = msg
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let text = text.trim();
+    Some(if text.is_empty() {
+        format!("Claude API error: {code}")
+    } else {
+        text.to_string()
+    })
+}
+
+/// Error text of a `result` message with `is_error: true`.
+fn result_error_text(msg: &serde_json::Value) -> Option<String> {
+    if msg.get("is_error").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    if let Some(result) = msg
+        .get("result")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        return Some(result.to_string());
+    }
+    let errors = msg
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .map(|errs| {
+            errs.iter()
+                .filter_map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    if !errors.trim().is_empty() {
+        return Some(errors.trim().to_string());
+    }
+    let subtype = msg
+        .get("subtype")
+        .and_then(|v| v.as_str())
+        .unwrap_or("error");
+    Some(format!("Claude CLI failed: {subtype}"))
 }
 
 #[cfg(test)]
@@ -2806,6 +3029,146 @@ mod tests {
     }
 
     #[test]
+    fn assistant_api_error_text_reads_synthetic_auth_error() {
+        let msg = serde_json::json!({
+            "type": "assistant",
+            "error": "authentication_failed",
+            "parent_tool_use_id": null,
+            "message": {
+                "model": "<synthetic>",
+                "content": [{
+                    "type": "text",
+                    "text": "Failed to authenticate: OAuth session expired and could not be refreshed"
+                }]
+            }
+        });
+
+        assert_eq!(
+            assistant_api_error_text(&msg).as_deref(),
+            Some("Failed to authenticate: OAuth session expired and could not be refreshed")
+        );
+    }
+
+    #[test]
+    fn assistant_api_error_text_ignores_normal_and_subagent_messages() {
+        let normal = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": "Hello" }] }
+        });
+        let subagent = serde_json::json!({
+            "type": "assistant",
+            "error": "rate_limit",
+            "parent_tool_use_id": "toolu_1",
+            "message": { "content": [{ "type": "text", "text": "API Error" }] }
+        });
+
+        assert_eq!(assistant_api_error_text(&normal), None);
+        assert_eq!(assistant_api_error_text(&subagent), None);
+    }
+
+    #[test]
+    fn assistant_api_error_text_falls_back_to_error_code() {
+        let msg = serde_json::json!({
+            "type": "assistant",
+            "error": "billing_error",
+            "message": { "content": [] }
+        });
+
+        assert_eq!(
+            assistant_api_error_text(&msg).as_deref(),
+            Some("Claude API error: billing_error")
+        );
+    }
+
+    #[test]
+    fn result_error_text_reads_is_error_results() {
+        let auth = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": true,
+            "result": "Failed to authenticate: OAuth session expired"
+        });
+        let errors = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "errors": ["No conversation found"]
+        });
+        let bare = serde_json::json!({
+            "type": "result",
+            "subtype": "error_max_turns",
+            "is_error": true
+        });
+
+        assert_eq!(
+            result_error_text(&auth).as_deref(),
+            Some("Failed to authenticate: OAuth session expired")
+        );
+        assert_eq!(
+            result_error_text(&errors).as_deref(),
+            Some("No conversation found")
+        );
+        assert_eq!(
+            result_error_text(&bare).as_deref(),
+            Some("Claude CLI failed: error_max_turns")
+        );
+    }
+
+    #[test]
+    fn detects_session_not_found_in_plain_line_and_result_errors() {
+        assert!(is_claude_session_not_found_text(
+            "No conversation found with session ID: 1234-abcd"
+        ));
+        let result = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "errors": ["No conversation found with session ID: 1234-abcd"]
+        });
+        assert!(is_claude_session_not_found_text(
+            &result_error_text(&result).unwrap()
+        ));
+        assert!(!is_claude_session_not_found_text("No conversation found"));
+        assert!(!is_claude_session_not_found_text("Hello"));
+    }
+
+    #[test]
+    fn add_result_usage_accumulates_across_results() {
+        let mut usage = None;
+        add_result_usage(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 1
+            }),
+        );
+        add_result_usage(
+            &mut usage,
+            &serde_json::json!({ "input_tokens": 3, "output_tokens": 2 }),
+        );
+
+        let usage = usage.unwrap();
+        assert_eq!(usage.input_tokens, 13);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_input_tokens, 100);
+        assert_eq!(usage.cache_creation_input_tokens, 1);
+    }
+
+    #[test]
+    fn result_error_text_ignores_successful_results() {
+        let msg = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "Done"
+        });
+
+        assert_eq!(result_error_text(&msg), None);
+    }
+
+    #[test]
     fn compact_metadata_accepts_snake_case_from_claude_cli() {
         let msg = serde_json::json!({
             "type": "system",
@@ -2827,7 +3190,10 @@ mod tests {
         let profile = r#"{"env":{"ANTHROPIC_API_KEY":"secret"},"fastMode":false}"#;
         let jean = serde_json::json!({"fastMode": true, "outputStyle": "Explanatory"});
 
-        let merged = merge_claude_settings(Some(profile), Some(&jean)).unwrap();
+        let merged = merge_claude_settings(
+            Some(serde_json::from_str(profile).unwrap()),
+            jean.as_object().unwrap().clone(),
+        );
 
         assert_eq!(merged["fastMode"], serde_json::json!(true));
         assert_eq!(merged["outputStyle"], serde_json::json!("Explanatory"));
@@ -2844,7 +3210,10 @@ mod tests {
         let profile = r#"{"env":{"ANTHROPIC_BASE_URL":"https://example.test"}}"#;
         let jean = serde_json::json!({"effortLevel": "high"});
 
-        let merged = merge_claude_settings(Some(profile), Some(&jean)).unwrap();
+        let merged = merge_claude_settings(
+            Some(serde_json::from_str(profile).unwrap()),
+            jean.as_object().unwrap().clone(),
+        );
 
         assert_eq!(
             merged["env"]["ANTHROPIC_BASE_URL"],
@@ -2855,14 +3224,14 @@ mod tests {
 
     #[test]
     fn merge_claude_settings_handles_single_and_empty_sources() {
-        assert!(merge_claude_settings(None, None).is_none());
+        assert!(merge_claude_settings(None, serde_json::Map::new()) == serde_json::json!({}));
         let jean = serde_json::json!({"fastMode": true});
         assert_eq!(
-            merge_claude_settings(None, Some(&jean)).unwrap(),
+            merge_claude_settings(None, jean.as_object().unwrap().clone()),
             serde_json::json!({"fastMode": true})
         );
         assert_eq!(
-            merge_claude_settings(Some(r#"{"env":{}}"#), None).unwrap(),
+            merge_claude_settings(Some(serde_json::json!({"env": {}})), serde_json::Map::new()),
             serde_json::json!({"env": {}})
         );
     }
@@ -2871,10 +3240,16 @@ mod tests {
     fn merge_claude_settings_ignores_unparseable_profile() {
         let jean = serde_json::json!({"fastMode": true});
         assert_eq!(
-            merge_claude_settings(Some("not json"), Some(&jean)).unwrap(),
+            merge_claude_settings(
+                serde_json::from_str("not json").ok(),
+                jean.as_object().unwrap().clone()
+            ),
             serde_json::json!({"fastMode": true})
         );
-        assert!(merge_claude_settings(Some("[1,2]"), None).is_none());
+        assert!(
+            merge_claude_settings(Some(serde_json::json!([1, 2])), serde_json::Map::new())
+                == serde_json::json!({})
+        );
     }
 
     #[test]
@@ -2902,19 +3277,109 @@ mod tests {
     }
 
     #[test]
-    fn yolo_uses_accept_edits_when_running_as_root() {
-        assert_eq!(claude_permission_mode(Some("yolo"), true), "acceptEdits");
-        assert!(claude_allows_all_bash(Some("yolo")));
+    fn root_yolo_bypasses_permissions_with_sandbox_env() {
+        assert_eq!(claude_permission_mode(Some("yolo")), "bypassPermissions");
+        assert!(claude_needs_root_sandbox_env(Some("yolo"), true));
+        assert!(!claude_needs_root_sandbox_env(Some("yolo"), false));
+        assert!(!claude_needs_root_sandbox_env(Some("build"), true));
+        assert!(!claude_needs_root_sandbox_env(None, true));
     }
 
     #[test]
-    fn yolo_uses_bypass_permissions_for_non_root_users() {
-        assert_eq!(
-            claude_permission_mode(Some("yolo"), false),
-            "bypassPermissions"
-        );
+    fn permission_modes_by_execution_mode() {
+        assert_eq!(claude_permission_mode(Some("yolo")), "bypassPermissions");
+        assert_eq!(claude_permission_mode(Some("build")), "acceptEdits");
+        assert_eq!(claude_permission_mode(Some("plan")), "plan");
+        assert_eq!(claude_permission_mode(None), "plan");
         assert!(claude_allows_all_bash(Some("yolo")));
         assert!(!claude_allows_all_bash(Some("build")));
+    }
+
+    #[test]
+    fn merge_claude_settings_overlays_runtime_keys_on_profile() {
+        let profile = serde_json::json!({
+            "env": {"ANTHROPIC_API_KEY": "secret"},
+            "fastMode": false,
+        });
+        let mut runtime = serde_json::Map::new();
+        runtime.insert("fastMode".to_string(), serde_json::json!(true));
+        runtime.insert("ultracode".to_string(), serde_json::json!(true));
+        let merged = merge_claude_settings(Some(profile), runtime);
+        assert_eq!(merged["env"]["ANTHROPIC_API_KEY"], "secret");
+        assert_eq!(merged["fastMode"], true);
+        assert_eq!(merged["ultracode"], true);
+    }
+
+    #[test]
+    fn merge_claude_settings_ignores_non_object_profile() {
+        let mut runtime = serde_json::Map::new();
+        runtime.insert(
+            "alwaysThinkingEnabled".to_string(),
+            serde_json::json!(false),
+        );
+        let merged = merge_claude_settings(Some(serde_json::json!([1, 2])), runtime);
+        assert_eq!(merged, serde_json::json!({"alwaysThinkingEnabled": false}));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_settings_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("s.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "old-longer-content").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_settings_file(&path, "{}").expect("write");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn structured_output_prefers_result_field() {
+        let output = [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput","input":{"v":1}}]}}"#,
+            r#"{"type":"result","result":"done","structured_output":{"v":3}}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            extract_claude_structured_output(&output),
+            Some(serde_json::json!({"v": 3}))
+        );
+    }
+
+    #[test]
+    fn structured_output_falls_back_to_last_tool_call() {
+        let output = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"},{"type":"tool_use","name":"StructuredOutput","input":{"v":1}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","is_error":true}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput","input":{"v":2}}]}}"#,
+            r#"{"type":"result","result":"done","structured_output":null}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            extract_claude_structured_output(&output),
+            Some(serde_json::json!({"v": 2}))
+        );
+    }
+
+    #[test]
+    fn structured_output_none_without_schema_output() {
+        let output = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}
+{"type":"result","result":"hi"}"#;
+        assert_eq!(extract_claude_structured_output(output), None);
+    }
+
+    #[test]
+    fn help_text_flag_detection_matches_whole_tokens() {
+        let help = "  --system-prompt <prompt>  System prompt\n  --system-prompt-snapshot <on|off>  Record";
+        assert!(help_text_mentions_flag(help, "--system-prompt-snapshot"));
+        let old_help = "  --system-prompt <prompt>  System prompt";
+        assert!(!help_text_mentions_flag(
+            old_help,
+            "--system-prompt-snapshot"
+        ));
     }
 
     #[test]
@@ -2956,20 +3421,29 @@ mod tests {
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("get_run_environments"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
             .contains("test against its `url`, port, and startup command"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("use the Agent Browser when it is available"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("no other browser testing method"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("VERY IMPORTANT: Keep Code Simple"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
             .contains("Always implement the simplest maintainable solution"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Clickable References"));
         assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("include clickable links when available"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains(
+            "At the start of a new task, replace '.ai/todo.md' instead of appending to it"
+        ));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
+            .contains("Only update '.ai/lessons.md' for general, project-wide learning"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("Never add '.ai/todo.md' to Git"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
+            .contains("Do not add feature-specific, bug-fix-specific, or small/local lessons"));
+        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
+            .contains("Remove narrow or specific entries when you detect them"));
+        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("After ANY correction from the user"));
     }
 
     #[test]
-    fn default_global_system_prompt_requires_github_discovery_after_changes() {
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("GitHub Issue and Discussion Discovery"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("search the current repository's existing GitHub issues and discussions"));
-        assert!(DEFAULT_GLOBAL_SYSTEM_PROMPT
-            .contains("Include the results in both the main response and the `## Recap`"));
+    fn default_global_system_prompt_does_not_require_github_discovery() {
+        assert!(!DEFAULT_GLOBAL_SYSTEM_PROMPT.contains("GitHub Issue and Discussion Discovery"));
     }
 
     #[test]
@@ -2997,6 +3471,50 @@ mod tests {
         assert_eq!(
             tool.input.get("questions").and_then(|value| value.as_str()),
             Some("[{\"question\":\"Pick one\",\"options\":[{\"label\":\"A\"}]}]")
+        );
+    }
+
+    #[test]
+    fn streamed_tool_input_waits_for_complete_json() {
+        let empty = serde_json::json!({});
+        // Claude CLI 2.1.x sends `input: {}` then an empty first delta.
+        assert_eq!(streamed_tool_input(&empty, ""), None);
+        assert_eq!(streamed_tool_input(&empty, "{\"questions\": [{"), None);
+        assert_eq!(
+            streamed_tool_input(&empty, "{\"questions\": []}"),
+            Some(serde_json::json!({ "questions": [] }))
+        );
+
+        let full = serde_json::json!({ "plan": "Do it" });
+        assert_eq!(streamed_tool_input(&full, ""), Some(full.clone()));
+    }
+
+    #[test]
+    fn streamed_blocking_tool_input_preserves_all_delta_fields() {
+        let start_input = serde_json::json!({});
+        let mut buffer = String::new();
+        for delta in [
+            "",
+            r#"{"questions":[{"question":"Pick one","options":["#,
+            r#"{"label":"A"},{"label":"B"}]}],"metadata":{"source":"plan"}}"#,
+        ] {
+            buffer.push_str(delta);
+        }
+        assert_eq!(
+            streamed_tool_input(&start_input, &buffer),
+            Some(serde_json::json!({
+                "questions": [{"question": "Pick one", "options": [{"label": "A"}, {"label": "B"}]}],
+                "metadata": {"source": "plan"}
+            }))
+        );
+    }
+
+    #[test]
+    fn streamed_tool_input_does_not_fall_back_when_deltas_are_incomplete() {
+        let start_input = serde_json::json!({"plan": "placeholder"});
+        assert_eq!(
+            streamed_tool_input(&start_input, r#"{"plan":"unfinished"#),
+            None
         );
     }
 
@@ -3108,5 +3626,20 @@ mod tests {
         assert!(args.contains(&"mcp__jean-dev__*".to_string()));
         assert!(args.contains(&"mcp__github".to_string()));
         assert!(args.contains(&"mcp__github__*".to_string()));
+    }
+
+    #[test]
+    fn permission_prompt_tool_requires_jean_mcp_server() {
+        let server = crate::jean_mcp_config::current_mode().server_name();
+        let config = format!(r#"{{"mcpServers":{{"{server}":{{"type":"stdio"}}}}}}"#);
+        assert_eq!(
+            jean_permission_prompt_tool(Some(&config)),
+            Some(format!("mcp__{server}__claude_permission_prompt"))
+        );
+        assert_eq!(
+            jean_permission_prompt_tool(Some(r#"{"mcpServers":{"github":{}}}"#)),
+            None
+        );
+        assert_eq!(jean_permission_prompt_tool(None), None);
     }
 }

@@ -48,6 +48,16 @@ describe('OpinionatedPane', () => {
 
   it('shows uninstall for installed skill packs and invokes uninstall command', async () => {
     const user = userEvent.setup()
+    const statusResponse = vi.mocked(invoke).getMockImplementation()
+    if (!statusResponse) throw new Error('Expected status mock')
+    let releaseStatus: (() => void) | undefined
+    const statusReady = new Promise<void>(resolve => {
+      releaseStatus = resolve
+    })
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'check_opinionated_plugin_status') await statusReady
+      return statusResponse(command, args)
+    })
 
     render(<OpinionatedPane />)
 
@@ -55,10 +65,17 @@ describe('OpinionatedPane', () => {
 
     const superpowersLabel = screen.getByText('Superpowers')
     const superpowersRow = superpowersLabel.closest('.rounded-lg')
-    if (!superpowersRow) throw new Error('Expected Superpowers row')
-    const superpowersUninstall = within(
-      superpowersRow as HTMLElement
-    ).getByRole('button', { name: /Uninstall/i })
+    if (!(superpowersRow instanceof HTMLElement)) {
+      throw new Error('Expected Superpowers row')
+    }
+    expect(
+      within(superpowersRow).queryByRole('button', { name: /Uninstall/i })
+    ).toBeNull()
+    releaseStatus?.()
+    const superpowersUninstall = await within(superpowersRow).findByRole(
+      'button',
+      { name: /Uninstall/i }
+    )
     await user.click(superpowersUninstall)
 
     await waitFor(() => {
@@ -66,6 +83,32 @@ describe('OpinionatedPane', () => {
         pluginName: 'superpowers',
       })
     })
+  })
+
+  it('offers pstack for every Jean AI backend', async () => {
+    render(<OpinionatedPane />)
+
+    const pstackLabel = await screen.findByText('pstack')
+    const pstackCard = pstackLabel.closest('.rounded-lg')?.parentElement
+    if (!pstackCard) throw new Error('Expected pstack card')
+
+    await userEvent.click(pstackLabel)
+
+    expect(
+      within(pstackCard as HTMLElement).getByText('Codex')
+    ).toBeInTheDocument()
+    expect(
+      within(pstackCard as HTMLElement).getByText('Claude')
+    ).toBeInTheDocument()
+    expect(
+      within(pstackCard as HTMLElement).getByText('Command Code')
+    ).toBeInTheDocument()
+    expect(
+      within(pstackCard as HTMLElement).getByText('/poteto-mode')
+    ).toBeInTheDocument()
+    expect(
+      within(pstackCard as HTMLElement).queryByText('/setup-pstack')
+    ).not.toBeInTheDocument()
   })
 
   it('shows opinionated skill installation status for each backend', async () => {

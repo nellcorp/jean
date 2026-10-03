@@ -57,13 +57,29 @@ export interface PendingTextFileDraft {
   content?: string
 }
 
+export interface PendingFileDraft {
+  id: string
+  relative_path: string
+  source_root_path?: string
+  source_project_id?: string
+  source_project_name?: string
+  extension: string
+  is_directory: boolean
+}
+
+export interface PendingSkillDraft {
+  id: string
+  name: string
+  path: string
+}
+
 export interface UIState {
   active_worktree_id: string | null
   active_worktree_path: string | null
   last_active_worktree_id: string | null
   active_project_id: string | null
-  expanded_project_ids: string[]
-  expanded_folder_ids: string[]
+  expanded_project_ids?: string[]
+  expanded_folder_ids?: string[]
   /** Left sidebar width in pixels, defaults to 250 */
   left_sidebar_size?: number
   /** Left sidebar visibility, defaults to false */
@@ -88,6 +104,10 @@ export interface UIState {
    * Content is optional in persistence; restore re-reads from disk when missing.
    */
   pending_text_files?: Record<string, PendingTextFileDraft[]>
+  /** Unsent regular file and directory attachments per session */
+  pending_files?: Record<string, PendingFileDraft[]>
+  /** Unsent skill attachments per session */
+  pending_skills?: Record<string, PendingSkillDraft[]>
   /** Worktrees whose setup-script status card was dismissed */
   dismissed_setup_scripts?: string[]
   /** Whether the review sidebar is visible */
@@ -142,6 +162,8 @@ export interface UIState {
   dashboard_worktree_collapse_overrides?: Record<string, boolean>
   /** Project canvas settings per project */
   project_canvas_settings?: Record<string, ProjectCanvasSettingsState>
+  /** Session IDs pinned in the recent sessions list */
+  pinned_recent_session_ids?: string[]
   /** Favorited projects shown first in the GitHub Dashboard */
   github_dashboard_favorite_project_ids?: string[]
   /** Last opened worktree+session per project: projectId → { worktree_id, session_id } */
@@ -173,6 +195,8 @@ export const defaultUIState: UIState = {
   input_drafts: {},
   pending_images: {},
   pending_text_files: {},
+  pending_files: {},
+  pending_skills: {},
   dismissed_setup_scripts: [],
   modal_terminal_open: {},
   modal_terminal_dock_mode: 'floating',
@@ -196,6 +220,7 @@ export const defaultUIState: UIState = {
   browser_modal_height: 400,
   browser_bottom_panel_open: {},
   browser_bottom_panel_height: 360,
+  pinned_recent_session_ids: [],
   github_dashboard_favorite_project_ids: [],
   seen_failed_workflow_run_ids: [],
   version: 1,
