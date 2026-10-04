@@ -126,3 +126,6 @@
 
 - Finish production edits and review before the final Docker build; do not trigger another expensive image build for a late review correction.
 - Reuse a cached Rust quality container and report a short ETA when verification dominates the task.
+
+## Sync the current base before implementation
+- Fetch and integrate origin/main immediately before starting approved work when the user asks to refresh the base. Reinspect affected paths after the sync.

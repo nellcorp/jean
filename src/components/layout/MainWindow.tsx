@@ -77,11 +77,6 @@ const CliUpdateModal = lazy(() =>
     default: mod.CliUpdateModal,
   }))
 )
-const UpdateAvailableModal = lazy(() =>
-  import('@/components/layout/UpdateAvailableModal').then(mod => ({
-    default: mod.UpdateAvailableModal,
-  }))
-)
 const CliLoginModal = lazy(() =>
   import('@/components/preferences/CliLoginModal').then(mod => ({
     default: mod.CliLoginModal,
@@ -262,7 +257,6 @@ export function MainWindow() {
   const workflowRunsModalOpen = useUIStore(state => state.workflowRunsModalOpen)
   const cliUpdateModalOpen = useUIStore(state => state.cliUpdateModalOpen)
   const cliLoginModalOpen = useUIStore(state => state.cliLoginModalOpen)
-  const updateModalVersion = useUIStore(state => state.updateModalVersion)
   const githubDashboardOpen = useUIStore(state => state.githubDashboardOpen)
   const newSessionModeTarget = useUIStore(state => state.newSessionModeTarget)
   const sessionChatModalOpen = useUIStore(state => state.sessionChatModalOpen)
@@ -484,9 +478,6 @@ export function MainWindow() {
   const shouldRenderFeatureTourDialog = useRetainedMount(featureTourOpen)
   const shouldRenderJeanConfigWizard = useRetainedMount(jeanConfigWizardOpen)
   const shouldRenderCliUpdateModal = useRetainedMount(cliUpdateModalOpen)
-  const shouldRenderUpdateAvailableModal = useRetainedMount(
-    updateModalVersion !== null
-  )
   const shouldRenderCliLoginModal = useRetainedMount(cliLoginModalOpen)
   const shouldRenderOpenInModal = useRetainedMount(openInModalOpen)
   const shouldRenderRemotePickerModal = useRetainedMount(remotePickerOpen)
@@ -723,11 +714,6 @@ export function MainWindow() {
       {shouldRenderCliUpdateModal && (
         <Suspense fallback={null}>
           <CliUpdateModal />
-        </Suspense>
-      )}
-      {shouldRenderUpdateAvailableModal && (
-        <Suspense fallback={null}>
-          <UpdateAvailableModal />
         </Suspense>
       )}
       {shouldRenderCliLoginModal && (
