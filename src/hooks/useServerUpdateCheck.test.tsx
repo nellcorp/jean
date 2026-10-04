@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { toast } from 'sonner'
 import { act, renderHook } from '@testing-library/react'
 import { useUIStore } from '@/store/ui-store'
 import { applyServerUpdate, useServerUpdateCheck } from './useServerUpdateCheck'
@@ -27,6 +28,7 @@ vi.mock('sonner', () => ({
 describe('useServerUpdateCheck', () => {
   beforeEach(() => {
     vi.useFakeTimers()
+    vi.clearAllMocks()
     invokeMock.mockReset()
     isLocalBackendMock.mockReturnValue(false)
     useUIStore.getState().setPendingServerUpdate(null)
@@ -41,7 +43,7 @@ describe('useServerUpdateCheck', () => {
     useUIStore.getState().setUpdateModalVersion(null)
   })
 
-  it('stores a sticky pending server update that survives toast-only dismissal', async () => {
+  it('stores a passive server badge without notifying', async () => {
     invokeMock.mockResolvedValue({
       updateAvailable: true,
       currentVersion: '1.0.0',
@@ -57,6 +59,7 @@ describe('useServerUpdateCheck', () => {
       await vi.advanceTimersByTimeAsync(8_000)
     })
 
+    expect(toast.info).not.toHaveBeenCalled()
     expect(useUIStore.getState().pendingServerUpdate).toEqual({
       latestVersion: '1.2.0',
       currentVersion: '1.0.0',
@@ -65,7 +68,7 @@ describe('useServerUpdateCheck', () => {
     })
   })
 
-  it('opens the desktop update modal for desktop host channel (issue #509)', async () => {
+  it('stores a passive desktop badge without opening a modal', async () => {
     invokeMock.mockResolvedValue({
       updateAvailable: true,
       currentVersion: '1.0.0',
@@ -82,8 +85,9 @@ describe('useServerUpdateCheck', () => {
     })
 
     expect(useUIStore.getState().pendingServerUpdate).toBeNull()
-    expect(useUIStore.getState().updateModalVersion).toBe('1.2.0')
-    expect(useUIStore.getState().pendingUpdateVersion).toBeNull()
+    expect(useUIStore.getState().updateModalVersion).toBeNull()
+    expect(toast.info).not.toHaveBeenCalled()
+    expect(useUIStore.getState().pendingUpdateVersion).toBe('1.2.0')
   })
 
   it('clears sticky state after a successful apply', async () => {

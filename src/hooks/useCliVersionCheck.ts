@@ -7,7 +7,6 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { toast } from 'sonner'
 import { invoke } from '@/lib/transport'
 import { useQueryClient } from '@tanstack/react-query'
 import {
@@ -62,11 +61,7 @@ import { isNewerVersion } from '@/lib/version-utils'
 import { logger } from '@/lib/logger'
 import { hasBackend } from '@/lib/environment'
 import { usePreferences } from '@/services/preferences'
-import {
-  CLI_DISPLAY_NAMES,
-  resolveCliPathUpdateAction,
-  type CliType,
-} from '@/lib/cli-update'
+import { resolveCliPathUpdateAction, type CliType } from '@/lib/cli-update'
 import type { QueryClient } from '@tanstack/react-query'
 
 interface CliUpdateInfo {
@@ -374,7 +369,8 @@ export function useCliVersionCheck() {
         nextUpdates.length !== availableCliUpdates.length ||
         updates.length > 0
       ) {
-        if (updates.length > 0) logger.info('CLI updates available', { updates })
+        if (updates.length > 0)
+          logger.info('CLI updates available', { updates })
         setAvailableCliUpdates(nextUpdates)
       }
 
@@ -382,12 +378,7 @@ export function useCliVersionCheck() {
       if (autoUpdate && updates.length > 0) {
         const handleUpdates = () => {
           for (const update of updates) {
-            void runBackgroundUpdate(
-              update,
-              queryClient,
-              true,
-              notifiedRef.current
-            )
+            void runBackgroundUpdate(update, queryClient, notifiedRef.current)
           }
         }
 
@@ -493,50 +484,11 @@ export function useCliVersionCheck() {
   }, [shouldCheck, queryClient])
 }
 
-/**
- * Detect the "active session" guard error so we can fall back to a manual toast
- * (giving the user a chance to stop sessions before retrying).
- */
-function isActiveSessionConflict(message: string): boolean {
-  return (
-    message.startsWith('Cannot install') || message.startsWith('Cannot update')
-  )
-}
-
-/**
- * Run a CLI update silently in the background, surfacing only a single
- * loading → success / error toast. Falls back to the appropriate manual flow
- * (modal or toast) when the install can't run silently.
- */
 async function runBackgroundUpdate(
   update: CliUpdateInfo,
   queryClient: QueryClient,
-  autoUpdate: boolean,
   notified?: Set<string>
 ) {
-  const cliName = CLI_DISPLAY_NAMES[update.type]
-  const toastId = `cli-update-bg-${update.type}`
-  const versionKey = `${update.type}:${update.currentVersion}→${update.latestVersion}`
-
-  const handleActiveSessionConflict = () => {
-    toast.dismiss(toastId)
-    if (autoUpdate) {
-      // Auto-update is ON: silent skip. Allow retry on next hook tick.
-      notified?.delete(versionKey)
-      logger.info('Skipped silent CLI update: active sessions', {
-        type: update.type,
-      })
-      return
-    }
-    // Keep the badge visible so the user can retry manually after sessions stop.
-  }
-
-  toast.loading(`Updating ${cliName}…`, {
-    id: toastId,
-    description: `v${update.currentVersion} → v${update.latestVersion}`,
-    duration: Infinity,
-  })
-
   try {
     if (update.cliSource === 'path') {
       const action = resolveCliPathUpdateAction(
@@ -545,92 +497,35 @@ async function runBackgroundUpdate(
         update.packageManager,
         update.latestVersion
       )
-      if (!action) {
-        toast.error(
-          `Can't auto-update ${cliName}. Update via your package manager.`,
-          { id: toastId, duration: 8000 }
-        )
-        return
-      }
+      if (!action) return
       const [command, args] = action
-      try {
-        await invoke('run_cli_path_update', {
-          command,
-          args,
-          cliType: update.type,
-        })
-      } catch (err) {
-        const msg = String(err)
-        logger.warn('Background path update failed', {
-          type: update.type,
-          msg,
-        })
-        if (isActiveSessionConflict(msg)) {
-          handleActiveSessionConflict()
-          return
-        }
-        toast.error(`Failed to update ${cliName}`, {
-          id: toastId,
-          description: msg,
-          duration: Infinity,
-          action: {
-            label: 'Open terminal',
-            onClick: () => {
-              useUIStore
-                .getState()
-                .openCliLoginModal(update.type, command, args, 'update')
-              toast.dismiss(toastId)
-            },
-          },
-        })
-        return
-      }
+      await invoke('run_cli_path_update', {
+        command,
+        args,
+        cliType: update.type,
+      })
     } else {
-      const tauriCmd = JEAN_INSTALL_COMMANDS[update.type]
-      try {
-        await invoke(tauriCmd, { version: update.latestVersion })
-      } catch (err) {
-        const msg = String(err)
-        logger.warn('Background jean-managed update failed', {
-          type: update.type,
-          msg,
-        })
-        if (isActiveSessionConflict(msg)) {
-          handleActiveSessionConflict()
-          return
-        }
-        toast.error(`Failed to update ${cliName}`, {
-          id: toastId,
-          description: msg,
-          duration: Infinity,
-          action: {
-            label: 'Open installer',
-            onClick: () => {
-              useUIStore.getState().openCliUpdateModal(update.type)
-              toast.dismiss(toastId)
-            },
-          },
-        })
-        return
-      }
+      await invoke(JEAN_INSTALL_COMMANDS[update.type], {
+        version: update.latestVersion,
+      })
     }
-
     queryClient.invalidateQueries({
       queryKey: CLI_QUERY_KEY_GETTERS[update.type](),
     })
     useUIStore.getState().dismissCliUpdateNotice(update.type)
-    toast.success(`${cliName} updated to v${update.latestVersion}`, {
-      id: toastId,
-      duration: 5000,
-    })
-  } catch (err) {
-    logger.error('Unexpected background update error', {
+  } catch (error) {
+    const message = String(error)
+    if (
+      message.startsWith('Cannot install') ||
+      message.startsWith('Cannot update')
+    ) {
+      notified?.delete(
+        `${update.type}:${update.currentVersion}→${update.latestVersion}`
+      )
+    }
+    logger.warn('Background CLI update skipped or failed', {
       type: update.type,
-      err,
-    })
-    toast.error(`Failed to update ${cliName}: ${String(err)}`, {
-      id: toastId,
-      duration: Infinity,
+      error: message,
     })
   }
 }
