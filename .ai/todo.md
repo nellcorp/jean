@@ -19,7 +19,7 @@
 - [x] Fast-forward origin/main.
 - [x] Preserve passive badges; remove automatic Jean/server/CLI/Agent Browser notifications.
 - [x] Verify tests, quality gates, visual UI, and jean:dev build.
-- [ ] Review and publish PR.
+- [x] Review and publish PR #20: https://github.com/nellcorp/jean/pull/20
 - [x] Remove stale Web Access bundle reload warning discovered in final notification audit.
 - [x] Focused silent-update tests and desktop/server startup/reload/manual-action E2E tests.
 - [x] agent-browser desktop/mobile screenshots show passive badges only; manual update feedback verified.
