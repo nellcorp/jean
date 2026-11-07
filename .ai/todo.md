@@ -21,7 +21,7 @@
 - [x] Test discovery, missing editor, overrides, and native behavior.
 - [x] Build matching deployed frontend, verify live menu and editor launch.
 - [x] Build jean:dev.
-- [ ] Create PR.
+- [x] Create PR: https://github.com/nellcorp/jean/pull/21
 
 ## Browser editor verification
 - 40 targeted tests pass; typecheck, lint, formatting pass.
