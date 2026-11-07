@@ -3892,7 +3892,7 @@ export const GeneralPane: React.FC<{ scope?: PreferencesPaneScope }> = ({
             {!isNativeApp() && (
               <InlineField
                 label="Web Editor URL"
-                description="Where the bundled browser editor (openvscode-server) is served. Enter a same-origin path such as /code — which is what the Jean docker-compose + Caddy setup exposes — or a full URL like https://host/code. Leave blank to hide the 'Open Editor' entry."
+                description="Where the bundled browser editor (openvscode-server) is served. Enter a same-origin path such as /code — which is what the Jean docker-compose + Caddy setup exposes — or a full URL like https://host/code. Leave blank to detect the bundled editor at /code automatically."
               >
                 <Input
                   className="w-full sm:w-80"

@@ -15,3 +15,17 @@
 - Actual kernel switch and zombie removal intentionally pending scheduled reboot.
 - New-container smoke test passed after containerd-only restart; Jean service uptime unchanged.
 - Two temporary kinaxixi-eng717 application containers vanished during concurrent activity; cause unverified.
+
+# Restore browser editor
+- [x] Detect the bundled editor when its URL preference is missing.
+- [x] Test discovery, missing editor, overrides, and native behavior.
+- [x] Build matching deployed frontend, verify live menu and editor launch.
+- [x] Build jean:dev.
+- [x] Create PR: https://github.com/nellcorp/jean/pull/21
+
+## Browser editor verification
+- 40 targeted tests pass; typecheck, lint, formatting pass.
+- check:all stops at Rust formatting because cargo is not installed; no Rust changes.
+- Live agent-browser: Open Editor opens thorn-urchin; package.json loads; temporary file edited, saved, and verified on disk.
+- Matching deployed frontend hot-installed at /opt/jean/dist without restarting Jean.
+- jean:dev rebuilt from existing runtime image plus patched matching frontend; backend binary preserved.

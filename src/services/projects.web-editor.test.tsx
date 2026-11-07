@@ -56,7 +56,15 @@ describe('web editor', () => {
   })
 
   it('exposes configured browser URLs but hides unavailable and native targets', () => {
-    const { result, rerender } = renderHook(() => useWebEditorUrl())
+    const client = new QueryClient()
+    function wrapper({ children }: { children: ReactNode }) {
+      return (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      )
+    }
+    const { result, rerender } = renderHook(() => useWebEditorUrl(), {
+      wrapper,
+    })
     expect(result.current).toBe('/code/')
     preferences.mockReturnValue({ data: { web_editor_url: '  ' } })
     rerender()

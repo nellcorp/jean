@@ -129,3 +129,6 @@
 
 ## Sync the current base before implementation
 - Fetch and integrate origin/main immediately before starting approved work when the user asks to refresh the base. Reinspect affected paths after the sync.
+
+## Verify settings in the running interface
+- Before giving a settings path, open the actual running UI and verify the control is visible for its native/web and remote connection mode. Source presence alone does not prove availability.

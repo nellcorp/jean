@@ -59,7 +59,6 @@ import {
   hasBackendTransport,
   isNativeApp,
 } from '@/lib/environment'
-import { usePreferences } from './preferences'
 import { openExternal, preOpenWindow } from '@/lib/platform'
 import { shouldSuppressAutoFixConflictNotification } from './worktree-conflict-events'
 import { preserveQueryCacheOnError } from '@/lib/query-error'
@@ -2617,17 +2616,7 @@ export function useOpenWorktreeInTerminal() {
   })
 }
 
-/**
- * Web-mode "Open Editor" target, or null when it is unavailable.
- *
- * The bundled openvscode-server is only reachable when the deployment actually
- * serves it, so the menu entry stays hidden until `web_editor_url` is set.
- */
-export function useWebEditorUrl(): string | null {
-  const { data: preferences } = usePreferences()
-  if (isNativeApp()) return null
-  return (preferences?.web_editor_url ?? '').trim() || null
-}
+export { useWebEditorUrl } from './web-editor'
 
 /**
  * Resolve the URL for the web editor, given an optional user override.
@@ -2664,8 +2653,7 @@ export function buildWebEditorUrl(
  *   Zed, etc.) via the `open_worktree_in_editor` Rust command.
  * - Web (browser / headless Jean): opens the bundled openvscode-server in a
  *   new tab, scoped to the worktree via `?folder=<path>`. The URL prefix is
- *   controlled by the `web_editor_url` preference; menu entries that reach this
- *   path are hidden until it is set (see `useWebEditorUrl`).
+ *   controlled by the `web_editor_url` preference or discovered at /code.
  */
 export function useOpenWorktreeInEditor() {
   const queryClient = useQueryClient()
