@@ -745,6 +745,7 @@ export function useMessageHandlers({
               worktreePath,
               message,
               model: buildModel,
+              backend: sessionBackend,
               executionMode: 'build',
               thinkingLevel: buildThinking,
               effortLevel: useAdaptiveThinkingRef.current
@@ -917,6 +918,7 @@ export function useMessageHandlers({
               worktreePath,
               message,
               model: yoloModel,
+              backend: sessionBackendYolo,
               executionMode: 'yolo',
               thinkingLevel: yoloThinking,
               effortLevel: useAdaptiveThinkingRef.current
@@ -1031,6 +1033,7 @@ export function useMessageHandlers({
         worktreePath,
         message: buildApprovalMsg,
         model: streamBuildModel,
+        backend: streamBuildSessionBackend,
         executionMode: 'build',
         thinkingLevel: streamBuildThinking,
         effortLevel: useAdaptiveThinkingRef.current
@@ -1131,6 +1134,7 @@ export function useMessageHandlers({
         worktreePath,
         message: yoloApprovalMsg,
         model: streamYoloModel,
+        backend: streamYoloSessionBackend,
         executionMode: 'yolo',
         thinkingLevel: streamYoloThinking,
         effortLevel: useAdaptiveThinkingRef.current

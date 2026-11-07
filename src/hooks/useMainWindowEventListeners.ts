@@ -1188,8 +1188,8 @@ export function useMainWindowEventListeners() {
               window.dispatchEvent(
                 new CustomEvent('update-available', { detail: update })
               )
-              // Show the update modal (same as auto-check on startup)
-              useUIStore.getState().setUpdateModalVersion(update.version)
+              // Keep update availability in the title bar.
+              useUIStore.getState().setPendingUpdateVersion(update.version)
             } else {
               commandContext.showToast(
                 'You are running the latest version',

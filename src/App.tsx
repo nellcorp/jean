@@ -73,7 +73,6 @@ import { useZoom } from './hooks/use-zoom'
 import { useExternalDisplayZoomTip } from './hooks/use-external-display-zoom-tip'
 import { useImmediateSessionStateSave } from './hooks/useImmediateSessionStateSave'
 import { useCliVersionCheck } from './hooks/useCliVersionCheck'
-import { useAgentBrowserUpdateCheck } from './hooks/useAgentBrowserUpdateCheck'
 import { useServerUpdateCheck } from './hooks/useServerUpdateCheck'
 import { useCodexCodeModeHostRepair } from './hooks/useCodexCodeModeHostRepair'
 import { useServerQuerySync } from './hooks/useServerQuerySync'
@@ -867,11 +866,8 @@ function App() {
   // Save reviewing/waiting state immediately (no debounce) to ensure persistence on reload
   useImmediateSessionStateSave()
 
-  // Check for CLI updates on startup (shows toast notification if updates available)
+  // Check for CLI updates without interrupting the user.
   useCliVersionCheck()
-
-  // Ask before updating the required Agent Browser integration.
-  useAgentBrowserUpdateCheck()
 
   // Headless jean-server binary updates (Web Access only)
   useServerUpdateCheck()
@@ -1271,7 +1267,7 @@ function App() {
 
           logger.info(`Update available: ${update.version}`)
           pendingUpdateRef.current = update
-          useUIStore.getState().setUpdateModalVersion(update.version)
+          useUIStore.getState().setPendingUpdateVersion(update.version)
         }
       } catch (checkError) {
         logger.error(`Update check failed: ${String(checkError)}`)
@@ -1279,7 +1275,7 @@ function App() {
       }
     }
 
-    // Listen for install trigger from title bar indicator / modal
+    // Listen for explicit installation requests.
     const handleInstallPending = () => {
       const ui = useUIStore.getState()
       const action = resolveInstallPendingAction({

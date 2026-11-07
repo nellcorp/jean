@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { invoke as transportInvoke } from '@/lib/transport'
 import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 import { setWsConnected } from '@/lib/environment'
+import { toast } from 'sonner'
+import { useUIStore } from '@/store/ui-store'
 import { useCliVersionCheck } from './useCliVersionCheck'
 
 const mockState = {
@@ -178,6 +180,12 @@ describe('useCliVersionCheck', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.clearAllMocks()
+    vi.mocked(transportInvoke).mockResolvedValue({})
+    useUIStore.setState({
+      availableCliUpdates: [],
+      cliUpdateModalOpen: false,
+      cliLoginModalOpen: false,
+    })
     mockState.preferences = {
       auto_update_ai_backends: true,
       claude_cli_source: 'jean',
@@ -233,6 +241,44 @@ describe('useCliVersionCheck', () => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown })
       .__TAURI_INTERNALS__
   })
+
+  for (const failure of [
+    null,
+    'network unavailable',
+    'Cannot install while sessions are active',
+  ]) {
+    it(`keeps background updates quiet: ${failure ?? 'success'}`, async () => {
+      if (failure)
+        vi.mocked(transportInvoke).mockRejectedValue(new Error(failure))
+      const wrapper = ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      )
+      renderHook(() => useCliVersionCheck(), { wrapper })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000)
+      })
+      expect(transportInvoke).toHaveBeenCalledWith('install_pi_cli', {
+        version: '1.1.0',
+      })
+      for (const notify of [
+        toast.loading,
+        toast.success,
+        toast.error,
+        toast.info,
+      ]) {
+        expect(notify).not.toHaveBeenCalled()
+      }
+      expect(useUIStore.getState().cliUpdateModalOpen).toBe(false)
+      expect(useUIStore.getState().cliLoginModalOpen).toBe(false)
+      if (failure) {
+        expect(useUIStore.getState().availableCliUpdates).toContainEqual(
+          expect.objectContaining({ type: 'pi', latestVersion: '1.1.0' })
+        )
+      }
+    })
+  }
 
   it('runs mobile-safe CLI updates through the shared transport invoke', async () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
