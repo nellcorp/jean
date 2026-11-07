@@ -1,0 +1,11 @@
+[Unit]
+Description=Jean host post-reboot verification
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+ConditionPathExists=/var/lib/jean-host-maintenance/reboot-requested
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 60
+ExecStart=/usr/local/sbin/jean-host-postboot
+[Install]
+WantedBy=multi-user.target
