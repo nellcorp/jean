@@ -1,18 +1,4 @@
-/**
- * Host update check for remote / Web Access clients (user-triggered install).
- *
- * Two channels from `check_server_update`:
- * - **desktop**: host is native Jean (incl. macOS/Windows). Present the same
- *   modal + sticky title-bar badge as the local Tauri updater. Install asks
- *   the host desktop shell via `apply_server_update` → `host:install-desktop-update`.
- * - **server**: headless jean-server. Sticky title-bar control + toast; apply
- *   replaces the binary and restarts the server.
- *
- * Checks after connecting. Dismissing the toast/modal never loses the sticky
- * badge for the session.
- */
-
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect } from 'react'
 import { toast } from 'sonner'
 import { invoke } from '@/lib/transport'
 import { isLocalBackend } from '@/lib/environment'
@@ -57,7 +43,7 @@ function normalizeStatus(raw: Record<string, unknown>): ServerUpdateStatus {
   }
 }
 
-/** Apply a pending host update (title bar, modal, or toast action). */
+/** Apply a host update requested by the user. */
 export async function applyServerUpdate(version: string): Promise<void> {
   const toastId = toast.loading(`Installing update ${version}...`)
   try {
@@ -85,8 +71,6 @@ export async function applyServerUpdate(version: string): Promise<void> {
 }
 
 export function useServerUpdateCheck() {
-  const toastShownForVersionRef = useRef<string | null>(null)
-
   const presentUpdate = useCallback((status: ServerUpdateStatus) => {
     if (!status.updateAvailable || !status.latestVersion) {
       useUIStore.getState().setPendingServerUpdate(null)
@@ -96,53 +80,20 @@ export function useServerUpdateCheck() {
     const version = status.latestVersion
     const channel = status.channel ?? 'server'
 
-    // Desktop host: reuse native update modal + "Update available" badge.
     if (channel === 'desktop') {
       useUIStore.getState().setPendingServerUpdate(null)
-      // Modal on first offer; sticky badge when user dismisses (handleLater).
-      if (
-        !useUIStore.getState().pendingUpdateVersion &&
-        useUIStore.getState().updateModalVersion !== version
-      ) {
-        useUIStore.getState().setUpdateModalVersion(version)
+      const ui = useUIStore.getState()
+      if (!ui.updateReadyVersion && !ui.isUpdateInstalling) {
+        ui.setPendingUpdateVersion(version)
       }
       return
     }
 
-    // Headless jean-server: sticky title-bar state + toast.
     useUIStore.getState().setPendingServerUpdate({
       latestVersion: version,
       currentVersion: status.currentVersion,
       canUpdate: status.canUpdate,
       reason: status.reason,
-    })
-
-    // One-shot toast per version (optional nudge). Closing it does not clear
-    // pendingServerUpdate — the header badge remains.
-    if (toastShownForVersionRef.current === version) return
-    toastShownForVersionRef.current = version
-
-    if (!status.canUpdate) {
-      toast.info(`jean-server ${version} is available`, {
-        id: 'server-update-available',
-        description:
-          status.reason ||
-          'This host cannot self-update. Replace the binary or image manually.',
-        duration: 12_000,
-      })
-      return
-    }
-
-    toast.info(`jean-server ${version} is available`, {
-      id: 'server-update-available',
-      description: `You are on ${status.currentVersion}. A permanent control stays in the title bar if you dismiss this.`,
-      duration: 12_000,
-      action: {
-        label: 'Update & restart',
-        onClick: () => {
-          void applyServerUpdate(version)
-        },
-      },
     })
   }, [])
 
